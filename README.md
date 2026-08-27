@@ -190,7 +190,10 @@ The probe uses the current directory as the ACP server's primary workspace. The 
 - Local IPC between app and service
 - Reliable process recovery
 
-The first service-layer primitive is in place: `ACPAgentRuntime` owns one ACP subprocess and connection, forwards session updates and stderr, enforces lifecycle state, and reports unexpected process termination. The eventual launch agent can retain one runtime per active Latch session.
+The service layer now has two small primitives:
+
+- `ACPAgentRuntime` owns one ACP subprocess and connection, forwards session updates and stderr, enforces lifecycle state, and reports unexpected process termination.
+- `AgentRuntimeRegistry` reserves stable Latch-local IDs, prevents duplicate launches, supervises multiple runtimes, and supports individual or concurrent shutdown.
 
 ### M2 — paired iPhone client
 

@@ -43,6 +43,10 @@ public actor AgentRuntimeRegistry {
         )
         // Reserve the ID before suspension so concurrent starts cannot launch duplicates.
         runtimes[id] = runtime
+        await runtime.setTerminationHandler { [weak self, weak runtime] _ in
+            guard let runtime else { return }
+            await self?.removeTerminatedRuntime(id: id, runtime: runtime)
+        }
 
         do {
             return try await runtime.start()
@@ -82,5 +86,10 @@ public actor AgentRuntimeRegistry {
                 }
             }
         }
+    }
+
+    private func removeTerminatedRuntime(id: AgentRuntimeID, runtime: ACPAgentRuntime) {
+        guard runtimes[id] === runtime else { return }
+        runtimes[id] = nil
     }
 }

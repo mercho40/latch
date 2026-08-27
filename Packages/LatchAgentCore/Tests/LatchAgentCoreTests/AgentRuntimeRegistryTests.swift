@@ -42,6 +42,41 @@ final class AgentRuntimeRegistryTests: XCTestCase {
         XCTAssertEqual(stoppedSecondState, .stopped)
     }
 
+    func testEvictsRuntimeAfterProcessTermination() async throws {
+        let registry = AgentRuntimeRegistry()
+        let id = AgentRuntimeID("terminating")
+        let script = #"""
+        IFS= read -r line
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}'
+        sleep 0.1
+        exit 7
+        """#
+        let configuration = ACPProcessConfiguration(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", script],
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp")
+        )
+
+        _ = try await registry.start(
+            id: id,
+            configuration: configuration,
+            clientInfo: clientInfo
+        )
+        let runtime = try await registry.runtime(for: id)
+        var events = runtime.events.makeAsyncIterator()
+        let event = await events.next()
+
+        XCTAssertEqual(event, .processTerminated(status: 7))
+        let runtimeIDs = await registry.runtimeIDs()
+        XCTAssertEqual(runtimeIDs, [])
+        do {
+            _ = try await registry.runtime(for: id)
+            XCTFail("Expected terminated runtime to be evicted")
+        } catch let error as AgentRuntimeRegistryError {
+            XCTAssertEqual(error, .runtimeNotFound(id))
+        }
+    }
+
     func testRejectsDuplicateRuntimeID() async throws {
         let registry = AgentRuntimeRegistry()
         let id = AgentRuntimeID("duplicate")

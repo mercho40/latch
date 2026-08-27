@@ -39,6 +39,7 @@ public actor ACPAgentRuntime {
     private var updateTask: Task<Void, Never>?
     private var errorTask: Task<Void, Never>?
     private var terminationTask: Task<Void, Never>?
+    private var terminationHandler: (@Sendable (Int32) async -> Void)?
 
     public init(
         configuration: ACPProcessConfiguration,
@@ -61,6 +62,12 @@ public actor ACPAgentRuntime {
 
     public func state() -> ACPAgentRuntimeState {
         currentState
+    }
+
+    public func setTerminationHandler(
+        _ handler: (@Sendable (Int32) async -> Void)?
+    ) {
+        terminationHandler = handler
     }
 
     @discardableResult
@@ -168,8 +175,7 @@ public actor ACPAgentRuntime {
         currentState = .stopped
     }
 
-    private func processTerminated(status: Int32) {
-        eventContinuation.yield(.processTerminated(status: status))
+    private func processTerminated(status: Int32) async {
         guard currentState != .stopped else { return }
         connectionTask?.cancel()
         updateTask?.cancel()
@@ -180,6 +186,8 @@ public actor ACPAgentRuntime {
         transport = nil
         client = nil
         currentState = .stopped
+        await terminationHandler?(status)
+        eventContinuation.yield(.processTerminated(status: status))
     }
 
     private func cancelForwardingTasks() {

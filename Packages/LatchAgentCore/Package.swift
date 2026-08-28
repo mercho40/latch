@@ -12,15 +12,16 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../LatchACP"),
+        .package(path: "../LatchServiceProtocol"),
     ],
     targets: [
         .target(
             name: "LatchAgentCore",
-            dependencies: ["LatchACP"]
+            dependencies: ["LatchACP", "LatchServiceProtocol"]
         ),
         .testTarget(
             name: "LatchAgentCoreTests",
-            dependencies: ["LatchAgentCore", "LatchACP"]
+            dependencies: ["LatchAgentCore", "LatchACP", "LatchServiceProtocol"]
         ),
     ]
 )

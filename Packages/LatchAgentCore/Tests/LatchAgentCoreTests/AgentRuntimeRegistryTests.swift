@@ -1,5 +1,6 @@
 import Foundation
 import LatchACP
+import LatchServiceProtocol
 import XCTest
 @testable import LatchAgentCore
 
@@ -143,7 +144,7 @@ final class AgentRuntimeRegistryTests: XCTestCase {
         XCTAssertEqual(event, .processTerminated(runtimeID: id, status: 7))
         let encodedEvent = try JSONEncoder().encode(event)
         XCTAssertEqual(
-            try JSONDecoder().decode(AgentRuntimeRegistryEvent.self, from: encodedEvent),
+            try JSONDecoder().decode(LatchAgentEvent.self, from: encodedEvent),
             event
         )
         let runtimeIDs = await registry.runtimeIDs()

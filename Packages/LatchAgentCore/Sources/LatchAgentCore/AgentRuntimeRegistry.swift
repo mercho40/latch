@@ -1,50 +1,24 @@
 import Foundation
 import LatchACP
-
-public struct AgentRuntimeID: Hashable, Codable, Sendable, CustomStringConvertible {
-    public let rawValue: String
-
-    public init(_ rawValue: String) {
-        precondition(!rawValue.isEmpty)
-        self.rawValue = rawValue
-    }
-
-    public var description: String { rawValue }
-}
+import LatchServiceProtocol
 
 public enum AgentRuntimeRegistryError: Error, Equatable, Sendable {
     case duplicateRuntime(AgentRuntimeID)
     case runtimeNotFound(AgentRuntimeID)
 }
 
-public struct AgentRuntimeSnapshot: Codable, Equatable, Sendable {
-    public let id: AgentRuntimeID
-    public let state: ACPAgentRuntimeState
-
-    public init(id: AgentRuntimeID, state: ACPAgentRuntimeState) {
-        self.id = id
-        self.state = state
-    }
-}
-
-public enum AgentRuntimeRegistryEvent: Codable, Equatable, Sendable {
-    case sessionUpdate(runtimeID: AgentRuntimeID, notification: ACPSessionNotification)
-    case standardError(runtimeID: AgentRuntimeID, data: Data)
-    case processTerminated(runtimeID: AgentRuntimeID, status: Int32)
-}
-
 /// Owns the set of ACP runtimes supervised by the Latch Agent process.
 ///
 /// IDs are Latch-local and exist independently of the ACP session ID assigned after startup.
 public actor AgentRuntimeRegistry {
-    public nonisolated let events: AsyncStream<AgentRuntimeRegistryEvent>
+    public nonisolated let events: AsyncStream<LatchAgentEvent>
 
-    private let eventContinuation: AsyncStream<AgentRuntimeRegistryEvent>.Continuation
+    private let eventContinuation: AsyncStream<LatchAgentEvent>.Continuation
     private var runtimes: [AgentRuntimeID: ACPAgentRuntime] = [:]
     private var forwardingTasks: [AgentRuntimeID: [Task<Void, Never>]] = [:]
 
     public init() {
-        let pair = AsyncStream<AgentRuntimeRegistryEvent>.makeStream()
+        let pair = AsyncStream<LatchAgentEvent>.makeStream()
         self.events = pair.stream
         self.eventContinuation = pair.continuation
     }

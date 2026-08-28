@@ -190,10 +190,11 @@ The probe uses the current directory as the ACP server's primary workspace. The 
 - Local IPC between app and service
 - Reliable process recovery
 
-The service layer now has two small primitives:
+The service layer now has three small primitives:
 
 - `ACPAgentRuntime` owns one ACP subprocess and connection, forwards session updates and stderr, enforces lifecycle state, and reports unexpected process termination.
 - `AgentRuntimeRegistry` reserves stable Latch-local IDs, prevents duplicate launches, supervises multiple runtimes, exposes Codable status snapshots and an outbound event stream, evicts terminated processes, and supports individual or concurrent shutdown.
+- `LatchServiceProtocol` defines the shared Codable command, response, event, and launch-profile messages used across the macOS service and native clients.
 
 ### M2 — paired iPhone client
 

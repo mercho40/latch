@@ -60,8 +60,7 @@ final class AgentRuntimeRegistryTests: XCTestCase {
             configuration: sessionConfiguration(),
             clientInfo: clientInfo
         )
-        let runtime = try await registry.runtime(for: id)
-        var updates = runtime.sessionUpdates.makeAsyncIterator()
+        var events = registry.events.makeAsyncIterator()
 
         let session = try await registry.newSession(runtimeID: id, cwd: "/tmp/project")
         XCTAssertEqual(session.sessionId, "session-1")
@@ -69,15 +68,52 @@ final class AgentRuntimeRegistryTests: XCTestCase {
         let promptTask = Task {
             try await registry.prompt(runtimeID: id, text: "Keep working")
         }
-        let update = await updates.next()
-        guard case let .messageChunk(chunk)? = update?.event else {
+        let event = await events.next()
+        guard case let .sessionUpdate(runtimeID, notification)? = event else {
             return XCTFail("Expected prompt progress before cancellation")
+        }
+        XCTAssertEqual(runtimeID, id)
+        guard case let .messageChunk(chunk) = notification.event else {
+            return XCTFail("Expected an agent message chunk")
         }
         XCTAssertEqual(chunk.text, "working")
 
         try await registry.cancelPrompt(runtimeID: id)
         let response = try await promptTask.value
         XCTAssertEqual(response.stopReason, "cancelled")
+        await registry.stopAll()
+    }
+
+    func testForwardsStandardErrorThroughRegistryEvents() async throws {
+        let registry = AgentRuntimeRegistry()
+        let id = AgentRuntimeID("diagnostics")
+        let script = #"""
+        printf 'agent diagnostic\n' >&2
+        while IFS= read -r line; do
+          case "$line" in
+            *\"method\":\"initialize\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}'
+              ;;
+          esac
+        done
+        """#
+        var events = registry.events.makeAsyncIterator()
+
+        _ = try await registry.start(
+            id: id,
+            configuration: ACPProcessConfiguration(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", script],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp")
+            ),
+            clientInfo: clientInfo
+        )
+
+        let event = await events.next()
+        XCTAssertEqual(
+            event,
+            .standardError(runtimeID: id, data: Data("agent diagnostic\n".utf8))
+        )
         await registry.stopAll()
     }
 
@@ -101,11 +137,15 @@ final class AgentRuntimeRegistryTests: XCTestCase {
             configuration: configuration,
             clientInfo: clientInfo
         )
-        let runtime = try await registry.runtime(for: id)
-        var events = runtime.events.makeAsyncIterator()
+        var events = registry.events.makeAsyncIterator()
         let event = await events.next()
 
-        XCTAssertEqual(event, .processTerminated(status: 7))
+        XCTAssertEqual(event, .processTerminated(runtimeID: id, status: 7))
+        let encodedEvent = try JSONEncoder().encode(event)
+        XCTAssertEqual(
+            try JSONDecoder().decode(AgentRuntimeRegistryEvent.self, from: encodedEvent),
+            event
+        )
         let runtimeIDs = await registry.runtimeIDs()
         XCTAssertEqual(runtimeIDs, [])
         do {

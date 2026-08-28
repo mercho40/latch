@@ -27,13 +27,27 @@ public struct AgentRuntimeSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public enum AgentRuntimeRegistryEvent: Codable, Equatable, Sendable {
+    case sessionUpdate(runtimeID: AgentRuntimeID, notification: ACPSessionNotification)
+    case standardError(runtimeID: AgentRuntimeID, data: Data)
+    case processTerminated(runtimeID: AgentRuntimeID, status: Int32)
+}
+
 /// Owns the set of ACP runtimes supervised by the Latch Agent process.
 ///
 /// IDs are Latch-local and exist independently of the ACP session ID assigned after startup.
 public actor AgentRuntimeRegistry {
-    private var runtimes: [AgentRuntimeID: ACPAgentRuntime] = [:]
+    public nonisolated let events: AsyncStream<AgentRuntimeRegistryEvent>
 
-    public init() {}
+    private let eventContinuation: AsyncStream<AgentRuntimeRegistryEvent>.Continuation
+    private var runtimes: [AgentRuntimeID: ACPAgentRuntime] = [:]
+    private var forwardingTasks: [AgentRuntimeID: [Task<Void, Never>]] = [:]
+
+    public init() {
+        let pair = AsyncStream<AgentRuntimeRegistryEvent>.makeStream()
+        self.events = pair.stream
+        self.eventContinuation = pair.continuation
+    }
 
     @discardableResult
     public func start(
@@ -53,17 +67,16 @@ public actor AgentRuntimeRegistry {
         )
         // Reserve the ID before suspension so concurrent starts cannot launch duplicates.
         runtimes[id] = runtime
-        await runtime.setTerminationHandler { [weak self, weak runtime] _ in
+        forwardingTasks[id] = makeForwardingTasks(id: id, runtime: runtime)
+        await runtime.setTerminationHandler { [weak self, weak runtime] status in
             guard let runtime else { return }
-            await self?.removeTerminatedRuntime(id: id, runtime: runtime)
+            await self?.removeTerminatedRuntime(id: id, runtime: runtime, status: status)
         }
 
         do {
             return try await runtime.start()
         } catch {
-            if runtimes[id] === runtime {
-                runtimes[id] = nil
-            }
+            removeRuntimeIfOwned(id: id, runtime: runtime)
             throw error
         }
     }
@@ -112,15 +125,17 @@ public actor AgentRuntimeRegistry {
     }
 
     public func stop(id: AgentRuntimeID) async throws {
-        guard let runtime = runtimes.removeValue(forKey: id) else {
+        guard let runtime = runtimes[id] else {
             throw AgentRuntimeRegistryError.runtimeNotFound(id)
         }
+        removeRuntimeIfOwned(id: id, runtime: runtime)
         await runtime.stop()
     }
 
     public func stopAll() async {
         let ownedRuntimes = Array(runtimes.values)
         runtimes.removeAll()
+        cancelAllForwardingTasks()
         await withTaskGroup(of: Void.self) { group in
             for runtime in ownedRuntimes {
                 group.addTask {
@@ -130,8 +145,42 @@ public actor AgentRuntimeRegistry {
         }
     }
 
-    private func removeTerminatedRuntime(id: AgentRuntimeID, runtime: ACPAgentRuntime) {
+    private func makeForwardingTasks(
+        id: AgentRuntimeID,
+        runtime: ACPAgentRuntime
+    ) -> [Task<Void, Never>] {
+        let updateTask = Task { [eventContinuation] in
+            for await notification in runtime.sessionUpdates {
+                eventContinuation.yield(.sessionUpdate(runtimeID: id, notification: notification))
+            }
+        }
+        let errorTask = Task { [eventContinuation] in
+            for await data in runtime.standardError {
+                eventContinuation.yield(.standardError(runtimeID: id, data: data))
+            }
+        }
+        return [updateTask, errorTask]
+    }
+
+    private func removeTerminatedRuntime(
+        id: AgentRuntimeID,
+        runtime: ACPAgentRuntime,
+        status: Int32
+    ) {
+        guard runtimes[id] === runtime else { return }
+        removeRuntimeIfOwned(id: id, runtime: runtime)
+        eventContinuation.yield(.processTerminated(runtimeID: id, status: status))
+    }
+
+    private func removeRuntimeIfOwned(id: AgentRuntimeID, runtime: ACPAgentRuntime) {
         guard runtimes[id] === runtime else { return }
         runtimes[id] = nil
+        forwardingTasks.removeValue(forKey: id)?.forEach { $0.cancel() }
+    }
+
+    private func cancelAllForwardingTasks() {
+        let tasks = forwardingTasks.values.flatMap { $0 }
+        forwardingTasks.removeAll()
+        tasks.forEach { $0.cancel() }
     }
 }

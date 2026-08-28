@@ -194,7 +194,7 @@ The service layer now has three small primitives:
 
 - `ACPAgentRuntime` owns one ACP subprocess and connection, forwards session updates and stderr, enforces lifecycle state, and reports unexpected process termination.
 - `AgentRuntimeRegistry` reserves stable Latch-local IDs, prevents duplicate launches, supervises multiple runtimes, exposes Codable status snapshots and an outbound event stream, evicts terminated processes, and supports individual or concurrent shutdown.
-- `LatchServiceProtocol` defines the shared Codable command, response, event, and launch-profile messages used across the macOS service and native clients.
+- `LatchServiceProtocol` defines shared Codable commands, responses, events, launch profiles, and versioned request/reply/event envelopes used across the macOS service and native clients.
 - `LatchAgentService` dispatches those transport-neutral commands onto the runtime registry and exposes its single outbound event stream.
 
 ### M2 — paired iPhone client

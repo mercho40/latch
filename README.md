@@ -193,7 +193,7 @@ The probe uses the current directory as the ACP server's primary workspace. The 
 The service layer now has two small primitives:
 
 - `ACPAgentRuntime` owns one ACP subprocess and connection, forwards session updates and stderr, enforces lifecycle state, and reports unexpected process termination.
-- `AgentRuntimeRegistry` reserves stable Latch-local IDs, prevents duplicate launches, supervises multiple runtimes, exposes Codable status snapshots, evicts terminated processes, and supports individual or concurrent shutdown.
+- `AgentRuntimeRegistry` reserves stable Latch-local IDs, prevents duplicate launches, supervises multiple runtimes, exposes Codable status snapshots and an outbound event stream, evicts terminated processes, and supports individual or concurrent shutdown.
 
 ### M2 — paired iPhone client
 

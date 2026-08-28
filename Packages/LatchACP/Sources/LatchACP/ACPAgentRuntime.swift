@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ACPAgentRuntimeState: Equatable, Sendable {
+public enum ACPAgentRuntimeState: String, Codable, Equatable, Sendable {
     case idle
     case starting
     case ready

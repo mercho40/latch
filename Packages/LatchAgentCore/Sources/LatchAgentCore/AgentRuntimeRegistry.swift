@@ -17,6 +17,16 @@ public enum AgentRuntimeRegistryError: Error, Equatable, Sendable {
     case runtimeNotFound(AgentRuntimeID)
 }
 
+public struct AgentRuntimeSnapshot: Codable, Equatable, Sendable {
+    public let id: AgentRuntimeID
+    public let state: ACPAgentRuntimeState
+
+    public init(id: AgentRuntimeID, state: ACPAgentRuntimeState) {
+        self.id = id
+        self.state = state
+    }
+}
+
 /// Owns the set of ACP runtimes supervised by the Latch Agent process.
 ///
 /// IDs are Latch-local and exist independently of the ACP session ID assigned after startup.
@@ -67,6 +77,15 @@ public actor AgentRuntimeRegistry {
 
     public func runtimeIDs() -> [AgentRuntimeID] {
         runtimes.keys.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    public func snapshots() async -> [AgentRuntimeSnapshot] {
+        var result: [AgentRuntimeSnapshot] = []
+        for id in runtimeIDs() {
+            guard let runtime = runtimes[id] else { continue }
+            result.append(AgentRuntimeSnapshot(id: id, state: await runtime.state()))
+        }
+        return result
     }
 
     @discardableResult

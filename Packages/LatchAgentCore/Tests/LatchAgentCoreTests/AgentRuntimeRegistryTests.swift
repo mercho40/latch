@@ -42,6 +42,35 @@ final class AgentRuntimeRegistryTests: XCTestCase {
         XCTAssertEqual(stoppedSecondState, .stopped)
     }
 
+    func testControlsSessionThroughRegistryFacade() async throws {
+        let registry = AgentRuntimeRegistry()
+        let id = AgentRuntimeID("session")
+        _ = try await registry.start(
+            id: id,
+            configuration: sessionConfiguration(),
+            clientInfo: clientInfo
+        )
+        let runtime = try await registry.runtime(for: id)
+        var updates = runtime.sessionUpdates.makeAsyncIterator()
+
+        let session = try await registry.newSession(runtimeID: id, cwd: "/tmp/project")
+        XCTAssertEqual(session.sessionId, "session-1")
+
+        let promptTask = Task {
+            try await registry.prompt(runtimeID: id, text: "Keep working")
+        }
+        let update = await updates.next()
+        guard case let .messageChunk(chunk)? = update?.event else {
+            return XCTFail("Expected prompt progress before cancellation")
+        }
+        XCTAssertEqual(chunk.text, "working")
+
+        try await registry.cancelPrompt(runtimeID: id)
+        let response = try await promptTask.value
+        XCTAssertEqual(response.stopReason, "cancelled")
+        await registry.stopAll()
+    }
+
     func testEvictsRuntimeAfterProcessTermination() async throws {
         let registry = AgentRuntimeRegistry()
         let id = AgentRuntimeID("terminating")
@@ -134,6 +163,32 @@ final class AgentRuntimeRegistryTests: XCTestCase {
 
     private var clientInfo: ACPImplementation {
         ACPImplementation(name: "latch-agent-core-tests", version: "0.1.0")
+    }
+
+    private func sessionConfiguration() -> ACPProcessConfiguration {
+        let script = #"""
+        while IFS= read -r line; do
+          case "$line" in
+            *\"method\":\"initialize\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}'
+              ;;
+            *\"method\":\"session*new\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session-1"}}'
+              ;;
+            *\"method\":\"session*prompt\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}'
+              ;;
+            *\"method\":\"session*cancel\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}'
+              ;;
+          esac
+        done
+        """#
+        return ACPProcessConfiguration(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", script],
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp")
+        )
     }
 
     private func mockConfiguration() -> ACPProcessConfiguration {

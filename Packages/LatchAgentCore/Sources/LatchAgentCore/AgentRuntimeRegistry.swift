@@ -69,6 +69,29 @@ public actor AgentRuntimeRegistry {
         runtimes.keys.sorted { $0.rawValue < $1.rawValue }
     }
 
+    @discardableResult
+    public func newSession(
+        runtimeID: AgentRuntimeID,
+        cwd: String,
+        mcpServers: [ACPJSONValue] = []
+    ) async throws -> ACPNewSessionResponse {
+        let runtime = try runtime(for: runtimeID)
+        return try await runtime.newSession(cwd: cwd, mcpServers: mcpServers)
+    }
+
+    public func prompt(
+        runtimeID: AgentRuntimeID,
+        text: String
+    ) async throws -> ACPPromptResponse {
+        let runtime = try runtime(for: runtimeID)
+        return try await runtime.prompt(text)
+    }
+
+    public func cancelPrompt(runtimeID: AgentRuntimeID) async throws {
+        let runtime = try runtime(for: runtimeID)
+        try await runtime.cancelPrompt()
+    }
+
     public func stop(id: AgentRuntimeID) async throws {
         guard let runtime = runtimes.removeValue(forKey: id) else {
             throw AgentRuntimeRegistryError.runtimeNotFound(id)

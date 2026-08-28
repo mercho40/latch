@@ -24,6 +24,16 @@ final class AgentRuntimeRegistryTests: XCTestCase {
         let second = try await registry.runtime(for: secondID)
         let runtimeIDs = await registry.runtimeIDs()
         XCTAssertEqual(runtimeIDs, [firstID, secondID])
+        let snapshots = await registry.snapshots()
+        XCTAssertEqual(
+            snapshots,
+            [
+                AgentRuntimeSnapshot(id: firstID, state: .ready),
+                AgentRuntimeSnapshot(id: secondID, state: .ready),
+            ]
+        )
+        let encodedSnapshots = try JSONEncoder().encode(snapshots)
+        XCTAssertEqual(try JSONDecoder().decode([AgentRuntimeSnapshot].self, from: encodedSnapshots), snapshots)
         let firstState = await first.state()
         let secondState = await second.state()
         XCTAssertEqual(firstState, .ready)

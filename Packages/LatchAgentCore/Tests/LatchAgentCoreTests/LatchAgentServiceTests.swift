@@ -5,6 +5,51 @@ import XCTest
 @testable import LatchAgentCore
 
 final class LatchAgentServiceTests: XCTestCase {
+    func testHandlesVersionedRequestsAndSanitizesFailures() async {
+        let service = LatchAgentService()
+        let requestID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+
+        let listReply = await service.handle(LatchAgentRequest(
+            requestID: requestID,
+            command: .listRuntimes
+        ))
+        XCTAssertEqual(
+            listReply,
+            LatchAgentReply(requestID: requestID, result: .success(.runtimeList([])))
+        )
+
+        let unsupportedReply = await service.handle(LatchAgentRequest(
+            protocolVersion: LatchServiceProtocolVersion.current + 1,
+            requestID: requestID,
+            command: .listRuntimes
+        ))
+        XCTAssertEqual(
+            unsupportedReply,
+            LatchAgentReply(
+                requestID: requestID,
+                result: .failure(LatchAgentFailure(
+                    code: .unsupportedProtocolVersion,
+                    message: "Unsupported service protocol version."
+                ))
+            )
+        )
+
+        let missingRuntimeReply = await service.handle(LatchAgentRequest(
+            requestID: requestID,
+            command: .stopRuntime(id: AgentRuntimeID("missing"))
+        ))
+        XCTAssertEqual(
+            missingRuntimeReply,
+            LatchAgentReply(
+                requestID: requestID,
+                result: .failure(LatchAgentFailure(
+                    code: .commandFailed,
+                    message: "Runtime not found."
+                ))
+            )
+        )
+    }
+
     func testDispatchesCompleteCancelledPromptLifecycle() async throws {
         let service = LatchAgentService()
         let runtimeID = AgentRuntimeID("service-runtime")

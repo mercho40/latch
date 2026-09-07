@@ -23,6 +23,30 @@ public actor LatchAgentService {
         self.events = registry.events
     }
 
+    public func handle(_ request: LatchAgentRequest) async -> LatchAgentReply {
+        guard request.protocolVersion == LatchServiceProtocolVersion.current else {
+            return LatchAgentReply(
+                requestID: request.requestID,
+                result: .failure(LatchAgentFailure(
+                    code: .unsupportedProtocolVersion,
+                    message: "Unsupported service protocol version."
+                ))
+            )
+        }
+
+        do {
+            return LatchAgentReply(
+                requestID: request.requestID,
+                result: .success(try await execute(request.command))
+            )
+        } catch {
+            return LatchAgentReply(
+                requestID: request.requestID,
+                result: .failure(publicFailure(for: error))
+            )
+        }
+    }
+
     public func execute(_ command: LatchAgentCommand) async throws -> LatchAgentResponse {
         switch command {
         case .listRuntimes:
@@ -56,5 +80,18 @@ public actor LatchAgentService {
 
     public func shutdown() async {
         await registry.stopAll()
+    }
+
+    private func publicFailure(for error: any Error) -> LatchAgentFailure {
+        let message: String
+        switch error {
+        case AgentRuntimeRegistryError.duplicateRuntime:
+            message = "A runtime with this ID already exists."
+        case AgentRuntimeRegistryError.runtimeNotFound:
+            message = "Runtime not found."
+        default:
+            message = "Agent command failed."
+        }
+        return LatchAgentFailure(code: .commandFailed, message: message)
     }
 }

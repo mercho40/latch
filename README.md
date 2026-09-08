@@ -198,8 +198,13 @@ The service layer now has these small primitives:
 - `LatchAgentService` dispatches those transport-neutral commands onto the runtime registry and exposes its single outbound event stream.
 - `LatchServiceCodec` checks JSON payload byte limits before decoding and after encoding.
 - `LatchAgentXPC` (a macOS-only target in `LatchAgentCore`) adapts bounded `Data` requests to versioned service replies. Codec failures use sanitized transport errors; command failures remain in correlated replies.
+- `LatchAgentXPCEventHub` consumes the service event stream once and broadcasts versioned, sequenced events to attached clients. Each client acknowledges delivery, with one event in flight and a configurable per-client queue limit (128 events including the in-flight event by default). Slow clients are disconnected; an unencodable event disconnects all current recipients rather than silently skipping it.
 
-XPC request/reply tests use an anonymous listener within the test process. A mocked ACP lifecycle test verifies launch, session creation, listing during an active prompt, cancellation on the same XPC connection, and shutdown; it observes progress locally, not through XPC events. Production peer authorization, a Mach-service host, event forwarding, and `SMAppService` registration are not implemented yet. The XPC adapter must only be exported after its host authorizes the peer. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
+Start one event hub at service startup. After authorizing a peer, configure its request adapter and transfer the unresumed connection to `attach`; the hub installs its remote event interface and lifecycle handlers, then resumes it. Clients export `LatchAgentXPCEventReceiver` using the hub's interface. The host must explicitly shut down the hub before releasing it.
+
+Events go to clients attached when the hub consumes them; upstream buffered events may predate attachment. There is no replay API. Per-client queues are bounded, but the upstream service stream is not. Shutdown or source completion aborts pending delivery. Clients must treat interruption/invalidation as a stale view; reconciliation and transcript replay are not implemented yet.
+
+XPC tests use anonymous listeners within the test process. A mocked ACP lifecycle test verifies launch, session creation, progress events, listing during an active prompt, cancellation on the same XPC connection, and shutdown. Additional tests cover ordered multi-client delivery, reconnecting after all clients leave, slow-client isolation, oversized events, and abortive teardown. Production peer authorization, a Mach-service host, cross-process validation, and `SMAppService` registration are not implemented yet. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
 
 ### M2 — paired iPhone client
 

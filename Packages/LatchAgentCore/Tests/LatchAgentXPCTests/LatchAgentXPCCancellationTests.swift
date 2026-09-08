@@ -7,12 +7,28 @@ import XCTest
 final class LatchAgentXPCCancellationTests: XCTestCase {
     func testCancelsPendingPromptOnSameXPCConnection() async throws {
         let service = LatchAgentService()
-        let delegate = TestListenerDelegate(adapter: LatchAgentXPCAdapter(service: service))
+        let hub = LatchAgentXPCEventHub(events: service.events)
+        await hub.start()
+        let working = expectation(description: "Agent progress received over XPC")
+        let receiver = TestEventReceiver { envelope in
+            XCTAssertEqual(envelope.protocolVersion, LatchServiceProtocolVersion.current)
+            XCTAssertEqual(envelope.sequence, 1)
+            guard case let .sessionUpdate(id, notification) = envelope.event,
+                  id == AgentRuntimeID("xpc-cancellation"),
+                  case let .messageChunk(chunk) = notification.event,
+                  chunk.text == "working" else {
+                return XCTFail("Unexpected progress event")
+            }
+            working.fulfill()
+        }
+        let delegate = TestListenerDelegate(adapter: LatchAgentXPCAdapter(service: service), eventHub: hub)
         let listener = NSXPCListener.anonymous()
         listener.delegate = delegate
         listener.resume()
         let connection = NSXPCConnection(listenerEndpoint: listener.endpoint)
         connection.remoteObjectInterface = LatchAgentXPCAdapter.interface()
+        connection.exportedInterface = LatchAgentXPCEventHub.interface()
+        connection.exportedObject = receiver
         connection.resume()
         defer {
             connection.invalidate()
@@ -21,17 +37,19 @@ final class LatchAgentXPCCancellationTests: XCTestCase {
         }
 
         do {
-            try await exerciseCancellation(service: service, connection: connection)
+            try await exerciseCancellation(connection: connection, working: working)
         } catch {
+            await hub.shutdown()
             await service.shutdown()
             throw error
         }
+        await hub.shutdown()
         await service.shutdown()
     }
 
     private func exerciseCancellation(
-        service: LatchAgentService,
-        connection: NSXPCConnection
+        connection: NSXPCConnection,
+        working: XCTestExpectation
     ) async throws {
         let runtimeID = AgentRuntimeID("xpc-cancellation")
         let start = try send(.startRuntime(id: runtimeID, profile: ACPCommandProfile(
@@ -54,21 +72,6 @@ final class LatchAgentXPCCancellationTests: XCTestCase {
             XCTAssertEqual(session.sessionId, "session-1")
         }
         await fulfillment(of: [session], timeout: 5)
-
-        // Observe the service locally only to synchronize with the mock agent.
-        // This does not claim to test event forwarding over XPC.
-        let working = expectation(description: "Agent received prompt")
-        let observer = Task {
-            for await event in service.events {
-                guard case let .sessionUpdate(id, notification) = event,
-                      id == runtimeID,
-                      case let .messageChunk(chunk) = notification.event,
-                      chunk.text == "working" else { continue }
-                working.fulfill()
-                return
-            }
-        }
-        defer { observer.cancel() }
 
         let prompt = try send(.prompt(runtimeID: runtimeID, text: "Keep working"), on: connection) { response in
             guard case let .promptCompleted(id, result) = response else {

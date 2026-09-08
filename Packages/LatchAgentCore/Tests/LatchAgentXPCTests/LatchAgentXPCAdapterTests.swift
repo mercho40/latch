@@ -112,16 +112,38 @@ final class LatchAgentXPCAdapterTests: XCTestCase {
 /// Anonymous endpoint used only within this test process; not a production admission policy.
 final class TestListenerDelegate: NSObject, NSXPCListenerDelegate {
     let adapter: LatchAgentXPCAdapter
+    let eventHub: LatchAgentXPCEventHub?
+    let didAttach: @Sendable () -> Void
 
-    init(adapter: LatchAgentXPCAdapter) {
+    init(
+        adapter: LatchAgentXPCAdapter,
+        eventHub: LatchAgentXPCEventHub? = nil,
+        didAttach: @escaping @Sendable () -> Void = {}
+    ) {
         self.adapter = adapter
+        self.eventHub = eventHub
+        self.didAttach = didAttach
         super.init()
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         connection.exportedInterface = LatchAgentXPCAdapter.interface()
         connection.exportedObject = adapter
-        connection.resume()
+        // Objective-C does not mark this callback's argument as sending. After this
+        // handoff the delegate never accesses the accepted connection again.
+        nonisolated(unsafe) let transferredConnection = connection
+        Task { [eventHub, didAttach] in
+            do {
+                if let eventHub {
+                    try await eventHub.attach(transferredConnection)
+                } else {
+                    transferredConnection.resume()
+                }
+                didAttach()
+            } catch {
+                XCTFail("Could not attach XPC events: \(error)")
+            }
+        }
         return true
     }
 }

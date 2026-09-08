@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "LatchAgentCore", targets: ["LatchAgentCore"]),
+        .library(name: "LatchAgentXPC", targets: ["LatchAgentXPC"]),
     ],
     dependencies: [
         .package(path: "../LatchACP"),
@@ -22,6 +23,14 @@ let package = Package(
         .testTarget(
             name: "LatchAgentCoreTests",
             dependencies: ["LatchAgentCore", "LatchACP", "LatchServiceProtocol"]
+        ),
+        .target(
+            name: "LatchAgentXPC",
+            dependencies: ["LatchAgentCore", "LatchServiceProtocol"]
+        ),
+        .testTarget(
+            name: "LatchAgentXPCTests",
+            dependencies: ["LatchAgentXPC", "LatchAgentCore", "LatchServiceProtocol"]
         ),
     ]
 )

@@ -190,12 +190,16 @@ The probe uses the current directory as the ACP server's primary workspace. The 
 - Local IPC between app and service
 - Reliable process recovery
 
-The service layer now has three small primitives:
+The service layer now has these small primitives:
 
 - `ACPAgentRuntime` owns one ACP subprocess and connection, forwards session updates and stderr, enforces lifecycle state, and reports unexpected process termination.
 - `AgentRuntimeRegistry` reserves stable Latch-local IDs, prevents duplicate launches, supervises multiple runtimes, exposes Codable status snapshots and an outbound event stream, evicts terminated processes, and supports individual or concurrent shutdown.
 - `LatchServiceProtocol` defines shared Codable commands, responses, events, launch profiles, and versioned request/reply/event envelopes used across the macOS service and native clients.
 - `LatchAgentService` dispatches those transport-neutral commands onto the runtime registry and exposes its single outbound event stream.
+- `LatchServiceCodec` checks JSON payload byte limits before decoding and after encoding.
+- `LatchAgentXPC` (a macOS-only target in `LatchAgentCore`) adapts bounded `Data` requests to versioned service replies. Codec failures use sanitized transport errors; command failures remain in correlated replies.
+
+XPC request/reply tests use an anonymous listener within the test process. Production peer authorization, a Mach-service host, event forwarding, and `SMAppService` registration are not implemented yet. The XPC adapter must only be exported after its host authorizes the peer. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
 
 ### M2 — paired iPhone client
 

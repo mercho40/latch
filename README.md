@@ -199,7 +199,7 @@ The service layer now has these small primitives:
 - `LatchServiceCodec` checks JSON payload byte limits before decoding and after encoding.
 - `LatchAgentXPC` (a macOS-only target in `LatchAgentCore`) adapts bounded `Data` requests to versioned service replies. Codec failures use sanitized transport errors; command failures remain in correlated replies.
 
-XPC request/reply tests use an anonymous listener within the test process. Production peer authorization, a Mach-service host, event forwarding, and `SMAppService` registration are not implemented yet. The XPC adapter must only be exported after its host authorizes the peer. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
+XPC request/reply tests use an anonymous listener within the test process. A mocked ACP lifecycle test verifies launch, session creation, listing during an active prompt, cancellation on the same XPC connection, and shutdown; it observes progress locally, not through XPC events. Production peer authorization, a Mach-service host, event forwarding, and `SMAppService` registration are not implemented yet. The XPC adapter must only be exported after its host authorizes the peer. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
 
 ### M2 — paired iPhone client
 

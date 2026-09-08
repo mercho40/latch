@@ -110,7 +110,7 @@ final class LatchAgentXPCAdapterTests: XCTestCase {
 }
 
 /// Anonymous endpoint used only within this test process; not a production admission policy.
-private final class TestListenerDelegate: NSObject, NSXPCListenerDelegate {
+final class TestListenerDelegate: NSObject, NSXPCListenerDelegate {
     let adapter: LatchAgentXPCAdapter
 
     init(adapter: LatchAgentXPCAdapter) {

@@ -15,7 +15,7 @@ private let serviceName = "sh.latch.process-probe.service"
 struct LatchXPCProcessProbe {
     static func main() {
         // Bound both fixture processes, including failures before a reply or interruption.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 120) {
             fail("Timed out waiting for cross-process XPC probe")
         }
         if Bundle.main.bundleIdentifier == serviceName {
@@ -57,20 +57,58 @@ struct LatchXPCProcessProbe {
         try require(servicePID > 0 && servicePID != getpid(), "Service did not run in a separate process")
         print("PROCESS: client PID=\(getpid()) service PID=\(servicePID)")
 
+        let live = CommandLine.arguments.contains("--live-codex")
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("latch-process-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
         let id = AgentRuntimeID("cross-process")
-        let start = try await client.request(.startRuntime(id: id, profile: ACPCommandProfile(
-            executablePath: "/bin/sh", arguments: ["-c", mockAgent], workingDirectoryPath: "/tmp"
-        )))
+        // launchd does not inherit the invoking terminal's PATH. Forward only this launch
+        // setting, not the terminal's full environment (which may contain credentials).
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+        let profile = live ? ACPCommandProfile(
+            executablePath: "/usr/bin/env",
+            arguments: ["PATH=\(path)", "INITIAL_AGENT_MODE=read-only", "npx", "-y", "@agentclientprotocol/codex-acp@1.7.0"],
+            workingDirectoryPath: workspace.path
+        ) : ACPCommandProfile(
+            executablePath: "/bin/sh", arguments: ["-c", mockAgent], workingDirectoryPath: workspace.path
+        )
+        let start = try await client.request(.startRuntime(id: id, profile: profile))
         guard case let .runtimeStarted(startedID, initialization) = start else {
             throw ProbeError.failed("Missing runtime-started response")
         }
         try require(startedID == id && initialization.protocolVersion == 1, "Invalid initialization")
-        let session = try await client.request(.newSession(runtimeID: id, cwd: "/tmp"))
+        print("PROCESS: initialized agent=\(initialization.agentInfo?.name ?? "unknown") protocol=\(initialization.protocolVersion)")
+        let session = try await client.request(.newSession(runtimeID: id, cwd: workspace.path))
         guard case let .sessionCreated(sessionID, result) = session else {
             throw ProbeError.failed("Missing session-created response")
         }
-        try require(sessionID == id && result.sessionId == "session-1", "Invalid session")
+        try require(sessionID == id && !result.sessionId.isEmpty, "Invalid session")
+        if !live { try require(result.sessionId == "session-1", "Unexpected mock session") }
 
+        if live {
+            try await exerciseLivePrompt(client: client, receiver: receiver, id: id)
+        } else {
+            try await exerciseMockCancellation(client: client, receiver: receiver, id: id)
+        }
+        let stop = try await client.request(.stopRuntime(id: id))
+        try require(stop == .runtimeStopped(runtimeID: id), "Missing runtime stop")
+        let final = try await client.request(.listRuntimes)
+        try require(final == .runtimeList([]), "Runtime was not removed")
+        print("PROCESS: runtime stopped; registry empty")
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in fail("\(error)") }) as? ProcessProbeProtocol else {
+            throw ProbeError.failed("Missing shutdown proxy")
+        }
+        proxy.shutdown()
+        var interruptions = closed.stream.makeAsyncIterator()
+        _ = await interruptions.next()
+        print("PROCESS: service connection closed after fixture shutdown; PASS")
+    }
+
+    @MainActor private static func exerciseMockCancellation(
+        client: ProbeClient, receiver: ProbeReceiver, id: AgentRuntimeID
+    ) async throws {
         let prompt = Task { try await client.request(.prompt(runtimeID: id, text: "Keep working")) }
         var events = receiver.events.makeAsyncIterator()
         guard let event = await events.next(),
@@ -91,19 +129,41 @@ struct LatchXPCProcessProbe {
             throw ProbeError.failed("Missing prompt completion")
         }
         try require(promptID == id && response.stopReason == "cancelled", "Prompt was not cancelled")
-        let stop = try await client.request(.stopRuntime(id: id))
-        try require(stop == .runtimeStopped(runtimeID: id), "Missing runtime stop")
-        let final = try await client.request(.listRuntimes)
-        try require(final == .runtimeList([]), "Runtime was not removed")
-        print("PROCESS: cancellation completed; runtime stopped; registry empty")
+        print("PROCESS: cancellation completed")
+    }
 
-        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in fail("\(error)") }) as? ProcessProbeProtocol else {
-            throw ProbeError.failed("Missing shutdown proxy")
+    @MainActor private static func exerciseLivePrompt(
+        client: ProbeClient, receiver: ProbeReceiver, id: AgentRuntimeID
+    ) async throws {
+        let expected = "Latch cross-process connected."
+        let reply = try await client.request(.prompt(
+            runtimeID: id, text: "Reply exactly: \(expected) Do not use tools or inspect any files."
+        ))
+        guard case let .promptCompleted(promptID, response) = reply else {
+            throw ProbeError.failed("Missing live prompt completion")
         }
-        proxy.shutdown()
-        var interruptions = closed.stream.makeAsyncIterator()
-        _ = await interruptions.next()
-        print("PROCESS: service connection closed after fixture shutdown; PASS")
+        try require(promptID == id && response.stopReason == "end_turn", "Live prompt did not finish normally")
+        var text = ""
+        var sequence: UInt64 = 0
+        for await envelope in receiver.events {
+            sequence += 1
+            try require(envelope.protocolVersion == LatchServiceProtocolVersion.current && envelope.sequence == sequence, "Out-of-order event envelope")
+            if case let .sessionUpdate(eventID, notification) = envelope.event {
+                try require(eventID == id, "Wrong runtime in session update")
+                switch notification.event {
+                case let .messageChunk(chunk) where chunk.role == .agent:
+                    text += chunk.text ?? ""
+                case .toolCall:
+                    throw ProbeError.failed("No-tools live probe unexpectedly used a tool")
+                default: break
+                }
+            }
+            if text.trimmingCharacters(in: .whitespacesAndNewlines) == expected {
+                print("PROCESS: live assistant=\(expected) events=\(sequence) stopReason=\(response.stopReason)")
+                return
+            }
+        }
+        throw ProbeError.failed("Live event stream ended before the expected assistant text")
     }
 
     private static let mockAgent = #"""

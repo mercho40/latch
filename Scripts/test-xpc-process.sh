@@ -1,6 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--live-codex" ) ]]; then
+    echo 'usage: bash Scripts/test-xpc-process.sh [--live-codex]' >&2
+    exit 2
+fi
+if [[ $# -eq 1 ]]; then
+    echo 'Live Codex mode: uses the local login, network access, and model quota.'
+fi
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 package="$root/Packages/LatchAgentCore"
 swift build --package-path "$package" --product LatchXPCProcessProbe
@@ -41,4 +49,4 @@ PLIST
 
 /usr/bin/codesign --force --sign - "$service"
 /usr/bin/codesign --force --sign - "$app"
-"$app/Contents/MacOS/LatchXPCProcessProbe"
+"$app/Contents/MacOS/LatchXPCProcessProbe" "$@"

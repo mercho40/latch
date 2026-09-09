@@ -224,9 +224,25 @@ On macOS with Xcode selected, run:
 bash Scripts/test-xpc-process.sh
 ```
 
-The script builds `LatchXPCProcessProbe`, assembles an ad-hoc-signed temporary app with an embedded XPC service, and lets macOS launch the service. It asserts distinct client/service PIDs and exercises runtime launch, session creation, a streamed progress event, listing during a pending prompt, cancellation, runtime stop, and service shutdown. Both fixture processes have a 30-second watchdog. The temporary bundle is removed when the script exits.
+The script builds `LatchXPCProcessProbe`, assembles an ad-hoc-signed temporary app with an embedded XPC service, and lets macOS launch the service. It asserts distinct client/service PIDs and exercises runtime launch, session creation, a streamed progress event, listing during a pending prompt, cancellation, runtime stop, and service shutdown. Both fixture processes have a 120-second watchdog. The temporary bundle is removed when the script exits.
 
-This deterministic test uses a shell mock ACP agent, requires no model access, and installs no launch agent. Its same-user admission check and test-only shutdown method are fixture conveniences, not production security policy. It does not test `SMAppService`, notarization, or the native application UI.
+By default this deterministic test uses a shell mock ACP agent and requires no model access. To verify the complete client → separate XPC service → real Codex ACP → streamed client event path, run:
+
+```sh
+bash Scripts/test-xpc-process.sh --live-codex
+```
+
+Live mode uses the local Codex login, network access, and model quota. It launches the pinned adapter in read-only mode in a temporary workspace and verifies `Latch cross-process connected.` with `end_turn`, sequenced events, runtime stop, and service shutdown. Only the invoking terminal's `PATH` is forwarded as a launch setting because launchd does not inherit it; the terminal's full environment is not forwarded.
+
+Neither mode installs a launch agent. The fixture's same-user admission check and test-only shutdown method are not production security policy. These tests do not establish full ACP conformance, live permission-approval behavior, `SMAppService` installation, notarization, or native application UI behavior.
+
+To run every package test, including the separate opt-in XCTest live smoke test:
+
+```sh
+swift test --package-path Packages/LatchACP
+swift test --package-path Packages/LatchServiceProtocol
+LATCH_LIVE_CODEX_TEST=1 swift test --package-path Packages/LatchAgentCore
+```
 
 ### M2 — paired iPhone client
 

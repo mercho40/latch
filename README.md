@@ -204,7 +204,7 @@ Start one event hub at service startup. After authorizing a peer, configure its 
 
 Events go to clients attached when the hub consumes them; upstream buffered events may predate attachment. There is no replay API. Per-client queues are bounded, but the upstream service stream is not. Shutdown or source completion aborts pending delivery. Clients must treat interruption/invalidation as a stale view; reconciliation and transcript replay are not implemented yet.
 
-XPC tests use anonymous listeners within the test process. A mocked ACP lifecycle test verifies launch, session creation, progress events, listing during an active prompt, cancellation on the same XPC connection, and shutdown. Additional tests cover ordered multi-client delivery, reconnecting after all clients leave, slow-client isolation, oversized events, and abortive teardown. Production peer authorization, a Mach-service host, cross-process validation, and `SMAppService` registration are not implemented yet. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
+The XCTest XPC tests use anonymous listeners within the test process. A mocked ACP lifecycle test verifies launch, session creation, progress events, listing during an active prompt, cancellation on the same XPC connection, and shutdown. Additional tests cover ordered multi-client delivery, reconnecting after all clients leave, slow-client isolation, oversized events, and abortive teardown. A separate bundled-service probe validates cross-process XPC (below). Production peer authorization, a Mach-service host, and `SMAppService` registration are not implemented yet. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
 
 #### Live backend smoke test
 
@@ -215,6 +215,18 @@ LATCH_LIVE_CODEX_TEST=1 swift test --package-path Packages/LatchAgentCore --filt
 ```
 
 This opt-in test uses network access and model quota. It launches the pinned Codex ACP adapter (`1.7.0`) in read-only mode in a temporary workspace, creates a session through XPC, verifies the streamed reply `Latch XPC connected.` and contiguous event sequences, then stops the runtime and checks that the registry is empty. It skips during normal test runs. The XPC listener and client are in the same test process; the ACP adapter is a real subprocess. This is not yet an installed-app or separate-service-process test.
+
+#### Separate-process XPC probe
+
+On macOS with Xcode selected, run:
+
+```sh
+bash Scripts/test-xpc-process.sh
+```
+
+The script builds `LatchXPCProcessProbe`, assembles an ad-hoc-signed temporary app with an embedded XPC service, and lets macOS launch the service. It asserts distinct client/service PIDs and exercises runtime launch, session creation, a streamed progress event, listing during a pending prompt, cancellation, runtime stop, and service shutdown. Both fixture processes have a 30-second watchdog. The temporary bundle is removed when the script exits.
+
+This deterministic test uses a shell mock ACP agent, requires no model access, and installs no launch agent. Its same-user admission check and test-only shutdown method are fixture conveniences, not production security policy. It does not test `SMAppService`, notarization, or the native application UI.
 
 ### M2 — paired iPhone client
 

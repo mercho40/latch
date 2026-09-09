@@ -104,6 +104,9 @@ public final class ACPJSONRPCConnection: Sendable {
 
     /// Consumes incoming bytes until the stream closes or a protocol error occurs.
     /// Exactly one task must own this loop for the lifetime of a connection.
+    /// Incoming request handlers run concurrently so human decisions do not block the stream.
+    /// Duplicate active IDs or more than 32 outstanding handlers close the connection.
+    /// Closing cancels handlers; handlers must cooperate with task cancellation.
     public func run() async throws {
         try await core.beginRunning()
         var decoder = ACPFrameDecoder(maximumFrameSize: maximumFrameSize)
@@ -117,7 +120,9 @@ public final class ACPJSONRPCConnection: Sendable {
                         throw ACPJSONRPCConnectionError.oversizedFrame
                     case let .frame(data):
                         if let request = try await core.receive(data) {
-                            await handleIncomingRequest(request)
+                            try await core.startIncomingRequest(request) {
+                                await self.handleIncomingRequest(request)
+                            }
                         }
                     }
                 }
@@ -173,6 +178,7 @@ public final class ACPJSONRPCConnection: Sendable {
 
     private func handleIncomingRequest(_ request: ACPJSONRPCRequest) async {
         let handler = await core.requestHandler()
+        guard !Task.isCancelled else { return }
         let response: ACPJSONValue
 
         guard let handler else {
@@ -196,6 +202,7 @@ public final class ACPJSONRPCConnection: Sendable {
             )
         }
 
+        guard !Task.isCancelled else { return }
         try? await sendBytes(Self.encodeFrame(response))
     }
 
@@ -291,6 +298,7 @@ private extension ACPJSONRPCConnection {
             ACPJSONRPCID: AsyncThrowingStream<ACPJSONValue, Error>.Continuation
         ] = [:]
         private var handler: RequestHandler?
+        private var incomingRequests: [ACPJSONRPCID: Task<Void, Never>] = [:]
         private let notificationContinuation: AsyncStream<ACPJSONRPCNotification>.Continuation
 
         init(notificationContinuation: AsyncStream<ACPJSONRPCNotification>.Continuation) {
@@ -304,6 +312,25 @@ private extension ACPJSONRPCConnection {
                     : ACPJSONRPCConnectionError.closed
             }
             state = .running
+        }
+
+        // A permission handler may wait for a human. Never block responses, notifications,
+        // or EOF behind it. Bound outstanding tasks and cancel them when the stream closes.
+        func startIncomingRequest(
+            _ request: ACPJSONRPCRequest,
+            operation: @escaping @Sendable () async -> Void
+        ) throws {
+            guard state != .closed else { throw ACPJSONRPCConnectionError.closed }
+            guard incomingRequests[request.id] == nil else {
+                throw ACPJSONRPCConnectionError.invalidMessage("Duplicate in-flight request id")
+            }
+            guard incomingRequests.count < 32 else {
+                throw ACPJSONRPCConnectionError.invalidMessage("Too many in-flight requests")
+            }
+            incomingRequests[request.id] = Task {
+                await operation()
+                incomingRequests.removeValue(forKey: request.id)
+            }
         }
 
         func setRequestHandler(_ handler: RequestHandler?) {
@@ -413,6 +440,8 @@ private extension ACPJSONRPCConnection {
                 return
             }
             state = .closed
+            for task in incomingRequests.values { task.cancel() }
+            incomingRequests.removeAll()
             for continuation in pendingRequests.values {
                 continuation.finish(throwing: error)
             }

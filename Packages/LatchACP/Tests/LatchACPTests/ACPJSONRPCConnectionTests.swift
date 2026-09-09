@@ -161,6 +161,74 @@ final class ACPJSONRPCConnectionTests: XCTestCase {
         _ = try await runTask.value
     }
 
+    func testWaitingServerRequestDoesNotBlockResponsesNotificationsOrEOF() async throws {
+        let server = MockACPServer { message in
+            guard case let .object(object) = message, let id = object["id"] else { return nil }
+            return .object(["jsonrpc": .string("2.0"), "id": id, "result": .string("done")])
+        }
+        let connection = makeConnection(server: server)
+        let started = expectation(description: "Permission handler waiting")
+        let cancelled = expectation(description: "EOF cancels permission handler")
+        await connection.setRequestHandler { _ in
+            started.fulfill()
+            do { try await Task.sleep(for: .seconds(60)) }
+            catch { cancelled.fulfill() }
+            return .null
+        }
+        let run = Task { try await connection.run() }
+        await server.send(.object([
+            "jsonrpc": .string("2.0"), "id": .string("permission"),
+            "method": .string("session/request_permission"),
+        ]))
+        await fulfillment(of: [started], timeout: 2)
+        let responded = expectation(description: "Response while handler waits")
+        let request = Task {
+            let result: String = try await connection.request("probe")
+            XCTAssertEqual(result, "done")
+            responded.fulfill()
+        }
+        let notified = expectation(description: "Notification while handler waits")
+        let notifications = Task {
+            for await notification in connection.notifications {
+                XCTAssertEqual(notification.method, "session/update")
+                notified.fulfill()
+                break
+            }
+        }
+        await server.send(.object(["jsonrpc": .string("2.0"), "method": .string("session/update")]))
+        await fulfillment(of: [responded, notified], timeout: 2)
+        await server.finish()
+        _ = try await run.value
+        await fulfillment(of: [cancelled], timeout: 2)
+        request.cancel()
+        notifications.cancel()
+    }
+
+    func testDuplicateAndExcessiveIncomingRequestsCloseConnection() async throws {
+        for ids in [["same", "same"], (0..<33).map { String($0) }] {
+            let server = MockACPServer()
+            let connection = makeConnection(server: server)
+            await connection.setRequestHandler { _ in
+                try await Task.sleep(for: .seconds(60))
+                return .null
+            }
+            let run = Task { try await connection.run() }
+            for id in ids {
+                await server.send(.object([
+                    "jsonrpc": .string("2.0"), "id": .string(id), "method": .string("permission"),
+                ]))
+            }
+            do {
+                try await run.value
+                XCTFail("Expected request admission failure")
+            } catch let error as ACPJSONRPCConnectionError {
+                XCTAssertEqual(error, .invalidMessage(ids.count == 2
+                    ? "Duplicate in-flight request id" : "Too many in-flight requests"))
+            }
+            await server.finish()
+        }
+    }
+
     private func makeConnection(server: MockACPServer) -> ACPJSONRPCConnection {
         ACPJSONRPCConnection(incoming: server.clientIncoming) { data in
             await server.receive(data)

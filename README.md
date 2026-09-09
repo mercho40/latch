@@ -206,7 +206,9 @@ For example, with Node/npm on your terminal's `PATH` and a local Codex login:
 /usr/bin/env INITIAL_AGENT_MODE=read-only npx -y @agentclientprotocol/codex-acp@1.7.0
 ```
 
-Commands support quotes and backslash escaping, not shell expansion or pipelines. Nothing launches until you press Connect. This preview hosts `LatchAgentService` in-process, not over XPC, and requests agent shutdown on disconnect/quit. It has no persistence, background-service installation, or permission-approval UI. ACP permission requests are cancelled; this is not a sandbox guarantee. The current transport requests termination but does not yet force-kill an unresponsive process.
+Commands support quotes and backslash escaping, not shell expansion or pipelines. Nothing launches until you press Connect. This preview hosts `LatchAgentService` in-process, not over XPC, and requests agent shutdown on disconnect/quit. It has no persistence or background-service installation. The current transport requests termination but does not yet force-kill an unresponsive process.
+
+Permission requests during the active prompt appear in native sheets with selectable, scrollable agent-provided request details. Only explicitly offered, known ACP option kinds can be selected. Return and Escape cancel the request; approval has no default shortcut. “Always” uses the agent's scope, not a saved Latch preference. Pending decisions are cancelled on prompt completion, Cancel, Disconnect, agent exit, or quit; stale sheet callbacks cannot approve a different request. Requests outside the active session/prompt, duplicate option IDs, and requests beyond the 16-decision queue limit are cancelled. These controls are not a sandbox guarantee; agents must still enforce their own restrictions. Real-provider approval flows have not yet been validated.
 
 Verify the preview without model access:
 
@@ -215,7 +217,7 @@ swift test --package-path Apps/LatchMac
 swift run --package-path Apps/LatchMac Latch --smoke-test
 ```
 
-The smoke test opens a real window, exercises AppKit controls with a mock ACP agent, and quits. It does not automate the folder picker or establish visual/accessibility conformance. `Apps/LatchMac` is a standalone Swift package preview; the eventual Xcode application project is still pending.
+The smoke test opens a real window, exercises AppKit controls and permission sheets (including Escape dismissal and explicit approval) with mock ACP agents, and quits. It does not automate the folder picker or establish visual/accessibility conformance. `Apps/LatchMac` is a standalone Swift package preview; the eventual Xcode application project is still pending.
 
 The service layer now has these small primitives:
 

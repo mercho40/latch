@@ -190,6 +190,33 @@ The probe uses the current directory as the ACP server's primary workspace. The 
 - Local IPC between app and service
 - Reliable process recovery
 
+#### Native UI preview
+
+Run the single-window AppKit preview:
+
+```sh
+swift run --package-path Apps/LatchMac Latch
+```
+
+Choose a workspace folder, enter an absolute ACP executable and its arguments, and connect. The window provides a selectable streamed transcript, multiline composer, Send (⌘ Return), Cancel, and Disconnect. Standard AppKit controls, system colors, and fonts follow macOS appearance; there is no web view or JavaScript UI.
+
+For example, with Node/npm on your terminal's `PATH` and a local Codex login:
+
+```text
+/usr/bin/env INITIAL_AGENT_MODE=read-only npx -y @agentclientprotocol/codex-acp@1.7.0
+```
+
+Commands support quotes and backslash escaping, not shell expansion or pipelines. Nothing launches until you press Connect. This preview hosts `LatchAgentService` in-process, not over XPC, and requests agent shutdown on disconnect/quit. It has no persistence, background-service installation, or permission-approval UI. ACP permission requests are cancelled; this is not a sandbox guarantee. The current transport requests termination but does not yet force-kill an unresponsive process.
+
+Verify the preview without model access:
+
+```sh
+swift test --package-path Apps/LatchMac
+swift run --package-path Apps/LatchMac Latch --smoke-test
+```
+
+The smoke test opens a real window, exercises AppKit controls with a mock ACP agent, and quits. It does not automate the folder picker or establish visual/accessibility conformance. `Apps/LatchMac` is a standalone Swift package preview; the eventual Xcode application project is still pending.
+
 The service layer now has these small primitives:
 
 - `ACPAgentRuntime` owns one ACP subprocess and connection, forwards session updates and stderr, enforces lifecycle state, and reports unexpected process termination.

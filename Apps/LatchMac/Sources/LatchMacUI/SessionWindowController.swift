@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 final class SessionWindowController: NSWindowController, NSTextViewDelegate, NSTextFieldDelegate {
     private let model = SessionModel()
+    private var permissionAlert: (id: UUID, alert: NSAlert, escapeMonitor: Any?)?
     private var workspace: URL?
     private let command = NSTextField(string: "")
     private let folder = NSButton(title: "Choose Folder…", target: nil, action: nil)
@@ -142,7 +143,7 @@ final class SessionWindowController: NSWindowController, NSTextViewDelegate, NST
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let actions = row([hint, spacer, cancel, send])
         root.addArrangedSubview(actions)
-        let footer = NSTextField(wrappingLabelWithString: "Local preview · Quit requests agent shutdown. Permission requests are declined; agent-side restrictions still apply.")
+        let footer = NSTextField(wrappingLabelWithString: "Local preview · Quit requests agent shutdown. Permissions require your decision; agent-side restrictions still apply.")
         footer.font = .systemFont(ofSize: 11)
         footer.textColor = .secondaryLabelColor
         root.addArrangedSubview(footer)
@@ -174,6 +175,7 @@ final class SessionWindowController: NSWindowController, NSTextViewDelegate, NST
     }
 
     private func refresh() {
+        refreshPermission()
         let disconnected = model.phase == .disconnected
         folder.isEnabled = disconnected
         command.isEnabled = disconnected
@@ -193,6 +195,55 @@ final class SessionWindowController: NSWindowController, NSTextViewDelegate, NST
             let length = (transcript.string as NSString).length
             if atBottom { transcript.scrollRangeToVisible(NSRange(location: length, length: 0)) }
             else if NSMaxRange(selection) <= length { transcript.setSelectedRange(selection) }
+        }
+    }
+
+    private func refreshPermission() {
+        guard let window else { return }
+        let pending = model.permissions.current
+        if let existing = permissionAlert {
+            if existing.id != pending?.id { window.endSheet(existing.alert.window, returnCode: .abort) }
+            return
+        }
+        guard let pending else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Agent requests permission"
+        alert.informativeText = "Review the agent-provided tool details below. “Always” uses the agent’s scope, not a saved Latch preference. Cancelling this request does not sandbox the agent."
+        // Return and Escape both cancel. No approval receives a default key equivalent.
+        alert.addButton(withTitle: "Cancel Request").keyEquivalent = "\r"
+        for option in pending.options { alert.addButton(withTitle: option.permissionLabel!).keyEquivalent = "" }
+        let details = NSTextView()
+        details.isEditable = false
+        details.isSelectable = true
+        details.isRichText = false
+        details.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        details.setAccessibilityLabel("Agent-provided permission request details")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(pending.request), let text = String(data: data, encoding: .utf8) else {
+            model.permissions.resolve(id: pending.id, optionID: nil)
+            return
+        }
+        details.string = text
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 220))
+        scroll.borderType = .bezelBorder
+        configureTextView(details, in: scroll)
+        alert.accessoryView = scroll
+        let escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak alert] event in
+            guard let alert, event.window === alert.window, event.keyCode == 53 else { return event }
+            alert.buttons.first?.performClick(nil)
+            return nil
+        }
+        permissionAlert = (pending.id, alert, escapeMonitor)
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+            guard let self, self.permissionAlert?.id == pending.id else { return }
+            self.permissionAlert = nil
+            let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue - 1
+            let optionID = pending.options.indices.contains(index) ? pending.options[index].optionId : nil
+            self.model.permissions.resolve(id: pending.id, optionID: optionID)
+            self.refreshPermission()
         }
     }
 
@@ -256,6 +307,37 @@ final class SessionWindowController: NSWindowController, NSTextViewDelegate, NST
         connect.performClick(nil)
         try await wait { self.model.phase == .disconnected }
         guard model.errorMessage == nil else { throw SmokeError.failed(model.errorMessage!) }
+
+        // Exercise safe default dismissal and explicit selection using the actual sheet buttons.
+        for (buttonIndex, result) in [(-1, "permission cancelled"), (-2, "permission cancelled"), (0, "permission cancelled"), (1, "permission selected")] {
+            command.stringValue = "/bin/sh -c '" + SmokeAgent.permissionScript.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            refresh()
+            connect.performClick(nil)
+            try await wait { self.model.phase == .ready }
+            prompt.string = "Read example.txt"
+            refresh()
+            send.performClick(nil)
+            try await wait { self.permissionAlert != nil }
+            guard let alert = permissionAlert?.alert,
+                  alert.buttons.first?.keyEquivalent == "\r",
+                  alert.buttons.dropFirst().allSatisfy({ $0.keyEquivalent.isEmpty }) else {
+                throw SmokeError.failed("Approval must not be a default action")
+            }
+            if buttonIndex < 0 {
+                try await wait { NSApp.keyWindow === alert.window }
+                let character = buttonIndex == -1 ? "\u{1b}" : "\r"
+                let key = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: alert.window.windowNumber, context: nil,
+                    characters: character, charactersIgnoringModifiers: character,
+                    isARepeat: false, keyCode: buttonIndex == -1 ? 53 : 36
+                )!
+                NSApp.sendEvent(key)
+            } else { alert.buttons[buttonIndex].performClick(nil) }
+            try await wait { self.model.phase == .ready && self.model.transcript.contains(result) && self.permissionAlert == nil }
+            connect.performClick(nil)
+            try await wait { self.model.phase == .disconnected }
+        }
     }
 
     private func wait(_ condition: () -> Bool) async throws {

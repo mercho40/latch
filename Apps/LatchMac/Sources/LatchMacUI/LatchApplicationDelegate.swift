@@ -20,7 +20,7 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate {
             Task {
                 do {
                     try await controller.smokeTest()
-                    print("UI SMOKE: AppKit window, connect, streamed transcript, cancel, disconnect — PASS")
+                    print("UI SMOKE: AppKit window, connect, streamed transcript, cancel, disconnect, permission sheets — PASS")
                     NSApp.terminate(nil)
                 } catch {
                     await controller.shutdown()

@@ -206,6 +206,16 @@ Events go to clients attached when the hub consumes them; upstream buffered even
 
 XPC tests use anonymous listeners within the test process. A mocked ACP lifecycle test verifies launch, session creation, progress events, listing during an active prompt, cancellation on the same XPC connection, and shutdown. Additional tests cover ordered multi-client delivery, reconnecting after all clients leave, slow-client isolation, oversized events, and abortive teardown. Production peer authorization, a Mach-service host, cross-process validation, and `SMAppService` registration are not implemented yet. A reply-encoding failure can occur after a command executes, so clients must not blindly retry mutations.
 
+#### Live backend smoke test
+
+With Node/npm available on `PATH` and a working local Codex login, run:
+
+```sh
+LATCH_LIVE_CODEX_TEST=1 swift test --package-path Packages/LatchAgentCore --filter LatchAgentXPCLiveTests
+```
+
+This opt-in test uses network access and model quota. It launches the pinned Codex ACP adapter (`1.7.0`) in read-only mode in a temporary workspace, creates a session through XPC, verifies the streamed reply `Latch XPC connected.` and contiguous event sequences, then stops the runtime and checks that the registry is empty. It skips during normal test runs. The XPC listener and client are in the same test process; the ACP adapter is a real subprocess. This is not yet an installed-app or separate-service-process test.
+
 ### M2 — paired iPhone client
 
 - Bonjour discovery and secure pairing

@@ -1,0 +1,30 @@
+// Local development app. Developer ID signing and notarization are not configured yet.
+PRODUCT_NAME = Latch
+PRODUCT_BUNDLE_IDENTIFIER = sh.latch.mac
+MARKETING_VERSION = 0.0.0
+CURRENT_PROJECT_VERSION = 1
+MACOSX_DEPLOYMENT_TARGET = 15.0
+SDKROOT = macosx
+SUPPORTED_PLATFORMS = macosx
+SWIFT_VERSION = 6.0
+
+// Arbitrary ACP executables and workspace access require an unsandboxed host.
+ENABLE_APP_SANDBOX = NO
+ENABLE_HARDENED_RUNTIME = YES
+// Ad-hoc signatures have no Team ID for loading Xcode's separate debug dylib.
+// Keep library validation enabled and link the AppKit entry point into the executable.
+ENABLE_DEBUG_DYLIB = NO
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+OTHER_CODE_SIGN_FLAGS = $(inherited) --options runtime
+
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_KEY_CFBundleDisplayName = Latch
+INFOPLIST_KEY_LSApplicationCategoryType = public.app-category.developer-tools
+INFOPLIST_KEY_NSPrincipalClass = NSApplication
+INFOPLIST_KEY_NSHumanReadableCopyright = Copyright © 2026 Latch contributors
+
+CLANG_ENABLE_MODULES = YES
+CLANG_ENABLE_OBJC_ARC = YES
+ENABLE_STRICT_OBJC_MSGSEND = YES
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks

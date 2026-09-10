@@ -192,7 +192,11 @@ The probe uses the current directory as the ACP server's primary workspace. The 
 
 #### Native UI preview
 
-Run the single-window AppKit preview:
+Open `Apps/LatchMac/Latch.xcodeproj`, select the shared **Latch** scheme, and Run to build the macOS application. The target reuses the same entry point and `LatchMacUI` Swift package as the command-line preview; there is no separate UI implementation.
+
+The local-development app uses bundle ID `sh.latch.mac`, requires macOS 15, and is ad-hoc signed with hardened runtime enabled and App Sandbox disabled. No signing account is required. Version `0.0.0` is a development placeholder, not a release. Developer ID distribution, notarization, an app icon, iOS targets, and background-service embedding remain pending.
+
+The SwiftPM preview is still available:
 
 ```sh
 swift run --package-path Apps/LatchMac Latch
@@ -217,7 +221,19 @@ swift test --package-path Apps/LatchMac
 swift run --package-path Apps/LatchMac Latch --smoke-test
 ```
 
-The smoke test opens a real window, exercises AppKit controls and permission sheets (including Escape dismissal and explicit approval) with mock ACP agents, and quits. It does not automate the folder picker or establish visual/accessibility conformance. `Apps/LatchMac` is a standalone Swift package preview; the eventual Xcode application project is still pending.
+The smoke test opens a real window, exercises AppKit controls and permission sheets (including Escape dismissal and explicit approval) with mock ACP agents, and quits. It does not automate the folder picker or establish visual/accessibility conformance. Package unit tests remain in SwiftPM; the shared application scheme does not yet contain an Xcode test target.
+
+Build and verify the actual app bundle with the active Xcode toolchain:
+
+```sh
+bash Scripts/test-mac-app.sh
+bash Scripts/test-mac-app.sh --release
+open .build/LatchMacApp/Build/Products/Debug/Latch.app
+```
+
+These scripts check bundle metadata, the ad-hoc signature, hardened runtime, and absence of the sandbox entitlement, then run the app's mock-agent smoke test. Nothing is installed or registered as a background service. The built apps remain under `.build/LatchMacApp/Build/Products/{Debug,Release}`.
+
+The bundle smoke runs its executable directly with the terminal environment. Finder, Dock, and Xcode launches do not necessarily inherit your shell's `PATH`; use absolute agent/runtime paths or an explicit wrapper for tools installed through a version manager. The `npx` example above assumes a terminal-provided `PATH`, not a Finder launch.
 
 The service layer now has these small primitives:
 

@@ -4,7 +4,10 @@ import PackageDescription
 let package = Package(
     name: "LatchMac",
     platforms: [.macOS(.v15)],
-    products: [.executable(name: "Latch", targets: ["Latch"])],
+    products: [
+        .library(name: "LatchMacUI", targets: ["LatchMacUI"]),
+        .executable(name: "Latch", targets: ["Latch"]),
+    ],
     dependencies: [
         .package(path: "../../Packages/LatchACP"),
         .package(path: "../../Packages/LatchAgentCore"),

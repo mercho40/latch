@@ -57,6 +57,8 @@ public enum LatchAgentCommand: Codable, Equatable, Sendable {
     case startRuntime(id: AgentRuntimeID, profile: ACPCommandProfile)
     case stopRuntime(id: AgentRuntimeID)
     case newSession(runtimeID: AgentRuntimeID, cwd: String)
+    case setSessionConfigOption(runtimeID: AgentRuntimeID, configID: String, value: String)
+    case setSessionModel(runtimeID: AgentRuntimeID, modelID: String)
     case prompt(runtimeID: AgentRuntimeID, text: String)
     case cancelPrompt(runtimeID: AgentRuntimeID)
 }
@@ -66,6 +68,8 @@ public enum LatchAgentResponse: Codable, Equatable, Sendable {
     case runtimeStarted(runtimeID: AgentRuntimeID, initialization: ACPInitializeResponse)
     case runtimeStopped(runtimeID: AgentRuntimeID)
     case sessionCreated(runtimeID: AgentRuntimeID, session: ACPNewSessionResponse)
+    case sessionConfigOptionSet(runtimeID: AgentRuntimeID, response: ACPSetSessionConfigOptionResponse)
+    case sessionModelSet(runtimeID: AgentRuntimeID, sequence: UInt64)
     case promptCompleted(runtimeID: AgentRuntimeID, response: ACPPromptResponse)
     case promptCancellationRequested(runtimeID: AgentRuntimeID)
 }

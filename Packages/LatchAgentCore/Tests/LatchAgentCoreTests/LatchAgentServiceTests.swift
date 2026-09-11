@@ -83,9 +83,31 @@ final class LatchAgentServiceTests: XCTestCase {
             newSession,
             .sessionCreated(
                 runtimeID: runtimeID,
-                session: ACPNewSessionResponse(sessionId: "session-1")
+                session: ACPNewSessionResponse(sessionId: "session-1", localSequence: 2)
             )
         )
+
+        let configRequest = LatchAgentRequest(command: .setSessionConfigOption(
+            runtimeID: runtimeID, configID: "effort", value: "high"
+        ))
+        let configReply = await service.handle(configRequest)
+        XCTAssertEqual(configReply, LatchAgentReply(
+            requestID: configRequest.requestID,
+            result: .success(.sessionConfigOptionSet(
+                runtimeID: runtimeID,
+                response: ACPSetSessionConfigOptionResponse(configOptions: [
+                    .object(["id": .string("effort"), "currentValue": .string("high")]),
+                ], localSequence: 3)
+            ))
+        ))
+        let modelRequest = LatchAgentRequest(command: .setSessionModel(
+            runtimeID: runtimeID, modelID: "model-b"
+        ))
+        let modelReply = await service.handle(modelRequest)
+        XCTAssertEqual(modelReply, LatchAgentReply(
+            requestID: modelRequest.requestID,
+            result: .success(.sessionModelSet(runtimeID: runtimeID, sequence: 4))
+        ))
 
         let promptTask = Task {
             try await service.execute(.prompt(runtimeID: runtimeID, text: "Keep working"))
@@ -95,6 +117,7 @@ final class LatchAgentServiceTests: XCTestCase {
             return XCTFail("Expected a streamed session update")
         }
         XCTAssertEqual(eventRuntimeID, runtimeID)
+        XCTAssertEqual(notification.localSequence, 5)
         guard case let .messageChunk(chunk) = notification.event else {
             return XCTFail("Expected an agent message chunk")
         }
@@ -127,11 +150,17 @@ final class LatchAgentServiceTests: XCTestCase {
             *\"method\":\"session*new\"*)
               printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session-1"}}'
               ;;
+            *\"method\":\"session*set_config_option\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"effort","currentValue":"high"}]}}'
+              ;;
+            *\"method\":\"session*set_model\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{}}'
+              ;;
             *\"method\":\"session*prompt\"*)
               printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}'
               ;;
             *\"method\":\"session*cancel\"*)
-              printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}'
+              printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"stopReason":"cancelled"}}'
               ;;
           esac
         done

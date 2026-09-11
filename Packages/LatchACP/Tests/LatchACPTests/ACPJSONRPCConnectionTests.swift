@@ -63,7 +63,8 @@ final class ACPJSONRPCConnectionTests: XCTestCase {
             notification,
             ACPJSONRPCNotification(
                 method: "session/update",
-                params: .object(["text": .string("hello")])
+                params: .object(["text": .string("hello")]),
+                sequence: 1
             )
         )
 

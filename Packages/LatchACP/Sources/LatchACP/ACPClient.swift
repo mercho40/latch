@@ -111,19 +111,22 @@ public struct ACPNewSessionResponse: Codable, Equatable, Sendable {
     public let models: ACPJSONValue?
     public let configOptions: [ACPJSONValue]?
     public let meta: ACPJSONValue?
+    public let localSequence: UInt64?
 
     public init(
         sessionId: String,
         modes: ACPJSONValue? = nil,
         models: ACPJSONValue? = nil,
         configOptions: [ACPJSONValue]? = nil,
-        meta: ACPJSONValue? = nil
+        meta: ACPJSONValue? = nil,
+        localSequence: UInt64? = nil
     ) {
         self.sessionId = sessionId
         self.modes = modes
         self.models = models
         self.configOptions = configOptions
         self.meta = meta
+        self.localSequence = localSequence
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -131,7 +134,18 @@ public struct ACPNewSessionResponse: Codable, Equatable, Sendable {
         case modes
         case models
         case configOptions
+        case localSequence
         case meta = "_meta"
+    }
+}
+
+public struct ACPSetSessionConfigOptionResponse: Codable, Equatable, Sendable {
+    public let configOptions: [ACPJSONValue]
+    public let localSequence: UInt64?
+
+    public init(configOptions: [ACPJSONValue], localSequence: UInt64? = nil) {
+        self.configOptions = configOptions
+        self.localSequence = localSequence
     }
 }
 
@@ -169,6 +183,17 @@ public actor ACPClient {
         let mcpServers: [ACPJSONValue]
     }
 
+    private struct SetSessionConfigOptionRequest: Encodable {
+        let sessionId: String
+        let configId: String
+        let value: String
+    }
+
+    private struct SetSessionModelRequest: Encodable {
+        let sessionId: String
+        let modelId: String
+    }
+
     private struct PromptRequest: Encodable {
         let sessionId: String
         let prompt: [ACPJSONValue]
@@ -201,7 +226,9 @@ public actor ACPClient {
                 guard notification.method == "session/update", let params = notification.params else {
                     continue
                 }
-                if let update = try? params.decode(ACPSessionNotification.self) {
+                if let update = try? Self.decodeSessionValue(
+                    params, sequence: notification.sequence, as: ACPSessionNotification.self
+                ) {
                     pair.continuation.yield(update)
                 }
             }
@@ -259,12 +286,54 @@ public actor ACPClient {
     ) async throws -> ACPNewSessionResponse {
         try requireInitialized()
         let request = NewSessionRequest(cwd: cwd, mcpServers: mcpServers)
-        let response: ACPNewSessionResponse = try await connection.request(
+        let received = try await connection.requestWithSequence(
             "session/new",
-            params: try ACPJSONValue.encode(request)
+            params: try ACPJSONValue.encode(request),
+            as: ACPJSONValue.self
+        )
+        let response = try Self.decodeSessionValue(
+            received.response, sequence: received.sequence, as: ACPNewSessionResponse.self
         )
         activeSessionID = response.sessionId
         return response
+    }
+
+    public func setSessionConfigOption(
+        configID: String,
+        value: String
+    ) async throws -> ACPSetSessionConfigOptionResponse {
+        try requireInitialized()
+        guard let activeSessionID else {
+            throw ACPClientError.noActiveSession
+        }
+        let request = SetSessionConfigOptionRequest(
+            sessionId: activeSessionID,
+            configId: configID,
+            value: value
+        )
+        let received = try await connection.requestWithSequence(
+            "session/set_config_option",
+            params: try ACPJSONValue.encode(request),
+            as: ACPJSONValue.self
+        )
+        return try Self.decodeSessionValue(
+            received.response, sequence: received.sequence, as: ACPSetSessionConfigOptionResponse.self
+        )
+    }
+
+    @discardableResult
+    public func setSessionModel(modelID: String) async throws -> UInt64 {
+        try requireInitialized()
+        guard let activeSessionID else {
+            throw ACPClientError.noActiveSession
+        }
+        let request = SetSessionModelRequest(sessionId: activeSessionID, modelId: modelID)
+        let received = try await connection.requestWithSequence(
+            "session/set_model",
+            params: try ACPJSONValue.encode(request),
+            as: EmptyResponse.self
+        )
+        return received.sequence
     }
 
     public func prompt(_ text: String) async throws -> ACPPromptResponse {
@@ -322,6 +391,20 @@ public actor ACPClient {
             throw ACPClientError.initializeRequired
         }
         return response.agentCapabilities
+    }
+
+    /// Replace untrusted wire metadata before decoding (including ill-typed forged values).
+    /// Normal Codable decoding remains lossless for trusted service/XPC round-trips.
+    private nonisolated static func decodeSessionValue<Value: Decodable>(
+        _ value: ACPJSONValue,
+        sequence: UInt64,
+        as type: Value.Type
+    ) throws -> Value {
+        guard case var .object(object) = value else {
+            return try value.decode(type)
+        }
+        object["localSequence"] = try ACPJSONValue.encode(sequence)
+        return try ACPJSONValue.object(object).decode(type)
     }
 
     private func requireInitialized() throws {

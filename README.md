@@ -202,7 +202,7 @@ The SwiftPM preview is still available:
 swift run --package-path Apps/LatchMac Latch
 ```
 
-Choose a workspace folder, enter an absolute ACP executable and its arguments, and connect. The window provides a selectable streamed transcript, multiline composer, Send (⌘ Return), Cancel, and Disconnect. Standard AppKit controls, system colors, and fonts follow macOS appearance; there is no web view or JavaScript UI.
+Choose a workspace folder, select an agent or enter a custom ACP command, and connect. The native chat shows right-aligned user messages, left-aligned assistant replies, compact tool updates, and collapsed diagnostics. Messages remain selectable and individually copyable; Edit → Copy Conversation copies the retained transcript, including diagnostics. Fenced code uses a monospaced font; full Markdown rendering is not implemented. Streaming follows the bottom unless you scroll up, with Jump to Latest to return. The rounded composer sends on Return or ⌘ Return, inserts a newline on Shift Return, and includes model/effort pickers and a Stop button while working. Connection settings tuck away after connecting and reopen with Settings. History is bounded to 400 messages / 200,000 text characters and is not persisted. System colors and fonts follow macOS appearance; there is no web view or JavaScript UI.
 
 For example, with Node/npm on your terminal's `PATH` and a local Codex login:
 
@@ -213,6 +213,8 @@ For example, with Node/npm on your terminal's `PATH` and a local Codex login:
 Commands support quotes and backslash escaping, not shell expansion or pipelines. Nothing launches until you press Connect. This preview hosts `LatchAgentService` in-process, not over XPC, and requests agent shutdown on disconnect/quit. It has no persistence or background-service installation. The current transport requests termination but does not yet force-kill an unresponsive process.
 
 Permission requests during the active prompt appear in native sheets with selectable, scrollable agent-provided request details. Only explicitly offered, known ACP option kinds can be selected. Return and Escape cancel the request; approval has no default shortcut. “Always” uses the agent's scope, not a saved Latch preference. Pending decisions are cancelled on prompt completion, Cancel, Disconnect, agent exit, or quit; stale sheet callbacks cannot approve a different request. Requests outside the active session/prompt, duplicate option IDs, and requests beyond the 16-decision queue limit are cancelled. These controls are not a sandbox guarantee; agents must still enforce their own restrictions. Real-provider approval flows have not yet been validated.
+
+Model and Effort pop-ups inside the composer use the connected agent's advertised ACP `configOptions` (including grouped model lists), with legacy `models` / `session/set_model` support when needed. No model names or effort levels are hard-coded. Changing a model refreshes the full option set, including supported effort levels; unsupported settings are disabled. Picks are confirmed by the agent, errors keep the last confirmed selection, and controls are disabled during prompts or pending changes. Configuration is session-local, follows agent updates, and is cleared on disconnect. Mock tests cover these paths; real-provider model/effort switching has not yet been validated.
 
 Verify the preview without model access:
 

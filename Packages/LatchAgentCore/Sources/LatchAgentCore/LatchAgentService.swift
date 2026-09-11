@@ -68,6 +68,18 @@ public actor LatchAgentService {
             let session = try await registry.newSession(runtimeID: runtimeID, cwd: cwd)
             return .sessionCreated(runtimeID: runtimeID, session: session)
 
+        case let .setSessionConfigOption(runtimeID, configID, value):
+            let response = try await registry.setSessionConfigOption(
+                runtimeID: runtimeID,
+                configID: configID,
+                value: value
+            )
+            return .sessionConfigOptionSet(runtimeID: runtimeID, response: response)
+
+        case let .setSessionModel(runtimeID, modelID):
+            let sequence = try await registry.setSessionModel(runtimeID: runtimeID, modelID: modelID)
+            return .sessionModelSet(runtimeID: runtimeID, sequence: sequence)
+
         case let .prompt(runtimeID, text):
             let response = try await registry.prompt(runtimeID: runtimeID, text: text)
             return .promptCompleted(runtimeID: runtimeID, response: response)

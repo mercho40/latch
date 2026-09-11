@@ -19,6 +19,8 @@ final class LatchAgentMessagesTests: XCTestCase {
             .newSession(runtimeID: id, cwd: "/tmp/project"),
             .prompt(runtimeID: id, text: "Hello"),
             .cancelPrompt(runtimeID: id),
+            .setSessionConfigOption(runtimeID: id, configID: "effort", value: "high"),
+            .setSessionModel(runtimeID: id, modelID: "model-b"),
         ]
 
         for command in commands {
@@ -41,13 +43,20 @@ final class LatchAgentMessagesTests: XCTestCase {
             .runtimeStopped(runtimeID: id),
             .sessionCreated(
                 runtimeID: id,
-                session: ACPNewSessionResponse(sessionId: "session-1")
+                session: ACPNewSessionResponse(sessionId: "session-1", localSequence: 2)
             ),
             .promptCompleted(
                 runtimeID: id,
                 response: ACPPromptResponse(stopReason: "end_turn")
             ),
             .promptCancellationRequested(runtimeID: id),
+            .sessionConfigOptionSet(
+                runtimeID: id,
+                response: ACPSetSessionConfigOptionResponse(configOptions: [
+                    .object(["id": .string("effort"), "currentValue": .string("high")]),
+                ], localSequence: 3)
+            ),
+            .sessionModelSet(runtimeID: id, sequence: 4),
         ]
 
         for response in responses {
@@ -65,7 +74,8 @@ final class LatchAgentMessagesTests: XCTestCase {
                     "type": .string("text"),
                     "text": .string("hello"),
                 ]),
-            ])
+            ]),
+            localSequence: 5
         )
         let events: [LatchAgentEvent] = [
             .sessionUpdate(runtimeID: id, notification: notification),

@@ -85,6 +85,21 @@ public actor AgentRuntimeRegistry {
         return try await runtime.newSession(cwd: cwd, mcpServers: mcpServers)
     }
 
+    public func setSessionConfigOption(
+        runtimeID: AgentRuntimeID,
+        configID: String,
+        value: String
+    ) async throws -> ACPSetSessionConfigOptionResponse {
+        let runtime = try runtime(for: runtimeID)
+        return try await runtime.setSessionConfigOption(configID: configID, value: value)
+    }
+
+    @discardableResult
+    public func setSessionModel(runtimeID: AgentRuntimeID, modelID: String) async throws -> UInt64 {
+        let runtime = try runtime(for: runtimeID)
+        return try await runtime.setSessionModel(modelID: modelID)
+    }
+
     public func prompt(
         runtimeID: AgentRuntimeID,
         text: String

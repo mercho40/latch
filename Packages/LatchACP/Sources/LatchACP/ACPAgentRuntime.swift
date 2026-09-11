@@ -141,6 +141,26 @@ public actor ACPAgentRuntime {
         return try await client.newSession(cwd: cwd, mcpServers: mcpServers)
     }
 
+    public func setSessionConfigOption(
+        configID: String,
+        value: String
+    ) async throws -> ACPSetSessionConfigOptionResponse {
+        try requireReady()
+        guard let client else {
+            throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState)
+        }
+        return try await client.setSessionConfigOption(configID: configID, value: value)
+    }
+
+    @discardableResult
+    public func setSessionModel(modelID: String) async throws -> UInt64 {
+        try requireReady()
+        guard let client else {
+            throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState)
+        }
+        return try await client.setSessionModel(modelID: modelID)
+    }
+
     public func prompt(_ text: String) async throws -> ACPPromptResponse {
         try requireReady()
         guard let client else {

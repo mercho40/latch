@@ -47,9 +47,13 @@ public struct ACPJSONRPCNotification: Equatable, Sendable {
     public let method: String
     public let params: ACPJSONValue?
 
-    public init(method: String, params: ACPJSONValue? = nil) {
+    /// Connection-local ingress order; zero denotes a manually constructed notification.
+    public let sequence: UInt64
+
+    public init(method: String, params: ACPJSONValue? = nil, sequence: UInt64 = 0) {
         self.method = method
         self.params = params
+        self.sequence = sequence
     }
 }
 
@@ -144,6 +148,15 @@ public final class ACPJSONRPCConnection: Sendable {
         params: ACPJSONValue? = nil,
         as resultType: Result.Type = Result.self
     ) async throws -> Result {
+        try await requestWithSequence(method, params: params, as: resultType).response
+    }
+
+    /// Returns the response and its connection-local ingress sequence, assigned before delivery.
+    public func requestWithSequence<Result: Decodable & Sendable>(
+        _ method: String,
+        params: ACPJSONValue? = nil,
+        as resultType: Result.Type = Result.self
+    ) async throws -> (response: Result, sequence: UInt64) {
         let pending = try await core.makePendingRequest(method: method, params: params)
 
         do {
@@ -168,7 +181,7 @@ public final class ACPJSONRPCConnection: Sendable {
             }
         }
 
-        return try value.decode(resultType)
+        return (try value.response.decode(resultType), value.sequence)
     }
 
     public func notify(_ method: String, params: ACPJSONValue? = nil) async throws {
@@ -279,10 +292,12 @@ private extension ACPJSONRPCID {
 }
 
 private extension ACPJSONRPCConnection {
+    typealias SequencedResponse = (response: ACPJSONValue, sequence: UInt64)
+
     struct PendingRequest: Sendable {
         let id: ACPJSONRPCID
         let message: ACPJSONValue
-        let responses: AsyncThrowingStream<ACPJSONValue, Error>
+        let responses: AsyncThrowingStream<SequencedResponse, Error>
     }
 
     actor Core {
@@ -294,8 +309,9 @@ private extension ACPJSONRPCConnection {
 
         private var state = State.idle
         private var nextRequestID: Int64 = 1
+        private var ingressSequence: UInt64 = 0
         private var pendingRequests: [
-            ACPJSONRPCID: AsyncThrowingStream<ACPJSONValue, Error>.Continuation
+            ACPJSONRPCID: AsyncThrowingStream<SequencedResponse, Error>.Continuation
         ] = [:]
         private var handler: RequestHandler?
         private var incomingRequests: [ACPJSONRPCID: Task<Void, Never>] = [:]
@@ -351,7 +367,7 @@ private extension ACPJSONRPCConnection {
 
             let id = ACPJSONRPCID.integer(nextRequestID)
             nextRequestID += 1
-            let pair = AsyncThrowingStream<ACPJSONValue, Error>.makeStream()
+            let pair = AsyncThrowingStream<SequencedResponse, Error>.makeStream()
             pendingRequests[id] = pair.continuation
 
             return PendingRequest(
@@ -373,6 +389,8 @@ private extension ACPJSONRPCConnection {
         }
 
         func receive(_ data: Data) throws -> ACPJSONRPCRequest? {
+            // One counter for every frame, before any response/notification is delivered.
+            ingressSequence += 1
             let value: ACPJSONValue
             do {
                 value = try JSONDecoder().decode(ACPJSONValue.self, from: data)
@@ -393,7 +411,7 @@ private extension ACPJSONRPCConnection {
                 }
 
                 notificationContinuation.yield(
-                    ACPJSONRPCNotification(method: method, params: object["params"])
+                    ACPJSONRPCNotification(method: method, params: object["params"], sequence: ingressSequence)
                 )
                 return nil
             }
@@ -430,7 +448,7 @@ private extension ACPJSONRPCConnection {
                 return nil
             }
 
-            continuation.yield(result)
+            continuation.yield((response: result, sequence: ingressSequence))
             continuation.finish()
             return nil
         }

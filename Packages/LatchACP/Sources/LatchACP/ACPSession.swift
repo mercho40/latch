@@ -31,15 +31,24 @@ public struct ACPSessionNotification: Codable, Equatable, Sendable {
     public let update: ACPJSONValue
     public let meta: ACPJSONValue?
 
-    public init(sessionId: String, update: ACPJSONValue, meta: ACPJSONValue? = nil) {
+    public let localSequence: UInt64?
+
+    public init(
+        sessionId: String,
+        update: ACPJSONValue,
+        meta: ACPJSONValue? = nil,
+        localSequence: UInt64? = nil
+    ) {
         self.sessionId = sessionId
         self.update = update
         self.meta = meta
+        self.localSequence = localSequence
     }
 
     private enum CodingKeys: String, CodingKey {
         case sessionId
         case update
+        case localSequence
         case meta = "_meta"
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 
 struct ChatMessage: Identifiable, Equatable, Sendable {
     enum Role: Equatable, Sendable {
-        case user, assistant, tool, diagnostics
+        case user, assistant, tool
     }
 
     let id: UUID
@@ -39,7 +39,6 @@ struct ChatHistory: Sendable {
             case .user: label = "You"
             case .assistant: label = "Agent"
             case .tool: label = "Tool"
-            case .diagnostics: label = "Agent diagnostics"
             }
             return "\(label)\n\(message.text)"
         }.joined(separator: "\n\n")
@@ -55,10 +54,6 @@ struct ChatHistory: Sendable {
 
     mutating func appendAssistant(_ text: String) {
         append(text, role: .assistant)
-    }
-
-    mutating func appendDiagnostics(_ text: String) {
-        append(text, role: .diagnostics)
     }
 
     mutating func updateTool(toolCallID: String, title: String?, status: String?) {

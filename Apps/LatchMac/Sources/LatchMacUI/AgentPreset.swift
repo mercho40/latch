@@ -14,6 +14,15 @@ enum AgentPreset: String, CaseIterable {
         }
     }
 
+    /// Suggestion is filesystem-only; the session controller connects the selected harness.
+    static func suggested(in environment: AgentLaunchEnvironment) -> AgentPreset {
+        let installed: [(AgentPreset, String)] = [
+            (.fx, "fx"), (.codex, "codex-acp"), (.claudeCode, "claude-agent-acp"),
+            (.openCode, "opencode"), (.codex, "codex"), (.claudeCode, "claude"),
+        ]
+        return installed.first { environment.executable(named: $0.1) != nil }?.0 ?? .fx
+    }
+
     func recipe(in environment: AgentLaunchEnvironment) -> AgentLaunchRecipe? {
         switch self {
         case .fx:
@@ -22,10 +31,10 @@ enum AgentPreset: String, CaseIterable {
             AgentLaunchRecipe(command: "opencode acp", setup: "Install OpenCode and configure its provider login.")
         case .codex:
             adapter("codex-acp", package: "@agentclientprotocol/codex-acp@1.7.0",
-                    setup: "Uses the Codex ACP adapter, not the interactive codex command. Sign in with codex login.", in: environment)
+                    setup: "Sign in with codex login. First connection requires Node.js with npm and internet access.", in: environment)
         case .claudeCode:
             adapter("claude-agent-acp", package: "@agentclientprotocol/claude-agent-acp@0.76.0",
-                    setup: "Uses the Claude Code ACP adapter (Node.js 22+), not the interactive claude command. Set up your Claude login first.", in: environment)
+                    setup: "Set up your Claude login. Node.js 22+ is required; first connection needs internet access.", in: environment)
         case .custom: nil
         }
     }
@@ -34,21 +43,21 @@ enum AgentPreset: String, CaseIterable {
         if environment.executable(named: executable) != nil {
             return AgentLaunchRecipe(command: executable, setup: setup)
         }
-        return AgentLaunchRecipe(command: "npx --yes \(package)", setup: setup, downloadPackage: package)
+        return AgentLaunchRecipe(command: "npx --yes \(package)", setup: setup, requiresNode: true)
     }
 }
 
 struct AgentLaunchRecipe {
     let command: String
     let setup: String
-    var downloadPackage: String? = nil
+    var requiresNode = false
 
     func problem(in environment: AgentLaunchEnvironment) -> String? {
-        if downloadPackage != nil, environment.executable(named: "node") == nil {
-            return "Node.js is required for this adapter. Install Node.js, then click Refresh."
+        if requiresNode, environment.executable(named: "node") == nil || environment.executable(named: "npx") == nil {
+            return "Install Node.js 22+ with npm, then click Refresh."
         }
         guard let parsed = try? AgentCommand(command), environment.executable(named: parsed.executable) != nil else {
-            return "Required executable not found. \(downloadPackage == nil ? setup : "Install Node.js with npm, then click Refresh.")"
+            return "\(setup) Then click Refresh."
         }
         return nil
     }

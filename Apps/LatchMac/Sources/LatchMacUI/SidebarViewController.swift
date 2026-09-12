@@ -12,11 +12,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private(set) var workspaces: [Workspace] = []
     var onSelect: ((SessionViewController?) -> Void)?
-    var onNewSession: (() -> Void)?
 
     let outline = NSOutlineView()
     private let scroll = NSScrollView()
-    private let newSession = NSButton(title: "New Session", image: NSImage(systemSymbolName: "plus", accessibilityDescription: nil)!, target: nil, action: nil)
 
     var selectedSession: SessionViewController? {
         outline.item(atRow: outline.selectedRow) as? SessionViewController
@@ -46,37 +44,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scroll.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
 
-        newSession.bezelStyle = .accessoryBarAction
-        newSession.imagePosition = .imageLeading
-        newSession.alignment = .left
-        newSession.isBordered = false
-        newSession.font = .systemFont(ofSize: 13)
-        newSession.contentTintColor = .secondaryLabelColor
-        newSession.target = self
-        newSession.action = #selector(createSession)
-        newSession.toolTip = "Choose a workspace folder and open a session in it (⌘N)"
-        newSession.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(newSession)
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(separator)
-
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            separator.topAnchor.constraint(equalTo: scroll.bottomAnchor),
-            separator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            newSession.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 6),
-            newSession.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-            newSession.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -14),
-            newSession.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
-
-    @objc private func createSession() { onNewSession?() }
 
     // MARK: Mutations
 
@@ -166,7 +140,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard let session = item as? SessionViewController else { return nil }
         let identifier = NSUserInterfaceItemIdentifier("session")
         let cell = outlineView.makeView(withIdentifier: identifier, owner: nil) as? SessionCellView ?? SessionCellView(identifier: identifier)
-        cell.configure(title: session.sessionTitle, phase: session.model.phase, status: session.model.status)
+        cell.configure(title: session.sessionTitle, phase: session.model.phase, status: session.displayStatus)
         return cell
     }
 

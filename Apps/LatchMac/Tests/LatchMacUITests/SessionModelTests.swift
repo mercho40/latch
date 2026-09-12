@@ -44,28 +44,33 @@ final class SessionModelTests: XCTestCase {
         await model.disconnect()
     }
 
-    @MainActor func testDisconnectsWhileAgentNeverFinishesInitialization() async {
+    @MainActor func testDisconnectsWhileAgentNeverFinishesInitialization() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("received-initialize")
         let model = SessionModel()
-        let waiting = expectation(description: "Agent started but is not answering initialize")
         let finished = expectation(description: "Interrupted connect returns")
-        model.onChange = {
-            if model.transcript.contains("waiting") {
-                waiting.fulfill()
-                model.onChange = nil
-            }
-        }
+        // A private marker confirms the child has read initialize, without using chat diagnostics.
+        let script = "IFS= read -r line; printf ready > " + AgentCommand.quotedArgument(marker.path)
+            + "; while IFS= read -r line; do :; done"
         let attempt = Task {
             await model.connect(
-                command: "/bin/sh -c 'printf waiting >&2; while IFS= read -r line; do :; done'",
-                workspace: URL(fileURLWithPath: "/tmp")
+                command: "/bin/sh -c " + AgentCommand.quotedArgument(script),
+                workspace: directory
             )
             finished.fulfill()
         }
-        await fulfillment(of: [waiting], timeout: 5)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !FileManager.default.fileExists(atPath: marker.path), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "Agent did not receive initialize")
         XCTAssertEqual(model.phase, .connecting)
+        XCTAssertTrue(model.messages.isEmpty)
         await model.disconnect()
         await fulfillment(of: [finished], timeout: 5)
-        attempt.cancel()
+        await attempt.value
         XCTAssertEqual(model.phase, .disconnected)
         XCTAssertNil(model.errorMessage)
     }

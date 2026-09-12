@@ -52,30 +52,31 @@ final class ChatMessageTests: XCTestCase {
         XCTAssertEqual(history.messages.map(\.text), ["next turn", "answer"])
 
         // Even an invisible role change interrupts the previous assistant message.
-        history.appendDiagnostics("\t")
+        history.appendUser("\t")
         history.appendAssistant("new answer")
         XCTAssertEqual(history.messages.map(\.text), ["next turn", "answer", "new answer"])
-        history.appendDiagnostics("\n")
-        history.appendAssistant("  ")
-        history.appendDiagnostics("warning")
-        XCTAssertEqual(history.messages.last?.text, "warning")
+        history.appendUser("\n")
         history.appendAssistant("  ")
         history.updateTool(toolCallID: "read", title: "Read", status: "pending")
+        XCTAssertTrue(history.pendingWhitespace.isEmpty)
         history.appendAssistant("done")
         XCTAssertEqual(history.messages.last?.text, "done")
-        history.appendDiagnostics("\t")
+        let doneID = history.messages.last?.id
         history.updateTool(toolCallID: "read", title: nil, status: "completed")
-        history.appendDiagnostics("finished")
+        history.appendAssistant("finished")
         XCTAssertEqual(history.messages.last?.text, "finished")
+        XCTAssertNotEqual(history.messages.last?.id, doneID)
 
+        history.appendUser("")
         history.appendAssistant("  ")
         history.appendUser("")
         history.appendAssistant("fresh")
         XCTAssertEqual(history.messages.last?.text, "fresh")
-        history.appendDiagnostics("  ")
+        history.appendUser("")
+        history.appendAssistant("  ")
         history.reset()
         XCTAssertTrue(history.pendingWhitespace.isEmpty)
-        history.appendDiagnostics("reset")
+        history.appendAssistant("reset")
         XCTAssertEqual(history.messages.map(\.text), ["reset"])
     }
 
@@ -116,23 +117,6 @@ final class ChatMessageTests: XCTestCase {
         XCTAssertEqual(history.messages.last?.text, "read-2 · updated")
     }
 
-    func testDiagnosticsAreSeparateAndEmptyRowsIgnored() throws {
-        var history = ChatHistory()
-        history.appendUser("")
-        history.appendAssistant(" \n")
-        history.appendDiagnostics("")
-        XCTAssertTrue(history.messages.isEmpty)
-        history.appendAssistant("answer")
-        history.appendDiagnostics("warning")
-        let id = try XCTUnwrap(history.messages.last).id
-        history.appendDiagnostics(" details")
-        history.appendAssistant("more")
-        XCTAssertEqual(history.messages.map(\.role), [.assistant, .diagnostics, .assistant])
-        XCTAssertEqual(history.messages[1].id, id)
-        XCTAssertEqual(history.messages[1].text, "warning details")
-        XCTAssertTrue(history.transcript.contains("Agent diagnostics\nwarning details"))
-    }
-
     func testCountBoundAndEvictedToolMetadata() throws {
         var history = ChatHistory()
         history.updateTool(toolCallID: "old", title: "Old title", status: "pending")
@@ -165,42 +149,50 @@ final class ChatMessageTests: XCTestCase {
         XCTAssertEqual(history.messages.first?.text, "big · updated")
     }
 
-    @MainActor func testACPEventsAndConnectResetDisconnectRetention() async throws {
+    @MainActor func testStderrDoesNotEnterHistorySplitChunksOrEvictMessagesAndLifecycleRetention() async throws {
         // Extend the existing owned-process fixture without modifying it.
         let extraEvents = #"""
+          sleep 0.1
+          printf 'stderr sentinel\n' >&2
+          /usr/bin/awk 'BEGIN { for (i = 0; i < 250001; i++) printf "x"; printf "\n" }' >&2
+          sleep 0.1
           printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" more"}}}}'
           printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"read-1","title":"Read file","status":"pending"}}}'
           printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"read-1","status":"completed"}}}'
-          printf 'diagnostic sentinel' >&2
         """#
         let lines = SmokeAgent.script.components(separatedBy: "\n")
         var extended = lines
         let chunkIndex = try XCTUnwrap(lines.firstIndex { $0.contains("agent_message_chunk") })
         extended.insert(extraEvents, at: chunkIndex + 1)
-        let command = "/bin/sh -c '" + extended.joined(separator: "\n").replacingOccurrences(of: "'", with: "'\\''") + "'"
+        // Startup stderr must not create chat/Copy Conversation content either.
+        let script = "printf 'startup stderr sentinel\\n' >&2\n" + extended.joined(separator: "\n")
+        let command = "/bin/sh -c '" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let model = SessionModel()
         await model.connect(command: command, workspace: URL(fileURLWithPath: "/tmp"))
         XCTAssertEqual(model.phase, .ready)
+        XCTAssertTrue(model.messages.isEmpty)
+        XCTAssertTrue(model.transcript.isEmpty)
         var firstAssistantID: UUID?
         model.onChange = {
             if firstAssistantID == nil {
                 firstAssistantID = model.messages.first { $0.role == .assistant }?.id
             }
         }
-        let prompt = Task { await model.send("Go") }
+        // Leave little history headroom: even a small stderr entry would evict this turn.
+        let userText = String(repeating: "u", count: ChatHistory.maximumTextCount - 100)
+        let prompt = Task { await model.send(userText) }
         let deadline = ContinuousClock.now + .seconds(5)
-        while !(model.messages.contains { $0.text == "Read file · completed" }
-                && model.messages.contains { $0.role == .diagnostics && $0.text.contains("diagnostic sentinel") }),
+        while !model.messages.contains(where: { $0.text == "Read file · completed" }),
               ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertEqual(model.messages.first?.role, .user)
-        XCTAssertEqual(model.messages.first?.text, "Go")
-        // stderr and protocol events have independent arrival order.
-        XCTAssertEqual(model.messages.filter { $0.role == .assistant }.map(\.text).joined(), "working more")
+        XCTAssertEqual(model.messages.map(\.role), [.user, .assistant, .tool])
+        XCTAssertEqual(model.messages.map(\.text), [userText, "working more", "Read file · completed"])
+        XCTAssertNotNil(firstAssistantID)
         XCTAssertEqual(model.messages.first { $0.role == .assistant }?.id, firstAssistantID)
-        XCTAssertEqual(model.messages.filter { $0.role == .tool }.map(\.text), ["Read file · completed"])
-        XCTAssertTrue(model.messages.contains { $0.role == .diagnostics && $0.text.contains("diagnostic sentinel") })
+        // transcript is the Copy Conversation source; no pasteboard mutation is needed.
+        XCTAssertEqual(model.transcript, "You\n\(userText)\n\nAgent\nworking more\n\nTool\nRead file · completed")
+        XCTAssertNil(model.errorMessage)
         await model.cancel()
         let finished = expectation(description: "Cancelled prompt returns")
         let waiter = Task { await prompt.value; finished.fulfill() }

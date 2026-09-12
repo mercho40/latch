@@ -39,7 +39,6 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         window.toolbar = toolbar
 
         sidebar.onSelect = { [weak self] session in self?.show(session) }
-        sidebar.onNewSession = { [weak self] in self?.newSession(nil) }
         detail.onNewSession = { [weak self] in self?.newSession(nil) }
         show(nil)
         window.center()
@@ -64,8 +63,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
     }
 
     @discardableResult
-    func addSession(workspace: URL) -> SessionViewController {
-        let session = SessionViewController(workspace: workspace)
+    func addSession(workspace: URL, launchEnvironment: AgentLaunchEnvironment? = nil) -> SessionViewController {
+        let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment)
         session.onChange = { [weak self] in self?.sessionChanged() }
         sidebar.add(session)
         return session
@@ -139,8 +138,12 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         guard sidebar.outline.numberOfRows == 0, detail.children.isEmpty, window?.title == "Latch" else {
             throw SmokeError.failed("Expected an empty sidebar and detail before any session")
         }
-        let first = addSession(workspace: fixtureHome)
-        let second = addSession(workspace: fixtureHome)
+        let environment = AgentLaunchEnvironment(environment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome.path],
+                                                 home: fixtureHome, includeCommonLocations: false)
+        let first = addSession(workspace: fixtureHome, launchEnvironment: environment)
+        let second = addSession(workspace: fixtureHome, launchEnvironment: environment)
+        await first.shutdownInitialSmokeConnection()
+        await second.shutdownInitialSmokeConnection()
         window?.contentView?.layoutSubtreeIfNeeded()
         guard sidebar.workspaces.count == 1, sidebar.outline.numberOfRows == 3,
               sidebar.selectedSession === second, detail.children.first === second else {
@@ -168,6 +171,11 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
     }
 
     private func checkSidebarRowLayout() throws {
+        guard let scroll = sidebar.outline.enclosingScrollView,
+              abs(scroll.frame.height - sidebar.view.bounds.height) < 1,
+              sidebar.view.subviews.count == 1 else {
+            throw SmokeError.failed("Sidebar list must fill the pane without an extra footer button")
+        }
         for row in 0..<sidebar.outline.numberOfRows {
             guard let cell = sidebar.outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView else {
                 throw SmokeError.failed("Missing sidebar cell at row \(row)")
@@ -196,7 +204,7 @@ final class DetailHostViewController: NSViewController {
         view = NSView()
         let title = NSTextField(labelWithString: "No session selected")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString: "Open a session in a workspace folder, then connect an ACP agent to it.")
+        let body = NSTextField(wrappingLabelWithString: "Choose a workspace folder to get started.")
         body.textColor = .secondaryLabelColor
         body.alignment = .center
         body.preferredMaxLayoutWidth = 360

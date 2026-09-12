@@ -237,9 +237,9 @@ final class SessionModel {
                 publishHistory()
             default: break
             }
-        case let .standardError(id, data) where id == runtimeID:
-            history.appendDiagnostics(String(decoding: data, as: UTF8.self))
-            publishHistory()
+        case .standardError:
+            // Process diagnostics belong to service logging, not chat or its history budget.
+            break
         case let .processTerminated(id, status) where id == runtimeID:
             generation = UUID()
             runtimeID = nil
@@ -249,7 +249,7 @@ final class SessionModel {
             permissions.cancelAll()
             phase = .disconnected
             self.status = "Agent exited (\(status))"
-            errorMessage = "The agent process ended. Connect again to start a new session."
+            errorMessage = "The agent process ended. Select the harness again or use Refresh in Settings to reconnect."
             onChange?()
         default: break
         }

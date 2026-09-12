@@ -3,6 +3,8 @@ import AppKit
 /// A session-local, selectable transcript. The composer and connection status belong to the parent.
 @MainActor
 final class ChatTranscriptView: NSView {
+    static let maximumContentWidth: CGFloat = 768
+
     let scrollView = NSScrollView()
     var messageCount: Int { order.count }
 
@@ -81,9 +83,7 @@ final class ChatTranscriptView: NSView {
             }
         }
         working = isWorking
-        let label = order.isEmpty
-            ? (working ? "Working on your request…" : "Start a conversation. Your messages will appear here.")
-            : (working ? "Working…" : "")
+        let label = working ? "Working…" : ""
         // No live-region announcements or restarting animations on each streaming token.
         if status.stringValue != label { status.stringValue = label }
         status.isHidden = label.isEmpty
@@ -103,17 +103,19 @@ final class ChatTranscriptView: NSView {
         scrollView.frame = bounds
         scrollView.tile()
         let width = max(1, scrollView.contentSize.width)
-        let inset: CGFloat = min(16, width / 12)
+        let sideInset: CGFloat = min(16, width / 12)
+        let columnWidth = min(Self.maximumContentWidth, max(1, width - sideInset * 2))
+        let inset = (width - columnWidth) / 2
         var y: CGFloat = 16
         for id in order {
             guard let row = rows[id] else { continue }
-            let height = row.arrange(width: max(1, width - inset * 2))
+            let height = row.arrange(width: columnWidth)
             row.frame.origin = NSPoint(x: inset, y: y)
             y += height + 12
         }
         if !status.isHidden {
-            let size = status.sizeThatFits(NSSize(width: max(1, width - inset * 2), height: .greatestFiniteMagnitude))
-            status.frame = NSRect(x: inset, y: y, width: max(1, width - inset * 2), height: max(24, ceil(size.height)))
+            let size = status.sizeThatFits(NSSize(width: columnWidth, height: .greatestFiniteMagnitude))
+            status.frame = NSRect(x: inset, y: y, width: columnWidth, height: max(24, ceil(size.height)))
             y = status.frame.maxY + 16
         }
         // Reserve space for the floating jump control, never over the last message.
@@ -145,13 +147,50 @@ final class ChatTranscriptView: NSView {
         func require(_ value: Bool, _ description: String) throws {
             if !value { throw Failure(description: description) }
         }
+        let geometry = ChatTranscriptView(frame: NSRect(x: 0, y: 0, width: 1100, height: 600))
+        let short = ChatMessage(role: .user, text: "**Literal**")
+        let long = ChatMessage(role: .user, text: String(repeating: "Long user message. ", count: 40))
+        var markdown = ChatMessage(role: .assistant, text: "# Heading\n\n```swift\nlet value = 42")
+        geometry.update(messages: [short, long, markdown], isWorking: true)
+        let shortRow = geometry.rows[short.id]!, longRow = geometry.rows[long.id]!
+        let plainRow = geometry.rows[markdown.id]!
+        try require(shortRow.frame.width == Self.maximumContentWidth, "Wide column is not capped at 768")
+        try require(abs(shortRow.frame.midX - geometry.scrollView.contentSize.width / 2) < 1, "Wide column is not centered in scroll content")
+        try require(shortRow.frame.minX >= 16, "Missing side inset")
+        try require(shortRow.bubble.width < longRow.bubble.width && longRow.bubble.width <= longRow.frame.width * 0.8, "User bubbles are not content-sized/capped")
+        try require(shortRow.bubble.maxX == shortRow.bounds.maxX && shortRow.textView.string == short.text, "User text is not literal/right aligned")
+        try require(plainRow.bubble == .zero && plainRow.textView.frame.minX == 0 && plainRow.textView.frame.width == plainRow.bounds.width && plainRow.textView.frame.minY == 0, "Assistant is boxed or has a role header")
+        try require(!plainRow.textView.string.contains("```") && !plainRow.textView.string.contains("# Heading"), "Markdown markers/fences remain visible")
+        let incompleteCode = (plainRow.textView.string as NSString).range(of: "let value")
+        try require(incompleteCode.location != NSNotFound, "Incomplete fence lost code")
+        plainRow.textView.setSelectedRange(incompleteCode)
+        markdown.text += "\n```\nMore **output**"
+        geometry.update(messages: [short, long, markdown], isWorking: false)
+        try require(plainRow.textView.selectedRange() == incompleteCode, "Closing fence lost rendered selection")
+        try require(plainRow.rawText == markdown.text && plainRow.textView.source?() == markdown.text, "Raw Markdown copy source changed")
+        let copyControl = plainRow.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Copy" }!
+        try require(!copyControl.isHidden && copyControl.acceptsFirstResponder && copyControl.accessibilityLabel() != nil && copyControl.frame.minY >= plainRow.textView.frame.maxY, "Copy metadata is not below text or keyboard/AX discoverable")
+        let unchangedStorage = plainRow.textView.textStorage!
+        let unchangedContent = NSAttributedString(attributedString: unchangedStorage)
+        geometry.update(messages: [short, long, markdown], isWorking: false)
+        try require(unchangedStorage.isEqual(to: unchangedContent) && plainRow.textView.selectedRange() == incompleteCode, "Unchanged update changed content/selection")
+        markdown.text = "**Selected words"
+        geometry.update(messages: [markdown], isWorking: true)
+        plainRow.textView.setSelectedRange((plainRow.textView.string as NSString).range(of: "Selected words"))
+        markdown.text += "** and more"
+        geometry.update(messages: [markdown], isWorking: false)
+        try require((plainRow.textView.string as NSString).substring(with: plainRow.textView.selectedRange()) == "Selected words", "Completing inline Markdown lost rendered selection")
+        markdown.text = "**a a"
+        geometry.update(messages: [markdown], isWorking: true)
+        plainRow.textView.setSelectedRange(NSRange(location: 2, length: 1))
+        markdown.text += "**"
+        geometry.update(messages: [markdown], isWorking: false)
+        try require(plainRow.textView.selectedRange() == NSRange(location: 0, length: 1), "Completing Markdown moved selection to a repeated word")
         let probe = ChatTranscriptView(frame: NSRect(x: 0, y: 0, width: 260, height: 240))
         var messages = (0..<12).map {
             ChatMessage(role: $0.isMultiple(of: 2) ? .user : .assistant,
                         text: "Message \($0)\n" + String(repeating: "Long wrapping text with selectable content. ", count: 8))
         }
-        let diagnostic = ChatMessage(role: .diagnostics, text: "Raw diagnostics\n" + String(repeating: "trace\n", count: 20))
-        messages.append(diagnostic)
         probe.update(messages: messages, isWorking: true)
         let row = probe.rows[messages[11].id]!
         let identity = ObjectIdentifier(row)
@@ -160,8 +199,9 @@ final class ChatTranscriptView: NSView {
         probe.update(messages: messages, isWorking: true)
         try require(ObjectIdentifier(probe.rows[messages[11].id]!) == identity, "Streaming replaced a row")
         try require(row.textView.selectedRange() == NSRange(location: 2, length: 8), "Streaming lost selection")
-        try require(row.textView.string == messages[11].text, "Streaming changed raw text")
-        let codeRange = (messages[11].text as NSString).range(of: "let value")
+        try require(row.rawText == messages[11].text && !row.textView.string.contains("```"), "Streaming lost raw source or showed fences")
+        let codeRange = (row.textView.string as NSString).range(of: "let value")
+        try require(codeRange.location != NSNotFound, "Rendered code is missing")
         let codeFont = row.textView.textStorage?.attribute(.font, at: codeRange.location, effectiveRange: nil) as? NSFont
         try require(codeFont == NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), "Fenced code is not monospaced")
         try require(abs(probe.document.frame.height - probe.scrollView.contentView.bounds.maxY) < 2, "Did not follow bottom")
@@ -172,15 +212,8 @@ final class ChatTranscriptView: NSView {
         probe.update(messages: messages, isWorking: true)
         try require(abs(probe.scrollView.contentView.bounds.minY - before) < 2, "Streaming moved a scrolled-up reader")
         try require(!probe.jump.isHidden, "Missing Jump to Latest")
-        let diagnostics = probe.rows[diagnostic.id]!
-        try require(diagnostics.textView.isHidden, "Diagnostics should start collapsed")
-        let collapsedHeight = diagnostics.frame.height
-        diagnostics.toggleDisclosure()
-        try require(!diagnostics.textView.isHidden && diagnostics.frame.height > collapsedHeight, "Diagnostics did not expand")
-        try require(diagnostics.textView.string == diagnostic.text, "Diagnostics lost raw text")
-        messages[messages.count - 1].text += "\nNew trace"
         probe.update(messages: messages, isWorking: false)
-        try require(!diagnostics.textView.isHidden, "Streaming collapsed expanded diagnostics")
+        try require(probe.rows.count == messages.count && probe.rows.values.allSatisfy { !$0.textView.isHidden }, "Conversation contains unexpected or collapsed rows")
         let wideHeight = row.frame.height
         let resizeAnchor = probe.anchor()
         probe.frame.size.width = 180
@@ -196,13 +229,32 @@ final class ChatTranscriptView: NSView {
             let measured = max(manager.usedRect(for: container).maxY, manager.extraLineFragmentRect.maxY)
             try require(item.textView.frame.height >= ceil(measured), "Narrow layout clips text vertically")
             try require(item.frame.maxX <= probe.document.bounds.width + 1, "Narrow layout overflows horizontally")
+            try require(manager.usedRect(for: container).maxX <= item.textView.bounds.width + 1, "Narrow text is clipped horizontally")
         }
         probe.jumpToLatest()
         try require(abs(probe.document.frame.height - probe.scrollView.contentView.bounds.maxY) < 2, "Jump did not reach bottom")
+        var tool = ChatMessage(role: .tool, text: "Read Sources · running\nFull tool details")
+        probe.update(messages: [tool], isWorking: false)
+        let toolRow = probe.rows[tool.id]!
+        let toolIdentity = ObjectIdentifier(toolRow)
+        let toolHeight = toolRow.frame.height
+        try require(toolRow.textView.isHidden && toolRow.bubble == .zero && toolHeight == 24, "Tool is not a compact collapsed unboxed row")
+        toolRow.toggleDisclosure()
+        try require(!toolRow.textView.isHidden && toolRow.frame.height > toolHeight && toolRow.textView.string == tool.text, "Tool disclosure lost full content")
+        tool.text = "Read Sources · completed\nUpdated tool details"
+        probe.update(messages: [tool], isWorking: false)
+        try require(ObjectIdentifier(probe.rows[tool.id]!) == toolIdentity && !toolRow.textView.isHidden && toolRow.textView.string == tool.text, "Tool update replaced/collapsed row or lost details")
+        try require(toolRow.subviews.compactMap { $0 as? NSButton }.contains { !$0.isHidden && $0.accessibilityLabel()?.contains("completed") == true }, "Tool status update is not accessibility discoverable")
+        toolRow.toggleDisclosure()
+        try require(toolRow.textView.isHidden && toolRow.frame.height == toolHeight, "Tool did not collapse")
         probe.update(messages: (0..<405).map { ChatMessage(role: .tool, text: "Tool \($0)") }, isWorking: false)
         try require(probe.messageCount == 400 && probe.rows.count == 400, "Transcript exceeded history bound")
         probe.update(messages: [], isWorking: false)
-        try require(probe.messageCount == 0 && !probe.status.isHidden, "Missing empty state")
+        try require(probe.messageCount == 0 && probe.status.isHidden && probe.status.stringValue.isEmpty, "Idle empty chat shows placeholder text")
+        probe.update(messages: [], isWorking: true)
+        try require(probe.messageCount == 0 && !probe.status.isHidden && probe.status.stringValue == "Working…", "Prompting lost its working indicator")
+        probe.update(messages: [], isWorking: false)
+        try require(probe.status.isHidden && probe.status.stringValue.isEmpty, "Working indicator remains after prompting")
     }
 }
 
@@ -214,16 +266,20 @@ private final class TranscriptDocumentView: NSView {
 @MainActor
 private final class TranscriptMessageView: NSView {
     let role: ChatMessage.Role
-    let textView = NSTextView(frame: .zero)
+    let textView = TranscriptTextView(frame: .zero)
     var onDisclosure: (() -> Void)?
     private let label = NSTextField(labelWithString: "")
-    private let copy = NSButton(title: "Copy", target: nil, action: nil)
+    private let copy = TranscriptCopyButton(title: "Copy", target: nil, action: nil)
     private let disclosure = NSButton(title: "", target: nil, action: nil)
-    private var rawText: String?
+    private(set) var rawText: String?
     private var expanded = false
-    private var bubble = NSRect.zero
+    private(set) var bubble = NSRect.zero
     private var measuredWidth: CGFloat = -1
     private var measuredHeight: CGFloat = 0
+    private var naturalTextWidth: CGFloat = 0
+    private var hoverTracking: NSTrackingArea?
+    private var hovered = false
+    private var isDisclosure: Bool { role == .tool }
 
     override var isFlipped: Bool { true }
 
@@ -234,24 +290,32 @@ private final class TranscriptMessageView: NSView {
         case .user: "You"
         case .assistant: "Assistant"
         case .tool: "Tool"
-        case .diagnostics: "Diagnostics"
         }
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.font = .systemFont(ofSize: 12)
         label.textColor = .secondaryLabelColor
+        label.maximumNumberOfLines = 1
+        label.lineBreakMode = .byTruncatingTail
+        label.isHidden = !isDisclosure
         addSubview(label)
         copy.bezelStyle = .inline
         copy.font = .systemFont(ofSize: 11)
         copy.target = self
         copy.action = #selector(copyMessage)
         copy.setAccessibilityLabel("Copy \(label.stringValue.lowercased()) message")
-        copy.isHidden = role != .user && role != .assistant
+        copy.isHidden = isDisclosure
+        copy.shouldDraw = { [weak self] in
+            guard let self else { return false }
+            let focus = self.window?.firstResponder
+            return self.hovered || focus === self.textView || focus === self.copy
+        }
+        textView.onFocusChange = { [weak self] in self?.copy.needsDisplay = true }
+        textView.source = { [weak self] in self?.rawText ?? "" }
         addSubview(copy)
         disclosure.bezelStyle = .disclosure
         disclosure.setButtonType(.pushOnPushOff)
         disclosure.target = self
         disclosure.action = #selector(toggleDisclosure)
-        disclosure.setAccessibilityLabel("Expand diagnostics")
-        disclosure.isHidden = role != .diagnostics
+        disclosure.isHidden = !isDisclosure
         addSubview(disclosure)
         textView.isEditable = false
         textView.isSelectable = true
@@ -267,7 +331,7 @@ private final class TranscriptMessageView: NSView {
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.heightTracksTextView = false
         textView.setAccessibilityLabel("\(label.stringValue) message")
-        textView.isHidden = role == .diagnostics
+        textView.isHidden = isDisclosure
         addSubview(textView)
         update(text: message.text)
     }
@@ -278,46 +342,77 @@ private final class TranscriptMessageView: NSView {
         guard rawText != text else { return }
         rawText = text
         measuredWidth = -1
+        let previous = textView.string as NSString
         let selection = textView.selectedRanges
-        let font = NSFont.systemFont(ofSize: role == .tool ? 12 : 13)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
-        paragraph.lineSpacing = 3
-        let content = NSMutableAttributedString(string: text, attributes: [
-            .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
-        ])
-        // Preserve fences and all source text, changing only the font of fenced lines.
-        if role == .diagnostics {
-            content.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), range: NSRange(location: 0, length: content.length))
-        } else if role == .assistant || role == .user {
-            let source = text as NSString
-            var position = 0
-            var fenced = false
-            while position < source.length {
-                let range = source.lineRange(for: NSRange(location: position, length: 0))
-                let isFence = source.substring(with: range).trimmingCharacters(in: .whitespaces).hasPrefix("```")
-                if fenced || isFence {
-                    content.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), range: range)
-                }
-                if isFence { fenced.toggle() }
-                position = NSMaxRange(range)
-            }
+        let content: NSAttributedString
+        if role == .assistant {
+            content = ChatMarkdown.render(text)
+        } else {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineSpacing = 3
+            let font = NSFont.systemFont(ofSize: ChatMarkdown.bodyFontSize)
+            content = NSAttributedString(string: text, attributes: [
+                .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
+            ])
         }
+        let restored = Self.remap(selection, from: previous, to: content.string as NSString)
         textView.textStorage?.setAttributedString(content)
-        textView.selectedRanges = selection.map {
+        textView.selectedRanges = restored
+        if role == .user {
+            // Measure once per source update, not on every viewport layout.
+            naturalTextWidth = ceil(content.size().width)
+        }
+        if isDisclosure {
+            let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            label.stringValue = firstLine.isEmpty ? "Tool activity" : firstLine
+            label.toolTip = firstLine
+            updateDisclosureAccessibility()
+        }
+    }
+
+    /// Diff rendered UTF-16, never source offsets: closing Markdown can change earlier glyphs.
+    private static func remap(_ selections: [NSValue], from old: NSString, to new: NSString) -> [NSValue] {
+        let a = Array((old as String).utf16), b = Array((new as String).utf16)
+        var prefix = 0
+        while prefix < min(a.count, b.count), a[prefix] == b[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < min(a.count, b.count) - prefix,
+              a[a.count - suffix - 1] == b[b.count - suffix - 1] { suffix += 1 }
+        func position(_ value: Int) -> Int {
+            if value <= prefix { return value }
+            if value >= a.count - suffix { return max(0, value + b.count - a.count) }
+            return min(value, b.count - suffix)
+        }
+        return selections.map {
             let range = $0.rangeValue
-            let start = min(range.location, content.length)
-            return NSValue(range: NSRange(location: start, length: min(range.length, content.length - start)))
+            let start = min(new.length, max(0, position(range.location)))
+            let end = min(new.length, max(start, position(NSMaxRange(range))))
+            let mapped = NSRange(location: start, length: end - start)
+            if range.length > 0, NSMaxRange(range) <= old.length {
+                let selected = old.substring(with: range)
+                // Preserve the same occurrence when a shared prefix/suffix identifies it.
+                if mapped.length == range.length, new.substring(with: mapped) == selected {
+                    return NSValue(range: mapped)
+                }
+                let forward = new.range(of: selected, options: .literal, range: NSRange(location: start, length: new.length - start))
+                let backward = new.range(of: selected, options: [.literal, .backwards], range: NSRange(location: 0, length: min(new.length, start + range.length)))
+                let candidates = [forward, backward].filter { $0.location != NSNotFound }
+                if let nearest = candidates.min(by: { abs($0.location - start) < abs($1.location - start) }) {
+                    return NSValue(range: nearest)
+                }
+            }
+            return NSValue(range: mapped)
         }
     }
 
     func arrange(width: CGFloat) -> CGFloat {
-        let conversational = role == .user || role == .assistant
-        let bubbleWidth = conversational ? min(760, width * 0.9) : width
-        let x = role == .user ? width - bubbleWidth : 0
-        let padding: CGFloat = conversational ? 12 : 6
+        let user = role == .user
+        let padding: CGFloat = user ? min(12, width * 0.08) : 0
+        let bubbleWidth = user ? min(width * 0.8, max(1, naturalTextWidth) + padding * 2) : width
+        let x = user ? width - bubbleWidth : 0
         let textWidth = max(1, bubbleWidth - padding * 2)
-        let headerHeight: CGFloat = 24
+        let headerHeight: CGFloat = isDisclosure ? 24 : 0
         if !textView.isHidden && measuredWidth != textWidth {
             let container = textView.textContainer!
             container.containerSize = NSSize(width: textWidth, height: .greatestFiniteMagnitude)
@@ -326,26 +421,26 @@ private final class TranscriptMessageView: NSView {
             measuredHeight = ceil(max(manager.usedRect(for: container).maxY, manager.extraLineFragmentRect.maxY)) + 2
             measuredWidth = textWidth
         }
-        let height = textView.isHidden ? headerHeight + 8 : headerHeight + measuredHeight + padding * 2
+        let bodyHeight = textView.isHidden ? 0 : measuredHeight + padding * 2
+        let height = headerHeight + bodyHeight + (isDisclosure ? 0 : 24)
         frame.size = NSSize(width: width, height: height)
-        bubble = NSRect(x: x, y: 0, width: bubbleWidth, height: height)
-        let disclosureSpace: CGFloat = role == .diagnostics ? 22 : 0
-        label.frame = NSRect(x: x + padding + disclosureSpace, y: 5, width: max(1, textWidth - disclosureSpace - (copy.isHidden ? 0 : 44)), height: 18)
-        copy.frame = NSRect(x: x + bubbleWidth - padding - 40, y: 3, width: 40, height: 20)
-        disclosure.frame = NSRect(x: x + padding, y: 3, width: 20, height: 20)
-        textView.frame = NSRect(x: x + padding, y: headerHeight + padding, width: textWidth, height: measuredHeight)
-        needsDisplay = true
+        let newBubble = user ? NSRect(x: x, y: 0, width: bubbleWidth, height: bodyHeight) : .zero
+        if bubble != newBubble {
+            bubble = newBubble
+            needsDisplay = true
+        }
+        label.frame = NSRect(x: 24, y: 3, width: max(1, width - 24), height: 18)
+        copy.frame = NSRect(x: user ? max(0, width - 40) : 0, y: bodyHeight + 2, width: min(40, width), height: 20)
+        disclosure.frame = NSRect(x: 0, y: 2, width: min(20, width), height: 20)
+        let textFrame = NSRect(x: x + padding, y: headerHeight + padding, width: textWidth, height: measuredHeight)
+        if textView.frame != textFrame { textView.frame = textFrame }
         return height
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let color: NSColor = switch role {
-        case .user: NSColor.controlAccentColor.withAlphaComponent(0.12)
-        case .assistant: .controlBackgroundColor
-        case .tool, .diagnostics: .quaternaryLabelColor
-        }
-        color.setFill()
+        guard role == .user else { return }
+        NSColor.quaternaryLabelColor.setFill()
         NSBezierPath(roundedRect: bubble, xRadius: 10, yRadius: 10).fill()
     }
 
@@ -361,11 +456,89 @@ private final class TranscriptMessageView: NSView {
         NSPasteboard.general.setString(rawText, forType: .string)
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(tracking)
+        hoverTracking = tracking
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        copy.needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        copy.needsDisplay = true
+    }
+
+    private func updateDisclosureAccessibility() {
+        disclosure.setAccessibilityLabel("\(expanded ? "Collapse" : "Expand") \(label.stringValue)")
+        disclosure.toolTip = label.stringValue
+    }
+
     @objc func toggleDisclosure() {
+        guard isDisclosure else { return }
         expanded.toggle()
         disclosure.state = expanded ? .on : .off
-        disclosure.setAccessibilityLabel(expanded ? "Collapse diagnostics" : "Expand diagnostics")
+        updateDisclosureAccessibility()
         textView.isHidden = !expanded
         onDisclosure?()
+    }
+}
+
+/// Drawing, not hiding/removing, keeps the metadata control in keyboard and AX navigation.
+@MainActor
+private final class TranscriptCopyButton: NSButton {
+    var shouldDraw: (() -> Bool)?
+    override var acceptsFirstResponder: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if shouldDraw?() == true { super.draw(dirtyRect) }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        needsDisplay = true
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        needsDisplay = true
+        return accepted
+    }
+}
+
+@MainActor
+private final class TranscriptTextView: NSTextView {
+    var source: (() -> String)?
+    var onFocusChange: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        onFocusChange?()
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        onFocusChange?()
+        return accepted
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = (super.menu(for: event)?.copy() as? NSMenu) ?? NSMenu()
+        menu.addItem(.separator())
+        let item = menu.addItem(withTitle: "Copy Message Source", action: #selector(copySource), keyEquivalent: "")
+        item.target = self
+        return menu
+    }
+
+    @objc private func copySource() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(source?() ?? "", forType: .string)
     }
 }

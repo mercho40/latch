@@ -203,7 +203,8 @@ final class ChatMessageTests: XCTestCase {
         await model.disconnect()
         XCTAssertEqual(model.messages, conversation)
         XCTAssertEqual(model.transcript, transcript)
-        await model.connect(command: command, workspace: URL(fileURLWithPath: "/tmp"))
+        // Intentionally start an empty context; this fixture cannot resume (see SessionResumeTests).
+        await model.connect(command: command, workspace: URL(fileURLWithPath: "/tmp"), startNewSession: true)
         XCTAssertEqual(model.phase, .ready)
         XCTAssertTrue(model.messages.isEmpty)
         XCTAssertTrue(model.transcript.isEmpty)

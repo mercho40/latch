@@ -1,7 +1,7 @@
 import Foundation
 
-struct ChatMessage: Identifiable, Equatable, Sendable {
-    enum Role: Equatable, Sendable {
+struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
+    enum Role: String, Codable, Equatable, Sendable {
         case user, assistant, tool
     }
 
@@ -16,7 +16,8 @@ struct ChatMessage: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Bounded, session-local structured history. No transcript parsing or persistence.
+/// Bounded structured history. Restoring starts a new stream boundary, never merging
+/// a future response or tool update into an archived message.
 struct ChatHistory: Sendable {
     private(set) var messages: [ChatMessage] = []
     static let maximumMessageCount = 400
@@ -46,6 +47,12 @@ struct ChatHistory: Sendable {
 
     mutating func reset() {
         self = ChatHistory()
+    }
+
+    mutating func restore(_ messages: [ChatMessage]) {
+        reset()
+        self.messages = messages
+        enforceBounds()
     }
 
     mutating func appendUser(_ text: String) {

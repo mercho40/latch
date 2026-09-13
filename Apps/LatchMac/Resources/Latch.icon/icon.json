@@ -1,0 +1,149 @@
+{
+  "features" : [
+    "refractivity"
+  ],
+  "fill" : "automatic",
+  "groups" : [
+    {
+      "blur-material" : 0.2,
+      "layers" : [
+        {
+          "blend-mode-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : "normal"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.04016,0.56055,1.00000,1.00000",
+                  "display-p3:0.19226,0.35303,0.45093,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.737328506097561,
+                    "y" : 0.7521941489361702
+                  },
+                  "stop" : {
+                    "x" : 0.3582126524390244,
+                    "y" : 0.3528590425531915
+                  }
+                }
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.02745,0.46533,0.84745,1.00000",
+                  "display-p3:0.14118,0.30588,0.40784,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.3512576219512195,
+                    "y" : 0.34551196808510637
+                  },
+                  "stop" : {
+                    "x" : 0.7386432926829268,
+                    "y" : 0.7499667553191489
+                  }
+                }
+              }
+            }
+          ],
+          "image-name" : "latch-front-rectangle.svg",
+          "name" : "latch-front-rectangle",
+          "opacity-specializations" : [
+            {
+              "value" : 0.6
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.7
+            }
+          ]
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.23108,0.26147,0.29460,1.00000",
+                  "display-p3:0.12549,0.22180,0.31592,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.26788516200086177,
+                    "y" : 0.23108267921585832
+                  },
+                  "stop" : {
+                    "x" : 0.6904854923144774,
+                    "y" : 0.5967442294481722
+                  }
+                }
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "srgb:0.22353,0.26275,0.29020,1.00000",
+                  "display-p3:0.12549,0.22184,0.31589,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.22543514128427744,
+                    "y" : 0.2553194179206262
+                  },
+                  "stop" : {
+                    "x" : 0.5900198375564619,
+                    "y" : 0.5568549672808697
+                  }
+                }
+              }
+            }
+          ],
+          "image-name" : "latch-rear-rectangle.svg",
+          "name" : "latch-rear-rectangle",
+          "opacity-specializations" : [
+            {
+              "value" : 0.7
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.9
+            }
+          ]
+        }
+      ],
+      "lighting" : "individual",
+      "opacity-specializations" : [
+        {
+          "appearance" : "dark",
+          "value" : 1
+        }
+      ],
+      "refractivity" : {
+        "depth" : 0.5,
+        "enabled" : true,
+        "strength" : 0
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.25
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.7
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

@@ -285,4 +285,19 @@ actor MockACPServer {
         clientContinuation.finish()
         receivedContinuation.finish()
     }
+
+    func testErrorObjectDescriptionPrefersDetailInData() {
+        let generic = ACPJSONRPCErrorObject(code: -32_603, message: "Internal error")
+        XCTAssertEqual(generic.localizedDescription, "Internal error")
+
+        let detailed = ACPJSONRPCErrorObject(
+            code: -32_603, message: "Internal error",
+            data: .object(["codexErrorInfo": .string("usageLimitExceeded"),
+                           "message": .string("You've hit your usage limit.")]))
+        XCTAssertEqual(detailed.localizedDescription, "You've hit your usage limit.")
+
+        let blank = ACPJSONRPCErrorObject(code: -32_603, message: "Internal error",
+                                          data: .object(["message": .string("  ")]))
+        XCTAssertEqual(blank.localizedDescription, "Internal error")
+    }
 }

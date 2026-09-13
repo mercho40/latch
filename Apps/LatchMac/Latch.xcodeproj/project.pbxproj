@@ -8,12 +8,43 @@
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* main.swift */; };
 		A10000000000000000000002 /* LatchMacUI in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* LatchMacUI */; };
+		A10000000000000000000003 /* Latch.icon in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* Latch.icon */; };
+		B10000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* main.swift */; };
+		B10000000000000000000002 /* LatchAgentServiceHost in Frameworks */ = {isa = PBXBuildFile; productRef = B90000000000000000000003 /* LatchAgentServiceHost */; };
+		B10000000000000000000003 /* LatchAgentXPCService.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = B20000000000000000000002 /* LatchAgentXPCService.xpc */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B60000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A60000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B50000000000000000000001;
+			remoteInfo = LatchAgentXPCService;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		B30000000000000000000003 /* Embed XPC Services */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/XPCServices";
+			dstSubfolderSpec = 16;
+			files = (B10000000000000000000003 /* LatchAgentXPCService.xpc in Embed XPC Services */,);
+			name = "Embed XPC Services";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A20000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/Latch/main.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* Latch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Latch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000003 /* App.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configuration/App.xcconfig; sourceTree = "<group>"; };
+		A20000000000000000000004 /* Latch.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Resources/Latch.icon; sourceTree = "<group>"; };
+		B20000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "LatchAgentXPCService main.swift"; path = Sources/LatchAgentXPCService/main.swift; sourceTree = "<group>"; };
+		B20000000000000000000002 /* LatchAgentXPCService.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = LatchAgentXPCService.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		B20000000000000000000003 /* AgentService.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configuration/AgentService.xcconfig; sourceTree = "<group>"; };
+		B20000000000000000000004 /* AgentService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Configuration/AgentService-Info.plist"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -21,6 +52,12 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (A10000000000000000000002 /* LatchMacUI in Frameworks */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (B10000000000000000000002 /* LatchAgentServiceHost in Frameworks */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -31,13 +68,17 @@
 			children = (
 				A20000000000000000000001 /* main.swift */,
 				A20000000000000000000003 /* App.xcconfig */,
+				A20000000000000000000004 /* Latch.icon */,
+				B20000000000000000000001 /* main.swift */,
+				B20000000000000000000003 /* AgentService.xcconfig */,
+				B20000000000000000000004 /* AgentService-Info.plist */,
 				A40000000000000000000002 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
 		A40000000000000000000002 /* Products */ = {
 			isa = PBXGroup;
-			children = (A20000000000000000000002 /* Latch.app */,);
+			children = (A20000000000000000000002 /* Latch.app */, B20000000000000000000002 /* LatchAgentXPCService.xpc */,);
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -50,14 +91,31 @@
 			buildPhases = (
 				A30000000000000000000002 /* Sources */,
 				A30000000000000000000001 /* Frameworks */,
+				A30000000000000000000003 /* Resources */,
+				B30000000000000000000003 /* Embed XPC Services */,
 			);
 			buildRules = ();
-			dependencies = ();
+			dependencies = (B60000000000000000000001 /* PBXTargetDependency */,);
 			name = Latch;
 			packageProductDependencies = (A90000000000000000000002 /* LatchMacUI */,);
 			productName = Latch;
 			productReference = A20000000000000000000002 /* Latch.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B50000000000000000000001 /* LatchAgentXPCService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B80000000000000000000001 /* Build configuration list for PBXNativeTarget "LatchAgentXPCService" */;
+			buildPhases = (
+				B30000000000000000000002 /* Sources */,
+				B30000000000000000000001 /* Frameworks */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = LatchAgentXPCService;
+			packageProductDependencies = (B90000000000000000000003 /* LatchAgentServiceHost */,);
+			productName = LatchAgentXPCService;
+			productReference = B20000000000000000000002 /* LatchAgentXPCService.xpc */;
+			productType = "com.apple.product-type.xpc-service";
 		};
 /* End PBXNativeTarget section */
 
@@ -69,6 +127,7 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					A50000000000000000000001 = {CreatedOnToolsVersion = 16.0; };
+					B50000000000000000000001 = {CreatedOnToolsVersion = 16.0; };
 				};
 			};
 			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXProject "Latch" */;
@@ -81,9 +140,18 @@
 			productRefGroup = A40000000000000000000002 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (A50000000000000000000001 /* Latch */,);
+			targets = (A50000000000000000000001 /* Latch */, B50000000000000000000001 /* LatchAgentXPCService */,);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A30000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (A10000000000000000000003 /* Latch.icon in Resources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A30000000000000000000002 /* Sources */ = {
@@ -92,7 +160,21 @@
 			files = (A10000000000000000000001 /* main.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B30000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (B10000000000000000000001 /* main.swift in Sources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B60000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B50000000000000000000001 /* LatchAgentXPCService */;
+			targetProxy = B60000000000000000000002 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A70000000000000000000001 /* Debug */ = {
@@ -127,6 +209,18 @@
 			buildSettings = {};
 			name = Release;
 		};
+		B70000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B20000000000000000000003 /* AgentService.xcconfig */;
+			buildSettings = {};
+			name = Debug;
+		};
+		B70000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B20000000000000000000003 /* AgentService.xcconfig */;
+			buildSettings = {};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -139,6 +233,12 @@
 		A80000000000000000000002 /* Build configuration list for PBXNativeTarget "Latch" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (A70000000000000000000003 /* Debug */, A70000000000000000000004 /* Release */,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B80000000000000000000001 /* Build configuration list for PBXNativeTarget "LatchAgentXPCService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (B70000000000000000000001 /* Debug */, B70000000000000000000002 /* Release */,);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
@@ -156,6 +256,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A90000000000000000000001 /* XCLocalSwiftPackageReference "." */;
 			productName = LatchMacUI;
+		};
+		B90000000000000000000003 /* LatchAgentServiceHost */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90000000000000000000001 /* XCLocalSwiftPackageReference "." */;
+			productName = LatchAgentServiceHost;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

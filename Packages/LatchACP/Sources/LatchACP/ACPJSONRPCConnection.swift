@@ -43,6 +43,19 @@ public struct ACPJSONRPCErrorObject: Codable, Error, Equatable, Sendable {
     }
 }
 
+extension ACPJSONRPCErrorObject: LocalizedError {
+    /// Human-readable description for user-facing surfaces. Agents such as the Codex adapter
+    /// wrap the specific failure in `data.message` behind a generic "Internal error";
+    /// prefer that detail when present.
+    public var errorDescription: String? {
+        if case let .object(fields) = data, case let .string(detail) = fields["message"],
+           !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return detail
+        }
+        return message
+    }
+}
+
 public struct ACPJSONRPCNotification: Equatable, Sendable {
     public let method: String
     public let params: ACPJSONValue?

@@ -68,6 +68,10 @@ public actor LatchAgentService {
             let session = try await registry.newSession(runtimeID: runtimeID, cwd: cwd)
             return .sessionCreated(runtimeID: runtimeID, session: session)
 
+        case let .loadSession(runtimeID, sessionID, cwd):
+            let response = try await registry.loadSession(runtimeID: runtimeID, sessionID: sessionID, cwd: cwd)
+            return .sessionLoaded(runtimeID: runtimeID, response: response)
+
         case let .setSessionConfigOption(runtimeID, configID, value):
             let response = try await registry.setSessionConfigOption(
                 runtimeID: runtimeID,
@@ -80,6 +84,10 @@ public actor LatchAgentService {
             let sequence = try await registry.setSessionModel(runtimeID: runtimeID, modelID: modelID)
             return .sessionModelSet(runtimeID: runtimeID, sequence: sequence)
 
+        case let .setSessionMode(runtimeID, modeID):
+            let sequence = try await registry.setSessionMode(runtimeID: runtimeID, modeID: modeID)
+            return .sessionModeSet(runtimeID: runtimeID, sequence: sequence)
+
         case let .prompt(runtimeID, text):
             let response = try await registry.prompt(runtimeID: runtimeID, text: text)
             return .promptCompleted(runtimeID: runtimeID, response: response)
@@ -87,6 +95,10 @@ public actor LatchAgentService {
         case let .cancelPrompt(runtimeID):
             try await registry.cancelPrompt(runtimeID: runtimeID)
             return .promptCancellationRequested(runtimeID: runtimeID)
+
+        case let .resolvePermission(runtimeID, requestID, outcome):
+            try await registry.resolvePermission(runtimeID: runtimeID, requestID: requestID, outcome: outcome)
+            return .permissionResolved(runtimeID: runtimeID, requestID: requestID)
         }
     }
 
@@ -97,10 +109,18 @@ public actor LatchAgentService {
     private func publicFailure(for error: any Error) -> LatchAgentFailure {
         let message: String
         switch error {
+        case let error as ACPJSONRPCErrorObject:
+            // ACP RequestError.authRequired; never infer authentication state from agent prose.
+            return LatchAgentFailure(
+                code: error.code == -32000 ? .authenticationRequired : .commandFailed,
+                message: AgentRPCFailureMessage.message(for: error)
+            )
         case AgentRuntimeRegistryError.duplicateRuntime:
             message = "A runtime with this ID already exists."
         case AgentRuntimeRegistryError.runtimeNotFound:
             message = "Runtime not found."
+        case AgentRuntimeRegistryError.permissionRequestNotFound:
+            message = "Permission request not found."
         default:
             message = "Agent command failed."
         }

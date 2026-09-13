@@ -1,0 +1,26 @@
+// XPC service embedded in Latch.app. It hosts every ACP runtime for the application.
+PRODUCT_NAME = LatchAgentXPCService
+PRODUCT_BUNDLE_IDENTIFIER = sh.latch.mac.agent
+MARKETING_VERSION = 0.0.0
+CURRENT_PROJECT_VERSION = 1
+MACOSX_DEPLOYMENT_TARGET = 15.0
+SDKROOT = macosx
+SUPPORTED_PLATFORMS = macosx
+SWIFT_VERSION = 6.0
+
+// Launches arbitrary ACP executables on the user's behalf; no sandbox, same hardened runtime as the app.
+ENABLE_APP_SANDBOX = NO
+ENABLE_HARDENED_RUNTIME = YES
+ENABLE_DEBUG_DYLIB = NO
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+OTHER_CODE_SIGN_FLAGS = $(inherited) --options runtime
+
+GENERATE_INFOPLIST_FILE = NO
+INFOPLIST_FILE = Configuration/AgentService-Info.plist
+SKIP_INSTALL = YES
+
+CLANG_ENABLE_MODULES = YES
+CLANG_ENABLE_OBJC_ARC = YES
+ENABLE_STRICT_OBJC_MSGSEND = YES
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks @loader_path/../Frameworks

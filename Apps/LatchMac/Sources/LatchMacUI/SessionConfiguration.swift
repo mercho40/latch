@@ -1,8 +1,8 @@
 import LatchACP
 
 struct SessionPicker: Equatable, Sendable {
-    enum Kind: Equatable, Sendable { case model, effort }
-    enum Route: Equatable, Sendable { case config(String), legacyModel }
+    enum Kind: Equatable, Sendable { case model, effort, permissionMode }
+    enum Route: Equatable, Sendable { case config(String), legacyModel, legacyMode }
 
     let route: Route
     var currentValue: String
@@ -21,13 +21,17 @@ struct SessionPicker: Equatable, Sendable {
 struct SessionConfiguration: Equatable, Sendable {
     var model: SessionPicker?
     var effort: SessionPicker?
+    var permissionMode: SessionPicker?
 
-    init(configOptions: [ACPJSONValue]? = nil, models: ACPJSONValue? = nil) {
+    init(configOptions: [ACPJSONValue]? = nil, models: ACPJSONValue? = nil, modes: ACPJSONValue? = nil) {
         let options = configOptions ?? []
         apply(configOptions: options)
         // A malformed or ambiguous modern model must not silently become a legacy control.
         if !options.contains(where: { Self.kind(of: $0) == .model }) {
             model = Self.legacyPicker(models)
+        }
+        if !options.contains(where: { Self.kind(of: $0) == .permissionMode }) {
+            permissionMode = Self.legacyPicker(modes, mode: true)
         }
     }
 
@@ -55,6 +59,10 @@ struct SessionConfiguration: Equatable, Sendable {
         if hasModernModel || model?.route != .legacyModel {
             model = picker(.model)
         }
+        let hasModernMode = configOptions.contains { Self.kind(of: $0) == .permissionMode }
+        if hasModernMode || permissionMode?.route != .legacyMode {
+            permissionMode = picker(.permissionMode)
+        }
         effort = picker(.effort)
     }
 
@@ -66,6 +74,11 @@ struct SessionConfiguration: Equatable, Sendable {
         case "config_option_update":
             guard case let .array(options) = update["configOptions"] else { return false }
             apply(configOptions: options)
+            return true
+        case "current_mode_update":
+            guard permissionMode?.route == .legacyMode,
+                  let current = Self.string(update["currentModeId"]) else { return false }
+            permissionMode?.currentValue = current
             return true
         case "current_model_update":
             guard model?.route == .legacyModel,
@@ -81,6 +94,7 @@ struct SessionConfiguration: Equatable, Sendable {
         switch kind {
         case .model: model
         case .effort: effort
+        case .permissionMode: permissionMode
         }
     }
 
@@ -88,12 +102,14 @@ struct SessionConfiguration: Equatable, Sendable {
         guard let option = object(value) else { return nil }
         if let category = option["category"], category != .null {
             switch string(category) {
+            case "mode": return .permissionMode
             case "model": return .model
             case "thought_level": return .effort
             default: return nil
             }
         }
         switch string(option["id"]) {
+        case "mode": return .permissionMode
         case "model": return .model
         case "effort", "reasoning_effort", "thought_level": return .effort
         default: return nil
@@ -128,20 +144,20 @@ struct SessionConfiguration: Equatable, Sendable {
         return result
     }
 
-    private static func legacyPicker(_ value: ACPJSONValue?) -> SessionPicker? {
+    private static func legacyPicker(_ value: ACPJSONValue?, mode: Bool = false) -> SessionPicker? {
         guard let models = value.flatMap(object),
-              let current = string(models["currentModelId"]),
-              case let .array(available) = models["availableModels"] else { return nil }
+              let current = string(models[mode ? "currentModeId" : "currentModelId"]),
+              case let .array(available) = models[mode ? "availableModes" : "availableModels"] else { return nil }
         let options: [ACPJSONValue] = available.compactMap { value in
-            guard var option = object(value), let id = string(option["modelId"]) else { return nil }
+            guard var option = object(value), let id = string(option[mode ? "id" : "modelId"]) else { return nil }
             option["value"] = .string(id)
-            // Legacy models do not have groups.
+            // Legacy models and modes do not have groups.
             option.removeValue(forKey: "group")
             option.removeValue(forKey: "options")
             return .object(option)
         }
         guard let choices = choices(options) else { return nil }
-        return SessionPicker(route: .legacyModel, currentValue: current, choices: choices, description: nil)
+        return SessionPicker(route: mode ? .legacyMode : .legacyModel, currentValue: current, choices: choices, description: nil)
     }
 
     private static func object(_ value: ACPJSONValue) -> [String: ACPJSONValue]? {

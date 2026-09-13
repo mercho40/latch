@@ -7,8 +7,24 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
     private let sidebar = SidebarViewController()
     private let detail = DetailHostViewController()
     private var shuttingDown = false
+    private let store: SessionStore?
+    private var persistenceReady = false
+    private var restoreAttempted = false
+    private var restoreFinished = false
+    private var debounceSave: Task<Void, Never>?
+    private var saveTask: Task<Void, Never>?
+    private(set) var persistenceError: String?
 
-    init() {
+    var savedLibrary: SavedSessionLibrary {
+        SavedSessionLibrary(sessions: sidebar.allSessions.map(\.savedSession),
+                            selectedSessionID: sidebar.selectedSession?.id)
+    }
+
+    /// Tests and UI smoke runs opt out unless given their own temporary store.
+    init(store: SessionStore? = nil) {
+        self.store = store
+        persistenceReady = store == nil
+        restoreFinished = store == nil
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false
@@ -49,7 +65,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
     // MARK: Sessions
 
     @objc func newSession(_ sender: Any?) {
-        guard let window, !shuttingDown else { return }
+        guard let window, !shuttingDown, restoreFinished else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -67,17 +83,89 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment)
         session.onChange = { [weak self] in self?.sessionChanged() }
         sidebar.add(session)
+        scheduleSave()
         return session
     }
 
     private func show(_ session: SessionViewController?) {
         detail.show(session)
         updateTitle()
+        scheduleSave()
     }
 
     private func sessionChanged() {
         sidebar.refreshRows()
         updateTitle()
+        scheduleSave()
+    }
+
+    func restoreSessions(launchEnvironment: AgentLaunchEnvironment? = nil) async {
+        guard let store, !restoreAttempted, !shuttingDown else { return }
+        restoreAttempted = true
+        defer { restoreFinished = true }
+        do {
+            let library = try await store.load()
+            guard !shuttingDown else { return }
+            for saved in library.sessions {
+                let session = SessionViewController(workspace: URL(fileURLWithPath: saved.workspacePath),
+                                                    launchEnvironment: launchEnvironment, savedSession: saved)
+                session.onChange = { [weak self] in self?.sessionChanged() }
+                // Building the sidebar must not start every saved command.
+                sidebar.add(session, selecting: false)
+            }
+            sidebar.select(sidebar.allSessions.first { $0.id == library.selectedSessionID })
+            persistenceReady = true
+        } catch {
+            // Leave the original file intact; this run cannot overwrite unreadable data.
+            reportPersistenceError(error)
+        }
+    }
+
+    private func scheduleSave() {
+        guard store != nil, persistenceReady, !shuttingDown else { return }
+        // Throttle rather than restart a debounce on every chunk: a long response must
+        // still reach disk periodically. The snapshot is taken after the delay.
+        guard debounceSave == nil else { return }
+        debounceSave = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(500)) }
+            catch { return }
+            guard let self else { return }
+            self.debounceSave = nil
+            await self.flushPersistence()
+        }
+    }
+
+    func flushPersistence() async {
+        debounceSave?.cancel()
+        debounceSave = nil
+        guard let store, persistenceReady else { return }
+        let snapshot = savedLibrary
+        let previous = saveTask
+        let task = Task { [weak self] in
+            // A quit-time snapshot must never be overwritten by an older in-flight save.
+            await previous?.value
+            do {
+                try await store.save(snapshot)
+                self?.persistenceError = nil
+            } catch {
+                self?.reportPersistenceError(error)
+            }
+        }
+        saveTask = task
+        await task.value
+    }
+
+    private func reportPersistenceError(_ error: any Error) {
+        let message = "\(error.localizedDescription) Existing saved data has not been discarded. Changes may not survive quitting Latch."
+        guard persistenceError != message else { return }
+        persistenceError = message
+        guard let window, window.isVisible, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Sessions could not be saved or restored"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
     }
 
     private func updateTitle() {
@@ -93,7 +181,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
 
     func shutdown() async {
         shuttingDown = true
+        await flushPersistence()
         for session in sidebar.allSessions { await session.shutdown() }
+        // Teardown may deliver a final chunk. IDs, drafts and history survive disconnect.
+        await flushPersistence()
     }
 
     @objc func copyConversation(_ sender: Any?) {
@@ -130,6 +221,11 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
     // MARK: Smoke test
 
     /// Exercises the sidebar and the selected session with real AppKit controls.
+    /// Transport of the first remaining session after the smoke run, for the bundle script to assert on.
+    func smokeTransportDescription() -> String {
+        sidebar.allSessions.first?.model.serviceTransportDescription ?? "no session"
+    }
+
     func smokeTest() async throws {
         let fixtureHome = FileManager.default.temporaryDirectory.appendingPathComponent("Latch agents \(UUID().uuidString)")
         try FileManager.default.createDirectory(at: fixtureHome, withIntermediateDirectories: true)
@@ -157,6 +253,24 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         guard sidebar.selectedSession === first, detail.children.first === first, second.view.window == nil else {
             throw SmokeError.failed("Selecting a sidebar row did not swap the detail view")
         }
+        // The composer's preferred width must never become the window's maximum width:
+        // at .defaultHigh it outranked the window's own 500, walling the window at ~1200pt.
+        if let window, let screen = window.screen ?? NSScreen.main {
+            let target = min(1500, screen.visibleFrame.width)
+            if target > 1300 {
+                let restore = window.frame
+                window.setContentSize(NSSize(width: target, height: 800))
+                window.contentView?.layoutSubtreeIfNeeded()
+                let reached = window.contentView?.frame.width ?? 0
+                guard reached >= target - 1 else {
+                    throw SmokeError.failed(
+                        "Window stopped widening at \(reached)pt of \(target)pt; a content constraint caps the window"
+                    )
+                }
+                window.setFrame(restore, display: false)
+            }
+        }
+
         // Exercise the composer pickers at the smallest supported window size.
         let originalSize = window?.contentView?.frame.size
         if let window { window.setContentSize(window.contentMinSize) }

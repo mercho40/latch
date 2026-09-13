@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .library(name: "LatchMacUI", targets: ["LatchMacUI"]),
+        .library(name: "LatchAgentServiceHost", targets: ["LatchAgentServiceHost"]),
         .executable(name: "Latch", targets: ["Latch"]),
     ],
     dependencies: [
@@ -14,7 +15,13 @@ let package = Package(
         .package(path: "../../Packages/LatchServiceProtocol"),
     ],
     targets: [
-        .target(name: "LatchMacUI", dependencies: ["LatchACP", "LatchAgentCore", "LatchServiceProtocol"]),
+        .target(name: "LatchMacUI", dependencies: [
+            "LatchACP", "LatchAgentCore", "LatchServiceProtocol",
+            .product(name: "LatchAgentXPC", package: "LatchAgentCore"),
+        ]),
+        .target(name: "LatchAgentServiceHost", dependencies: [
+            .product(name: "LatchAgentXPC", package: "LatchAgentCore"),
+        ]),
         .executableTarget(name: "Latch", dependencies: ["LatchMacUI"]),
         .testTarget(name: "LatchMacUITests", dependencies: ["LatchMacUI", "LatchServiceProtocol"]),
     ]

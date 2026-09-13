@@ -5,6 +5,7 @@ import LatchServiceProtocol
 public enum AgentRuntimeRegistryError: Error, Equatable, Sendable {
     case duplicateRuntime(AgentRuntimeID)
     case runtimeNotFound(AgentRuntimeID)
+    case permissionRequestNotFound(UUID)
 }
 
 /// Owns the set of ACP runtimes supervised by the Latch Agent process.
@@ -16,6 +17,15 @@ public actor AgentRuntimeRegistry {
     private let eventContinuation: AsyncStream<LatchAgentEvent>.Continuation
     private var runtimes: [AgentRuntimeID: ACPAgentRuntime] = [:]
     private var forwardingTasks: [AgentRuntimeID: [Task<Void, Never>]] = [:]
+    private var pendingPermissions: [UUID: PendingPermission] = [:]
+
+    /// Requests beyond this per-runtime limit are cancelled immediately instead of queued.
+    public static let maximumPendingPermissionsPerRuntime = 16
+
+    private struct PendingPermission {
+        let runtimeID: AgentRuntimeID
+        let continuation: CheckedContinuation<ACPPermissionOutcome, Never>
+    }
 
     public init() {
         let pair = AsyncStream<LatchAgentEvent>.makeStream()
@@ -47,12 +57,35 @@ public actor AgentRuntimeRegistry {
             await self?.removeTerminatedRuntime(id: id, runtime: runtime, status: status)
         }
 
+        let initialization: ACPInitializeResponse
         do {
-            return try await runtime.start()
+            initialization = try await runtime.start()
         } catch {
             removeRuntimeIfOwned(id: id, runtime: runtime)
             throw error
         }
+        // Permission requests are brokered as events so clients on any transport can answer.
+        // If the runtime already left the ready state, it is being torn down and needs no handler.
+        try? await runtime.setPermissionHandler { [weak self] request in
+            await self?.brokerPermission(runtimeID: id, runtime: runtime, request: request) ?? .cancelled
+        }
+        return initialization
+    }
+
+    /// Answers a pending `permissionRequested` event for `runtimeID`.
+    public func resolvePermission(
+        runtimeID: AgentRuntimeID,
+        requestID: UUID,
+        outcome: ACPPermissionOutcome
+    ) throws {
+        guard let pending = pendingPermissions[requestID], pending.runtimeID == runtimeID else {
+            throw AgentRuntimeRegistryError.permissionRequestNotFound(requestID)
+        }
+        closePermission(requestID: requestID, pending: pending, outcome: outcome)
+    }
+
+    public func pendingPermissionRequestIDs(runtimeID: AgentRuntimeID) -> [UUID] {
+        pendingPermissions.filter { $0.value.runtimeID == runtimeID }.keys.sorted { $0.uuidString < $1.uuidString }
     }
 
     public func runtime(for id: AgentRuntimeID) throws -> ACPAgentRuntime {
@@ -85,6 +118,17 @@ public actor AgentRuntimeRegistry {
         return try await runtime.newSession(cwd: cwd, mcpServers: mcpServers)
     }
 
+    @discardableResult
+    public func loadSession(
+        runtimeID: AgentRuntimeID,
+        sessionID: String,
+        cwd: String,
+        mcpServers: [ACPJSONValue] = []
+    ) async throws -> ACPLoadSessionResponse {
+        let runtime = try runtime(for: runtimeID)
+        return try await runtime.loadSession(sessionID: sessionID, cwd: cwd, mcpServers: mcpServers)
+    }
+
     public func setSessionConfigOption(
         runtimeID: AgentRuntimeID,
         configID: String,
@@ -100,16 +144,25 @@ public actor AgentRuntimeRegistry {
         return try await runtime.setSessionModel(modelID: modelID)
     }
 
+    @discardableResult
+    public func setSessionMode(runtimeID: AgentRuntimeID, modeID: String) async throws -> UInt64 {
+        let runtime = try runtime(for: runtimeID)
+        return try await runtime.setSessionMode(modeID: modeID)
+    }
+
     public func prompt(
         runtimeID: AgentRuntimeID,
         text: String
     ) async throws -> ACPPromptResponse {
         let runtime = try runtime(for: runtimeID)
+        // A decision cannot outlive its prompt; release anything the agent left waiting.
+        defer { cancelPendingPermissions(runtimeID: runtimeID) }
         return try await runtime.prompt(text)
     }
 
     public func cancelPrompt(runtimeID: AgentRuntimeID) async throws {
         let runtime = try runtime(for: runtimeID)
+        cancelPendingPermissions(runtimeID: runtimeID)
         try await runtime.cancelPrompt()
     }
 
@@ -125,6 +178,9 @@ public actor AgentRuntimeRegistry {
         let ownedRuntimes = Array(runtimes.values)
         runtimes.removeAll()
         cancelAllForwardingTasks()
+        for id in Set(pendingPermissions.values.map(\.runtimeID)) {
+            cancelPendingPermissions(runtimeID: id)
+        }
         await withTaskGroup(of: Void.self) { group in
             for runtime in ownedRuntimes {
                 group.addTask {
@@ -165,6 +221,34 @@ public actor AgentRuntimeRegistry {
         guard runtimes[id] === runtime else { return }
         runtimes[id] = nil
         forwardingTasks.removeValue(forKey: id)?.forEach { $0.cancel() }
+        cancelPendingPermissions(runtimeID: id)
+    }
+
+    private func brokerPermission(
+        runtimeID: AgentRuntimeID,
+        runtime: ACPAgentRuntime,
+        request: ACPPermissionRequest
+    ) async -> ACPPermissionOutcome {
+        guard runtimes[runtimeID] === runtime,
+              pendingPermissions.values.filter({ $0.runtimeID == runtimeID }).count
+                < Self.maximumPendingPermissionsPerRuntime else { return .cancelled }
+        let requestID = UUID()
+        return await withCheckedContinuation { continuation in
+            pendingPermissions[requestID] = PendingPermission(runtimeID: runtimeID, continuation: continuation)
+            eventContinuation.yield(.permissionRequested(runtimeID: runtimeID, requestID: requestID, request: request))
+        }
+    }
+
+    private func cancelPendingPermissions(runtimeID: AgentRuntimeID) {
+        for (requestID, pending) in pendingPermissions where pending.runtimeID == runtimeID {
+            closePermission(requestID: requestID, pending: pending, outcome: .cancelled)
+        }
+    }
+
+    private func closePermission(requestID: UUID, pending: PendingPermission, outcome: ACPPermissionOutcome) {
+        pendingPermissions[requestID] = nil
+        pending.continuation.resume(returning: outcome)
+        eventContinuation.yield(.permissionClosed(runtimeID: pending.runtimeID, requestID: requestID))
     }
 
     private func cancelAllForwardingTasks() {

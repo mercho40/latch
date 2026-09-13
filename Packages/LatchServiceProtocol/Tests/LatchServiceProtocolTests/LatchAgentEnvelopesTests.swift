@@ -39,6 +39,19 @@ final class LatchAgentEnvelopesTests: XCTestCase {
         }
     }
 
+    func testAuthenticationRequiredFailureSerialization() throws {
+        let failure = LatchAgentFailure(
+            code: .authenticationRequired,
+            message: "Agent reported: Not logged in. Please run /login."
+        )
+        let data = try JSONEncoder().encode(failure)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
+        XCTAssertEqual(object["code"], "authenticationRequired")
+        XCTAssertEqual(object["message"], failure.message)
+        XCTAssertEqual(try JSONDecoder().decode(LatchAgentFailure.self, from: data), failure)
+        try assertJSONRoundTrip(LatchAgentReply(requestID: requestID, result: .failure(failure)))
+    }
+
     func testEventEnvelopeRoundTripsThroughJSON() throws {
         let envelope = LatchAgentEventEnvelope(
             sequence: 42,

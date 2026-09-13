@@ -65,6 +65,15 @@ public struct ACPAgentCapabilities: Codable, Equatable, Sendable {
         self.meta = meta
     }
 
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        loadSession = try container.decodeIfPresent(Bool.self, forKey: .loadSession) ?? false
+        promptCapabilities = try container.decodeIfPresent(ACPJSONValue.self, forKey: .promptCapabilities)
+        mcpCapabilities = try container.decodeIfPresent(ACPJSONValue.self, forKey: .mcpCapabilities)
+        sessionCapabilities = try container.decodeIfPresent(ACPJSONValue.self, forKey: .sessionCapabilities)
+        meta = try container.decodeIfPresent(ACPJSONValue.self, forKey: .meta)
+    }
+
     private enum CodingKeys: String, CodingKey {
         case loadSession
         case promptCapabilities
@@ -154,6 +163,8 @@ public enum ACPClientError: Error, Equatable, Sendable {
     case initializationAlreadyAttempted
     case noActiveSession
     case promptAlreadyActive
+    case loadSessionUnsupported
+    case sessionOperationSuperseded
     case unsupportedProtocolVersion(expected: Int, received: Int)
 }
 
@@ -178,6 +189,12 @@ public actor ACPClient {
         let methodId: String
     }
 
+    private struct LoadSessionRequest: Encodable {
+        let sessionId: String
+        let cwd: String
+        let mcpServers: [ACPJSONValue]
+    }
+
     private struct NewSessionRequest: Encodable {
         let cwd: String
         let mcpServers: [ACPJSONValue]
@@ -192,6 +209,11 @@ public actor ACPClient {
     private struct SetSessionModelRequest: Encodable {
         let sessionId: String
         let modelId: String
+    }
+
+    private struct SetSessionModeRequest: Encodable {
+        let sessionId: String
+        let modeId: String
     }
 
     private struct PromptRequest: Encodable {
@@ -214,6 +236,7 @@ public actor ACPClient {
     private let connection: ACPJSONRPCConnection
     private var state = State.idle
     private var activeSessionID: String?
+    private var sessionGeneration: UInt64 = 0
     private var promptIsActive = false
 
     public init(connection: ACPJSONRPCConnection) {
@@ -285,6 +308,10 @@ public actor ACPClient {
         mcpServers: [ACPJSONValue] = []
     ) async throws -> ACPNewSessionResponse {
         try requireInitialized()
+        guard !promptIsActive else { throw ACPClientError.promptAlreadyActive }
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        activeSessionID = nil
         let request = NewSessionRequest(cwd: cwd, mcpServers: mcpServers)
         let received = try await connection.requestWithSequence(
             "session/new",
@@ -294,8 +321,42 @@ public actor ACPClient {
         let response = try Self.decodeSessionValue(
             received.response, sequence: received.sequence, as: ACPNewSessionResponse.self
         )
+        guard generation == sessionGeneration else { throw ACPClientError.sessionOperationSuperseded }
         activeSessionID = response.sessionId
         return response
+    }
+
+    /// Select the persisted session before suspension so operations during load replay
+    /// address it. Notifications remain unfiltered, just as for session/new; consumers
+    /// own session/generation filtering and replay presentation.
+    public func loadSession(
+        sessionID: String,
+        cwd: String,
+        mcpServers: [ACPJSONValue] = []
+    ) async throws -> ACPLoadSessionResponse {
+        guard try negotiatedCapabilities().loadSession else {
+            throw ACPClientError.loadSessionUnsupported
+        }
+        guard !promptIsActive else { throw ACPClientError.promptAlreadyActive }
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        activeSessionID = sessionID
+        do {
+            let request = LoadSessionRequest(sessionId: sessionID, cwd: cwd, mcpServers: mcpServers)
+            let received = try await connection.requestWithSequence(
+                "session/load",
+                params: try ACPJSONValue.encode(request),
+                as: ACPJSONValue.self
+            )
+            guard generation == sessionGeneration else { throw ACPClientError.sessionOperationSuperseded }
+            return try Self.decodeSessionValue(
+                received.response, sequence: received.sequence, as: ACPLoadSessionResponse.self
+            )
+        } catch {
+            // A stale failure must not clear a newer new/load selection.
+            if generation == sessionGeneration { activeSessionID = nil }
+            throw error
+        }
     }
 
     public func setSessionConfigOption(
@@ -330,6 +391,21 @@ public actor ACPClient {
         let request = SetSessionModelRequest(sessionId: activeSessionID, modelId: modelID)
         let received = try await connection.requestWithSequence(
             "session/set_model",
+            params: try ACPJSONValue.encode(request),
+            as: EmptyResponse.self
+        )
+        return received.sequence
+    }
+
+    @discardableResult
+    public func setSessionMode(modeID: String) async throws -> UInt64 {
+        try requireInitialized()
+        guard let activeSessionID else {
+            throw ACPClientError.noActiveSession
+        }
+        let request = SetSessionModeRequest(sessionId: activeSessionID, modeId: modeID)
+        let received = try await connection.requestWithSequence(
+            "session/set_mode",
             params: try ACPJSONValue.encode(request),
             as: EmptyResponse.self
         )

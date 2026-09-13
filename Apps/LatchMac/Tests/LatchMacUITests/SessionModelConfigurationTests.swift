@@ -225,7 +225,8 @@ final class SessionModelConfigurationTests: XCTestCase {
         XCTAssertFalse(model.isChangingConfiguration)
         XCTAssertEqual(model.phase, .disconnected)
         XCTAssertNil(model.errorMessage)
-        await connect(model, variant: .modern)
+        // Intentionally start a new context with initial configuration, not resume (see SessionResumeTests).
+        await connect(model, variant: .modern, startNewSession: true)
         XCTAssertEqual(model.configuration.model?.currentValue, "fast")
         XCTAssertEqual(model.configuration.effort?.currentValue, "low")
         XCTAssertFalse(model.isChangingConfiguration)
@@ -250,10 +251,16 @@ final class SessionModelConfigurationTests: XCTestCase {
         return model
     }
 
-    @MainActor private func connect(_ model: SessionModel, variant: ConfigurationSmokeAgent.Variant) async {
+    @MainActor private func connect(
+        _ model: SessionModel, variant: ConfigurationSmokeAgent.Variant, startNewSession: Bool = false
+    ) async {
         let script = ConfigurationSmokeAgent.script(variant: variant)
         let command = "/bin/sh -c '" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        await run { await model.connect(command: command, workspace: URL(fileURLWithPath: "/tmp")) }
+        await run {
+            await model.connect(
+                command: command, workspace: URL(fileURLWithPath: "/tmp"), startNewSession: startNewSession
+            )
+        }
         XCTAssertEqual(model.phase, .ready)
         XCTAssertNil(model.errorMessage)
     }

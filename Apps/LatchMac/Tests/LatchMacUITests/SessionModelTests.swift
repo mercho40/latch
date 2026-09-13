@@ -38,7 +38,8 @@ final class SessionModelTests: XCTestCase {
         XCTAssertTrue(model.transcript.contains("Agent\nworking"))
         await model.disconnect()
         XCTAssertEqual(model.phase, .disconnected)
-        await model.connect(command: command, workspace: URL(fileURLWithPath: "/tmp"))
+        // Intentionally start an empty context; this fixture cannot resume (see SessionResumeTests).
+        await model.connect(command: command, workspace: URL(fileURLWithPath: "/tmp"), startNewSession: true)
         XCTAssertEqual(model.phase, .ready)
         XCTAssertTrue(model.transcript.isEmpty)
         await model.disconnect()

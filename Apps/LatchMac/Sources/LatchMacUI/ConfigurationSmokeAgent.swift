@@ -3,6 +3,7 @@
 enum ConfigurationSmokeAgent {
     enum Variant {
         case modern
+        case permissionMode
         case rejectEffort
         case legacy
         /// Bursts session/new fast+low, then deep+high and a sentinel notification.
@@ -30,6 +31,7 @@ enum ConfigurationSmokeAgent {
         var marker = ""
         switch variant {
         case .modern: mode = "modern"
+        case .permissionMode: mode = "permission-mode"
         case .rejectEffort: mode = "reject-effort"
         case .legacy: mode = "legacy"
         case .updateAfterNewSession: mode = "new-update"
@@ -47,6 +49,7 @@ enum ConfigurationSmokeAgent {
         return header + #"""
         model=fast
         effort=low
+        permission=default
         pending=
         prompt_id=
         legacy_models='{"currentModelId":"fast","availableModels":[{"modelId":"fast","name":"Fast"},{"modelId":"deep","name":"Deep"}]}'
@@ -54,6 +57,9 @@ enum ConfigurationSmokeAgent {
           efforts='[{"value":"low","name":"Low"},{"value":"high","name":"High"}]'
           if [ "$model" = deep ]; then efforts='[{"value":"high","name":"High"}]'; fi
           options='[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"'"$model"'","options":[{"value":"fast","name":"Fast"},{"value":"deep","name":"Deep"}]},{"id":"effort","name":"Effort","category":"thought_level","type":"select","currentValue":"'"$effort"'","options":'"$efforts"'}]'
+          if [ "$mode" = permission-mode ]; then
+            options=${options%]}' ,{"id":"mode","name":"Permission mode","category":"mode","type":"select","currentValue":"'"$permission"'","options":[{"value":"default","name":"Ask before edits"},{"value":"plan","name":"Plan only"}]}]'
+          fi
           if [ "$mode" = mixed ]; then
             options='[{"id":"effort","name":"Effort","category":"thought_level","type":"select","currentValue":"'"$effort"'","options":'"$efforts"'}]'
           fi
@@ -118,6 +124,13 @@ enum ConfigurationSmokeAgent {
                     *\"value\":\"high\"*) effort=high ;;
                     *\"value\":\"low\"*) effort=low ;;
                     *) exit 92 ;;
+                  esac
+                  ;;
+                *\"configId\":\"mode\"*)
+                  case "$line" in
+                    *\"value\":\"plan\"*) permission=plan ;;
+                    *\"value\":\"default\"*) permission=default ;;
+                    *) exit 97 ;;
                   esac
                   ;;
                 *\"configId\":\"model\"*)

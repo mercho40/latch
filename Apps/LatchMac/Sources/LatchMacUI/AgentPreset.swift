@@ -54,10 +54,10 @@ struct AgentLaunchRecipe {
 
     func problem(in environment: AgentLaunchEnvironment) -> String? {
         if requiresNode, environment.executable(named: "node") == nil || environment.executable(named: "npx") == nil {
-            return "Install Node.js 22+ with npm, then click Refresh."
+            return "Install Node.js 22+ with npm, then select this agent again."
         }
         guard let parsed = try? AgentCommand(command), environment.executable(named: parsed.executable) != nil else {
-            return "\(setup) Then click Refresh."
+            return "\(setup) Then select this agent again."
         }
         return nil
     }

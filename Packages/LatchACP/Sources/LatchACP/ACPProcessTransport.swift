@@ -84,12 +84,40 @@ public final class ACPProcessTransport: @unchecked Sendable {
         try await writer.write(data)
     }
 
+    /// Default time an agent gets to exit after SIGTERM before it is force-killed.
+    public static let defaultTerminationGracePeriod: Duration = .seconds(5)
+
     /// Closes stdin and terminates only the subprocess owned by this transport if needed.
-    public func stop() async {
+    ///
+    /// The process first receives SIGTERM. If it is still running after `gracePeriod`,
+    /// it receives SIGKILL. This method returns only once the process has exited, so a
+    /// hung agent cannot leave an orphaned subprocess behind.
+    public func stop(gracePeriod: Duration = ACPProcessTransport.defaultTerminationGracePeriod) async {
         await writer.close()
-        if process.isRunning {
-            process.terminate()
+        guard process.isRunning else { return }
+        process.terminate()
+        if await waitForExit(within: gracePeriod) { return }
+        forceKill()
+        _ = await waitForExit(within: .seconds(5))
+    }
+
+    /// Whether the transport escalated to SIGKILL during `stop`.
+    public private(set) var wasForceKilled = false
+
+    private func forceKill() {
+        guard process.isRunning else { return }
+        wasForceKilled = true
+        kill(process.processIdentifier, SIGKILL)
+    }
+
+    /// Polls `isRunning`; the public `termination` stream is single-consumer and owned by the caller.
+    private func waitForExit(within limit: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + limit
+        while process.isRunning {
+            guard ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(20))
         }
+        return true
     }
 
     private static func forward(

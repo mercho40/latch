@@ -1,7 +1,6 @@
 import AppKit
 
-/// Source list of workspaces and the sessions opened in each during this run.
-/// Session persistence and resume come later; today a session lives as long as the window.
+/// Source list of saved and newly opened sessions, grouped by workspace.
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     final class Workspace {
@@ -54,7 +53,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     // MARK: Mutations
 
-    func add(_ session: SessionViewController) {
+    func add(_ session: SessionViewController, selecting: Bool = true) {
         let workspace: Workspace
         if let existing = workspaces.first(where: { $0.url.standardizedFileURL == session.workspace.standardizedFileURL }) {
             workspace = existing
@@ -65,7 +64,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         workspace.sessions.append(session)
         outline.reloadData()
         outline.expandItem(nil, expandChildren: true)
-        select(session)
+        if selecting { select(session) }
     }
 
     func select(_ session: SessionViewController?) {

@@ -21,6 +21,9 @@ final class LatchAgentMessagesTests: XCTestCase {
             .cancelPrompt(runtimeID: id),
             .setSessionConfigOption(runtimeID: id, configID: "effort", value: "high"),
             .setSessionModel(runtimeID: id, modelID: "model-b"),
+            .setSessionMode(runtimeID: id, modeID: "ask"),
+            .resolvePermission(runtimeID: id, requestID: UUID(), outcome: .selected(optionID: "allow-once")),
+            .resolvePermission(runtimeID: id, requestID: UUID(), outcome: .cancelled),
         ]
 
         for command in commands {
@@ -57,6 +60,8 @@ final class LatchAgentMessagesTests: XCTestCase {
                 ], localSequence: 3)
             ),
             .sessionModelSet(runtimeID: id, sequence: 4),
+            .sessionModeSet(runtimeID: id, sequence: 5),
+            .permissionResolved(runtimeID: id, requestID: UUID()),
         ]
 
         for response in responses {
@@ -81,6 +86,12 @@ final class LatchAgentMessagesTests: XCTestCase {
             .sessionUpdate(runtimeID: id, notification: notification),
             .standardError(runtimeID: id, data: Data("diagnostic".utf8)),
             .processTerminated(runtimeID: id, status: 7),
+            .permissionRequested(runtimeID: id, requestID: UUID(), request: ACPPermissionRequest(
+                sessionId: "session-1",
+                toolCall: .object(["toolCallId": .string("call-1"), "title": .string("Read file")]),
+                options: [ACPPermissionOption(optionId: "allow-once", name: "Allow", kind: "allow_once")]
+            )),
+            .permissionClosed(runtimeID: id, requestID: UUID()),
         ]
 
         for event in events {

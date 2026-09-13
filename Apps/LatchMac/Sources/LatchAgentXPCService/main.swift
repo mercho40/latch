@@ -1,0 +1,3 @@
+import LatchAgentServiceHost
+
+LatchAgentServiceHost.main()

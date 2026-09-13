@@ -8,11 +8,13 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
-        let controller = SessionWindowController()
+        let smokeTest = CommandLine.arguments.contains("--smoke-test")
+        let controller = SessionWindowController(store: smokeTest ? nil : SessionStore(directory: SessionStore.defaultDirectory))
         self.controller = controller
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-        if CommandLine.arguments.contains("--smoke-test") {
+        if !smokeTest { Task { await controller.restoreSessions() } }
+        if smokeTest {
             DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
                 FileHandle.standardError.write(Data("UI SMOKE: timed out\n".utf8))
                 exit(EXIT_FAILURE)
@@ -20,6 +22,7 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate {
             Task {
                 do {
                     try await controller.smokeTest()
+                    print("UI SMOKE: agent service transport = \(controller.smokeTransportDescription()) (app pid \(getpid()))")
                     print("UI SMOKE: chat layout, streaming, composer keyboard controls, sidebar, model/effort pickers, cancel, disconnect, permission sheets — PASS")
                     NSApp.terminate(nil)
                 } catch {

@@ -57,10 +57,14 @@ public enum LatchAgentCommand: Codable, Equatable, Sendable {
     case startRuntime(id: AgentRuntimeID, profile: ACPCommandProfile)
     case stopRuntime(id: AgentRuntimeID)
     case newSession(runtimeID: AgentRuntimeID, cwd: String)
+    case loadSession(runtimeID: AgentRuntimeID, sessionID: String, cwd: String)
     case setSessionConfigOption(runtimeID: AgentRuntimeID, configID: String, value: String)
     case setSessionModel(runtimeID: AgentRuntimeID, modelID: String)
+    case setSessionMode(runtimeID: AgentRuntimeID, modeID: String)
     case prompt(runtimeID: AgentRuntimeID, text: String)
     case cancelPrompt(runtimeID: AgentRuntimeID)
+    /// Answers a `permissionRequested` event. Unknown or already-closed requests fail.
+    case resolvePermission(runtimeID: AgentRuntimeID, requestID: UUID, outcome: ACPPermissionOutcome)
 }
 
 public enum LatchAgentResponse: Codable, Equatable, Sendable {
@@ -68,14 +72,21 @@ public enum LatchAgentResponse: Codable, Equatable, Sendable {
     case runtimeStarted(runtimeID: AgentRuntimeID, initialization: ACPInitializeResponse)
     case runtimeStopped(runtimeID: AgentRuntimeID)
     case sessionCreated(runtimeID: AgentRuntimeID, session: ACPNewSessionResponse)
+    case sessionLoaded(runtimeID: AgentRuntimeID, response: ACPLoadSessionResponse)
     case sessionConfigOptionSet(runtimeID: AgentRuntimeID, response: ACPSetSessionConfigOptionResponse)
     case sessionModelSet(runtimeID: AgentRuntimeID, sequence: UInt64)
+    case sessionModeSet(runtimeID: AgentRuntimeID, sequence: UInt64)
     case promptCompleted(runtimeID: AgentRuntimeID, response: ACPPromptResponse)
     case promptCancellationRequested(runtimeID: AgentRuntimeID)
+    case permissionResolved(runtimeID: AgentRuntimeID, requestID: UUID)
 }
 
 public enum LatchAgentEvent: Codable, Equatable, Sendable {
     case sessionUpdate(runtimeID: AgentRuntimeID, notification: ACPSessionNotification)
     case standardError(runtimeID: AgentRuntimeID, data: Data)
     case processTerminated(runtimeID: AgentRuntimeID, status: Int32)
+    /// The agent is waiting for a decision. Clients answer with `resolvePermission`.
+    case permissionRequested(runtimeID: AgentRuntimeID, requestID: UUID, request: ACPPermissionRequest)
+    /// The request was answered or cancelled and no longer accepts decisions.
+    case permissionClosed(runtimeID: AgentRuntimeID, requestID: UUID)
 }

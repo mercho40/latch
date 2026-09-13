@@ -141,6 +141,19 @@ public actor ACPAgentRuntime {
         return try await client.newSession(cwd: cwd, mcpServers: mcpServers)
     }
 
+    @discardableResult
+    public func loadSession(
+        sessionID: String,
+        cwd: String,
+        mcpServers: [ACPJSONValue] = []
+    ) async throws -> ACPLoadSessionResponse {
+        try requireReady()
+        guard let client else {
+            throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState)
+        }
+        return try await client.loadSession(sessionID: sessionID, cwd: cwd, mcpServers: mcpServers)
+    }
+
     public func setSessionConfigOption(
         configID: String,
         value: String
@@ -159,6 +172,15 @@ public actor ACPAgentRuntime {
             throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState)
         }
         return try await client.setSessionModel(modelID: modelID)
+    }
+
+    @discardableResult
+    public func setSessionMode(modeID: String) async throws -> UInt64 {
+        try requireReady()
+        guard let client else {
+            throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState)
+        }
+        return try await client.setSessionMode(modeID: modeID)
     }
 
     public func prompt(_ text: String) async throws -> ACPPromptResponse {

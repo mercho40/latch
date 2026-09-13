@@ -24,6 +24,7 @@ public enum LatchAgentFailureCode: String, Codable, Equatable, Sendable {
     case invalidRequest
     case unsupportedProtocolVersion
     case commandFailed
+    case authenticationRequired
 }
 
 public struct LatchAgentFailure: Codable, Error, Equatable, Sendable {
@@ -34,6 +35,10 @@ public struct LatchAgentFailure: Codable, Error, Equatable, Sendable {
         self.code = code
         self.message = message
     }
+}
+
+extension LatchAgentFailure: LocalizedError {
+    public var errorDescription: String? { message }
 }
 
 public enum LatchAgentReplyResult: Codable, Equatable, Sendable {

@@ -16,7 +16,7 @@ final class SessionAuthenticationTests: XCTestCase {
             await model.send("hey")
             XCTAssertEqual(model.phase, .disconnected)
             XCTAssertEqual(model.status, "Sign-in required")
-            XCTAssertTrue(model.errorMessage?.contains("select the harness again") == true)
+            XCTAssertTrue(model.errorMessage?.contains("then try again") == true)
             XCTAssertEqual(model.messages.map(\.text), ["hey"])
             XCTAssertEqual(model.configuration, SessionConfiguration())
             XCTAssertFalse(model.isChangingConfiguration)

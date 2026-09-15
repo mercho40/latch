@@ -7,6 +7,16 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
     private var shutdownComplete = false
     private var recentMenu: NSMenu?
     private(set) var menuBar: MenuBarController?
+    /// Built on first use and kept alive: the pane holds the selected agent and the
+    /// window's frame, and reopening ⌘, should land where it was left.
+    private var settingsWindow: SettingsWindowController?
+
+    /// Agent install state and the custom command live here, not in any session.
+    @objc func showSettings(_ sender: Any?) {
+        let controller = settingsWindow ?? SettingsWindowController()
+        settingsWindow = controller
+        controller.show()
+    }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
@@ -17,9 +27,13 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
                                         dockTile: NSApp.dockTile)
         let menuBar = MenuBarController(installsStatusItem: !smokeTest)
         self.menuBar = menuBar
+        // A smoke run gets its own preferences for the same reason it gets its own store:
+        // it must assert on Latch's behaviour, not on the agents this Mac's owner happens
+        // to have turned off.
         let controller = SessionWindowController(
             store: smokeTest ? nil : SessionStore(directory: SessionStore.defaultDirectory),
-            attention: attention, menuBar: menuBar
+            attention: attention, menuBar: menuBar,
+            settings: smokeTest ? AgentSettings(defaults: UserDefaults(suiteName: "LatchSmoke-\(UUID().uuidString)")!) : nil
         )
         self.controller = controller
         controller.showWindow(nil)
@@ -85,6 +99,9 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         let applicationItem = NSMenuItem()
         let application = NSMenu(title: "Latch")
         application.addItem(withTitle: "About Latch", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        application.addItem(.separator())
+        application.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+            .target = self
         application.addItem(.separator())
         let servicesItem = application.addItem(withTitle: "Services", action: nil, keyEquivalent: "")
         let services = NSMenu(title: "Services")

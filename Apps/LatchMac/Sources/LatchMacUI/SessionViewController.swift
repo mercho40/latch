@@ -103,22 +103,21 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Opens a sibling session on the same harness and command, beside this one.
     func forkSession() {
         guard canFork else { return }
-        onForkSession?(selectedAgent, selectedAgent == .custom ? command.stringValue : customCommand)
+        onForkSession?(selectedAgent, customCommand)
     }
 
     private var permissionAlert: (id: UUID, alert: NSAlert, escapeMonitor: Any?)?
-    private let command = NSTextField(string: "")
-    private let agents = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let agentHint = SettingsWrappingLabel(wrappingLabelWithString: "")
-    private let browse = NSButton(title: "Choose Executable…", target: nil, action: nil)
+    private let settings: AgentSettings
+    /// One filesystem scan, shared by the picker and the banner. Rescanning replaces it.
+    private var catalog: AgentCatalog
     private var launchEnvironment: AgentLaunchEnvironment
     private let injectedLaunchEnvironment: AgentLaunchEnvironment?
     private var drainTask: Task<Void, Never>?
-    private var commandEditing = false
-    private var commandDirty = false
     private var selectedAgent: AgentPreset = .custom
     private var customCommand = ""
     private var selectedRecipe: AgentLaunchRecipe?
+    /// What Latch will actually run for the selected harness, resolved from the catalog.
+    private var launchCommand = ""
     private var launchProblem: String?
     private var operation: UUID?
     private var operationTask: Task<Void, Never>?
@@ -129,19 +128,28 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// there must never reach the window's session-level undo.
     private let composerUndo = UndoManager()
     private var shuttingDown = false
-    private let status = NSTextField(labelWithString: "Not connected")
-    private let error = SettingsWrappingLabel(wrappingLabelWithString: "")
+    /// Connection problems and their remedies. Fixed-height chrome is gone: the banner
+    /// appears above the transcript only while there is something to say. It is the
+    /// session's whole error surface, so tests read it rather than a hidden label.
+    let banner = SessionBannerView()
+    /// Collapses out of the stack with the banner, so a session with nothing wrong gives
+    /// the whole column to the transcript.
+    private let bannerRow = NSView()
     let conversation = ChatTranscriptView(frame: .zero)
     private let prompt = ChatInputView(frame: .zero)
     private let composer = ChatComposerScrollView(frame: .zero)
-    private let connectionDetails = NSStackView()
     private let send = NSButton(title: "Send", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let modelPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let effortPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let permissionModePicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Only the settings that change between messages. The harness is chosen once per
+    /// session and then locked, so it lives in the window's toolbar, not in the composer.
     private lazy var composerControls = ComposerControlsView(
-        pickers: [modelPicker, effortPicker, permissionModePicker], actions: [cancel, send])
+        pickers: [.init(modelPicker, maximumWidth: 260),
+                  .init(effortPicker, minimumWidth: 96, maximumWidth: 150),
+                  .init(permissionModePicker)],
+        actions: [cancel, send])
     private var renderedConfiguration: SessionConfiguration?
     private var renderedPickerPlaceholder: String?
     private lazy var transcriptUpdates = TranscriptRenderScheduler { [weak self] in
@@ -149,18 +157,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     init(workspace: URL, launchEnvironment: AgentLaunchEnvironment? = nil, savedSession: SavedSession? = nil,
-         initialAgent: AgentPreset? = nil, initialCommand: String? = nil) {
+         initialAgent: AgentPreset? = nil, initialCommand: String? = nil,
+         settings: AgentSettings? = nil) {
         self.id = savedSession?.id ?? UUID()
         self.workspace = workspace
         self.injectedLaunchEnvironment = launchEnvironment
         self.launchEnvironment = launchEnvironment ?? AgentLaunchEnvironment()
+        let settings = settings ?? .shared
+        self.settings = settings
+        // A fresh session starts on the command configured in Settings; a restored or
+        // forked one keeps the command it already connected with.
+        let command = initialCommand ?? savedSession?.customCommand ?? settings.customCommand
+        catalog = AgentCatalog(environment: self.launchEnvironment, customCommand: command)
         selectedAgent = savedSession.flatMap { AgentPreset(rawValue: $0.agentID) }
-            ?? initialAgent ?? AgentPreset.suggested(in: self.launchEnvironment)
+            ?? initialAgent ?? settings.suggested(in: catalog)
         super.init(nibName: nil, bundle: nil)
-        if let initialCommand { customCommand = initialCommand }
+        customCommand = command
         if let savedSession {
             sessionTitle = savedSession.title
-            customCommand = savedSession.customCommand
             prompt.string = savedSession.draft
             model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID)
         }
@@ -172,6 +186,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             self?.transcriptUpdates.request()
             self?.onTranscriptChange?()
         }
+        NotificationCenter.default.addObserver(self, selector: #selector(agentSettingsChanged),
+                                               name: AgentSettings.didChangeNotification, object: settings)
     }
 
     required init?(coder: NSCoder) { fatalError("Not used") }
@@ -197,57 +213,19 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             root.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
         ])
 
-        agents.addItems(withTitles: AgentPreset.allCases.map(\.title))
-        agents.selectItem(at: AgentPreset.allCases.firstIndex(of: selectedAgent)!)
-        agents.target = self
-        agents.action = #selector(selectAgent)
-        agents.setAccessibilityLabel("ACP agent")
-        agents.setContentCompressionResistancePriority(.required, for: .horizontal)
-        command.placeholderString = "agent acp"
-        command.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        command.delegate = self
-        command.setAccessibilityLabel("ACP agent command")
-        command.toolTip = "Executable name or path and arguments. Quotes are supported; shell expansion is not."
-        command.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        command.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        status.font = .systemFont(ofSize: 11)
-        status.textColor = .secondaryLabelColor
-        status.lineBreakMode = .byTruncatingTail
-        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        status.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        root.addArrangedSubview(row([agents, status]))
-        connectionDetails.orientation = .vertical
-        connectionDetails.alignment = .leading
-        connectionDetails.spacing = 8
-        connectionDetails.addArrangedSubview(command)
-        agentHint.font = .systemFont(ofSize: 11)
-        agentHint.textColor = .secondaryLabelColor
-        agentHint.maximumNumberOfLines = 0
-        agentHint.setContentCompressionResistancePriority(.required, for: .vertical)
-        agentHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        agentHint.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        browse.target = self
-        browse.action = #selector(chooseExecutable)
-        browse.bezelStyle = .rounded
-        connectionDetails.addArrangedSubview(agentHint)
-        browse.setContentCompressionResistancePriority(.required, for: .horizontal)
-        browse.setContentCompressionResistancePriority(.required, for: .vertical)
-        connectionDetails.addArrangedSubview(row([browse, NSView()]))
-        for item in connectionDetails.arrangedSubviews {
-            item.translatesAutoresizingMaskIntoConstraints = false
-            item.widthAnchor.constraint(equalTo: connectionDetails.widthAnchor).isActive = true
-        }
-        root.addArrangedSubview(connectionDetails)
-        error.textColor = .systemRed
-        error.font = .systemFont(ofSize: 12)
-        error.setAccessibilityLabel("Session error")
-        error.maximumNumberOfLines = 0
-        error.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        error.setContentCompressionResistancePriority(.required, for: .vertical)
-        root.addArrangedSubview(error)
-        let separator = NSBox()
-        separator.boxType = .separator
-        root.addArrangedSubview(separator)
+        // The banner keeps the transcript's column so a failure reads as part of the
+        // conversation rather than as a second header above it.
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        bannerRow.addSubview(banner)
+        NSLayoutConstraint.activate([
+            banner.leadingAnchor.constraint(equalTo: bannerRow.leadingAnchor, constant: ChatTranscriptView.horizontalInset),
+            banner.trailingAnchor.constraint(equalTo: bannerRow.trailingAnchor, constant: -ChatTranscriptView.horizontalInset),
+            banner.topAnchor.constraint(equalTo: bannerRow.topAnchor),
+            banner.bottomAnchor.constraint(equalTo: bannerRow.bottomAnchor),
+        ])
+        banner.isHidden = true
+        bannerRow.isHidden = true
+        root.addArrangedSubview(bannerRow)
 
         conversation.setAccessibilityLabel("Conversation")
         // Expanded settings/errors may need the space at the minimum window size.
@@ -349,14 +327,6 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
     }
 
-    private func row(_ views: [NSView]) -> NSStackView {
-        let stack = NSStackView(views: views)
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 10
-        return stack
-    }
-
     private func configureTextView(_ text: NSTextView, in scroll: NSScrollView) {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -373,31 +343,15 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private func refresh() {
         guard isViewLoaded else { return }
         refreshPermission()
-        let disconnected = model.phase == .disconnected
-        let editable = canEditLaunch
-        agents.isEnabled = editable
-        browse.isEnabled = editable
-        browse.isHidden = selectedAgent != .custom
-        command.isHidden = selectedAgent != .custom
-        command.isEnabled = editable
-        command.isEditable = editable && selectedAgent == .custom
-        status.stringValue = displayStatus
-        let failure = model.errorMessage.map { message in
-            selectedAgent != .custom && disconnected ? startupError(message) : message
-        } ?? launchProblem
-        error.stringValue = failure ?? ""
-        error.isHidden = failure == nil
+        refreshBanner()
         // Drafting can continue during connection setup; only a queued send locks the ready composer.
         prompt.isEditable = !shuttingDown && (operation == nil || model.phase != .ready)
         refreshPickers()
-        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !commandEditing && !commandDirty && !model.isChangingConfiguration && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let preparing = operation != nil || model.phase == .connecting
         cancel.isEnabled = canStop
         cancel.isHidden = !preparing && model.phase != .prompting
         composerControls.refreshLayout()
-        // Launch details exist only for a user-supplied command; built-in agents report
-        // problems through the error label, so there is nothing to reveal or toggle.
-        connectionDetails.isHidden = selectedAgent != .custom
         prompt.placeholder = "Message \(selectedAgent.title)…"
         prompt.needsDisplay = true
         composer.refreshHeight()
@@ -410,6 +364,65 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private func renderTranscript() {
         guard isViewLoaded else { return }
         conversation.update(messages: model.messages, isWorking: model.phase == .prompting)
+    }
+
+    /// What the window's harness control should show and offer for this session.
+    var harnessSelection: HarnessSelection {
+        // A session never loses the harness it is running on, even when Settings stops
+        // offering it: the current selection always has to be representable.
+        let presets = AgentPreset.allCases.filter { settings.isEnabled($0) || $0 == selectedAgent }
+        let rows = presets.map { preset in
+            HarnessSelection.Row(preset: preset, title: preset.title, detail: agentDetail(for: preset),
+                                 isCurrent: preset == selectedAgent)
+        }
+        return HarnessSelection(rows: rows, current: selectedAgent,
+                                problem: catalog.status(for: selectedAgent).readiness.problem,
+                                isEditable: canEditLaunch && !shuttingDown)
+    }
+
+    /// Switching harness once a transcript exists opens a sibling session rather than
+    /// replacing this one's context. Say so on the row, before it happens.
+    private func agentDetail(for preset: AgentPreset) -> String {
+        if holdsConversation, preset != selectedAgent { return "Opens a new session" }
+        return catalog.status(for: preset).readiness.badge
+    }
+
+    /// The single place a connection problem is reported. Keyed on the failure itself, so
+    /// dismissing one keeps it dismissed while nothing has changed, and a different failure
+    /// always gets its say.
+    private func refreshBanner() {
+        let disconnected = model.phase == .disconnected
+        let failure = model.errorMessage.map { message in
+            selectedAgent != .custom && disconnected ? startupError(message) : message
+        } ?? launchProblem
+        guard let failure, !shuttingDown else {
+            banner.update(key: nil, title: "", message: "", severity: .error, actions: [])
+            bannerRow.isHidden = true
+            return
+        }
+        banner.update(
+            key: "\(model.phase)\u{0}\(selectedAgent.rawValue)\u{0}\(failure)",
+            title: disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem",
+            message: failure,
+            severity: disconnected ? .error : .warning,
+            actions: [
+                SessionBannerView.Action(title: "Retry") { [weak self] in self?.retryConnection() },
+                SessionBannerView.Action(title: "Agent Settings…") {
+                    NSApp.sendAction(#selector(LatchApplicationDelegate.showSettings(_:)), to: nil, from: nil)
+                },
+            ])
+        bannerRow.isHidden = banner.isHidden
+    }
+
+    /// The recovery path for everything the banner reports: rescan the filesystem, rebuild
+    /// the catalog, connect again. Installing a prerequisite and pressing Retry is the whole
+    /// loop — nothing here needs the harness reselected for the new state to be noticed.
+    private func retryConnection() {
+        guard canEditLaunch, !shuttingDown else { return }
+        banner.resetDismissal()
+        rescanLaunchEnvironment()
+        updateAgentCommand()
+        initializeSelection()
     }
 
     private func startupError(_ message: String) -> String {
@@ -554,35 +567,20 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     func textDidChange(_ notification: Notification) { refresh(); onChange?() }
 
     func undoManager(for view: NSTextView) -> UndoManager? { view === prompt ? composerUndo : nil }
-    func controlTextDidBeginEditing(_ obj: Notification) {
-        commandEditing = true
-        refresh()
-    }
 
-    func controlTextDidChange(_ obj: Notification) {
-        guard selectedAgent == .custom, canEditLaunch else { return }
-        commandDirty = customCommand != command.stringValue
-        updateAgentHint()
-        refresh()
-        // An edited command cannot resume context belonging to the previous command.
-        // Do not associate the previous agent ID with uncommitted command text on disk.
-        onChange?()
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        commandEditing = false
-        guard selectedAgent == .custom, canEditLaunch else { refresh(); return }
-        let changed = customCommand != command.stringValue
-        if changed, holdsConversation { return fork(agent: .custom, command: command.stringValue) }
-        if changed { pendingNewContext = true }
-        customCommand = command.stringValue
-        commandDirty = false
-        if changed || model.phase == .disconnected {
-            rescanLaunchEnvironment()
-            updateAgentCommand()
-            initializeSelection()
+    /// Settings changed the offered agents or the custom command. A connected session keeps
+    /// the harness it is running on; a disconnected one adopts the new command so the next
+    /// connection uses what the user just configured.
+    @objc private func agentSettingsChanged() {
+        guard isViewLoaded, !shuttingDown else { return }
+        let adopted = settings.customCommand
+        if selectedAgent == .custom, model.phase == .disconnected, adopted != customCommand, !holdsConversation {
+            customCommand = adopted
+            pendingNewContext = true
         }
-        else { refresh() }
+        rescanLaunchEnvironment()
+        updateAgentCommand()
+        refresh()
     }
 
     private var canEditLaunch: Bool {
@@ -590,95 +588,50 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             model.phase != .prompting
     }
 
-    @objc private func selectAgent() {
+    /// The one route into changing this session's harness, whatever asked for it.
+    func chooseHarness(_ selection: AgentPreset) {
         guard canEditLaunch else { return }
-        let selection = AgentPreset.allCases[agents.indexOfSelectedItem]
-        // Selecting an agent rescans, so installing a prerequisite then reselecting is
-        // the whole recovery path. There is no separate refresh control.
+        // Choosing rescans, so installing a prerequisite and picking the agent again
+        // still works; the banner's Retry is the same path with a name on it.
         rescanLaunchEnvironment()
-        let typed = selectedAgent == .custom ? command.stringValue : customCommand
-        if selection != selectedAgent || typed != customCommand, holdsConversation {
-            return fork(agent: selection, command: typed)
+        if selection != selectedAgent, holdsConversation {
+            return fork(agent: selection, command: customCommand)
         }
-        if selectedAgent == .custom {
-            commandDirty = customCommand != command.stringValue
-            customCommand = command.stringValue
-        }
-        let unchanged = selection == selectedAgent && !commandDirty
+        let unchanged = selection == selectedAgent
         if !unchanged { pendingNewContext = true }
         selectedAgent = selection
-        commandEditing = false
-        commandDirty = false
         updateAgentCommand()
         if unchanged && operation == nil && model.phase == .ready {
             refresh()
             return
         }
+        banner.resetDismissal()
         initializeSelection()
     }
 
     /// Leave this session exactly as it was — its transcript, agent context, harness, and
     /// committed command all survive — and let the window open the sibling session.
     private func fork(agent: AgentPreset, command newCommand: String) {
-        if let index = AgentPreset.allCases.firstIndex(of: selectedAgent) { agents.selectItem(at: index) }
-        commandEditing = false
-        commandDirty = false
-        updateAgentCommand()
         refresh()
         onForkSession?(agent, agent == .custom ? newCommand : customCommand)
         onChange?()
     }
 
-    /// Re-reads installed agents and Node locations from the filesystem. Tests inject a
-    /// fixed environment, which must not be replaced by a real scan.
+    /// Re-reads installed agents and Node locations from the filesystem and rebuilds the
+    /// catalog from them. Tests inject a fixed environment, which must not be replaced by a
+    /// real scan — but its catalog is still rebuilt, because the custom command can change.
     private func rescanLaunchEnvironment() {
-        guard injectedLaunchEnvironment == nil else { return }
-        launchEnvironment = AgentLaunchEnvironment()
+        if injectedLaunchEnvironment == nil { launchEnvironment = AgentLaunchEnvironment() }
+        catalog = AgentCatalog(environment: launchEnvironment, customCommand: customCommand)
     }
 
+    /// Re-resolves the selected harness. The command Latch will run and the problem stopping
+    /// it are read from the catalog, never from the contents of a control.
     private func updateAgentCommand() {
         selectedRecipe = selectedAgent.recipe(in: launchEnvironment)
-        command.stringValue = selectedRecipe?.command ?? customCommand
-        updateAgentHint()
-    }
-
-    private func updateAgentHint() {
-        launchProblem = selectedRecipe?.problem(in: launchEnvironment)
-        if selectedAgent != .custom {
-            agentHint.stringValue = launchProblem ?? selectedRecipe?.setup ?? ""
-        } else {
-            do {
-                let resolved = try launchEnvironment.resolve(AgentCommand(command.stringValue))
-                agentHint.stringValue = "Found: \(resolved.executable)"
-            } catch {
-                launchProblem = error.localizedDescription
-                agentHint.stringValue = launchProblem!
-            }
-        }
-        agentHint.toolTip = agentHint.stringValue
-    }
-
-    @objc private func chooseExecutable() {
-        guard let window = view.window, selectedAgent == .custom, canEditLaunch else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Choose Executable"
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard let self, response == .OK, let url = panel.url, self.selectedAgent == .custom, self.canEditLaunch else { return }
-            let arguments = (try? AgentCommand(self.command.stringValue))?.arguments ?? []
-            let command = ([url.path] + arguments).map(AgentCommand.quotedArgument).joined(separator: " ")
-            if command != self.customCommand {
-                if self.holdsConversation { return self.fork(agent: .custom, command: command) }
-                self.pendingNewContext = true
-            }
-            self.customCommand = command
-            self.updateAgentCommand()
-            self.commandEditing = false
-            self.commandDirty = false
-            self.initializeSelection()
-        }
+        let status = catalog.status(for: selectedAgent)
+        launchCommand = status.command
+        launchProblem = status.readiness.problem
     }
 
     /// Serialize teardown, asking the model to unblock initialization BEFORE awaiting it.
@@ -712,7 +665,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         guard !shuttingDown else { return }
         let drain = drainConnection()
         let token = UUID()
-        let input = command.stringValue
+        let input = launchCommand
         let environment = launchEnvironment
         let valid = launchProblem == nil
         let startNewSession = pendingNewContext
@@ -734,7 +687,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Send never initializes or retries a connection, nor commits an in-progress command edit.
     private func beginOperation(draft: String) {
         guard !shuttingDown, operation == nil, !changingConfiguration,
-              !commandEditing, !commandDirty, !model.isChangingConfiguration,
+              !model.isChangingConfiguration,
               model.phase == .ready else { return }
         let token = UUID()
         operation = token
@@ -744,7 +697,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                 if operation == token { operation = nil; operationTask = nil; refresh() }
             }
             guard !Task.isCancelled, !shuttingDown, operation == token,
-                  !commandEditing, !commandDirty, model.phase == .ready else { return }
+                  model.phase == .ready else { return }
             prompt.string = ""
             if sessionTitle == "New Session" {
                 let firstLine = draft.split(whereSeparator: \.isNewline).first.map(String.init) ?? draft
@@ -794,10 +747,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         ], home: fixtureHome, includeCommonLocations: false)
     }
 
-    /// Drives the real popup so a smoke run exercises the production selection path.
-    func smokeSelectAgent(_ agent: AgentPreset) {
-        agents.selectItem(at: AgentPreset.allCases.firstIndex(of: agent)!)
-        NSApp.sendAction(agents.action!, to: agents.target, from: agents)
+    /// Drives the production selection path, the way the window's harness control does.
+    func smokeSelectAgent(_ agent: AgentPreset) { chooseHarness(agent) }
+
+    /// Sets the command a custom harness runs, the way the Agents settings pane does —
+    /// including the new agent context a different command requires.
+    func smokeSetCustomCommand(_ value: String) {
+        if value != customCommand { pendingNewContext = true }
+        customCommand = value
+        rescanLaunchEnvironment()
+        updateAgentCommand()
     }
 
     /// Phase one. Exercises actual AppKit controls without a model provider, file picker, or
@@ -827,15 +786,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         launchEnvironment = smokeEnvironment(fixtureHome)
         // Default initialization is injected before loadView; only fixture executables exist here.
-        let initial = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment)
+        // Inherit this run's settings, never the ones this Mac's owner configured.
+        let initial = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment,
+                                            settings: settings)
         _ = initial.view
         try await wait { initial.model.phase == .ready && initial.operation == nil }
         guard initial.selectedAgent == .fx, initial.model.messages.isEmpty else {
             throw SmokeError.failed("Default selection did not initialize without a prompt")
         }
         await initial.shutdown()
-        agents.selectItem(at: AgentPreset.allCases.firstIndex(of: .fx)!)
-        selectAgent()
+        smokeSelectAgent(.fx)
         prompt.string = "Unsent initialization draft"
         sendPrompt()
         guard prompt.string == "Unsent initialization draft", model.messages.isEmpty else {
@@ -844,7 +804,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         try await wait { self.model.phase == .ready && self.operation == nil }
         prompt.string = ""
         refresh()
-        guard command.stringValue == "fx acp", !command.isEditable, launchProblem == nil else {
+        guard launchCommand == "fx acp", launchProblem == nil else {
             throw SmokeError.failed("fx preset did not discover the local executable")
         }
         view.window?.contentView?.layoutSubtreeIfNeeded()
@@ -859,8 +819,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
               !modelPicker.isEnabled, !effortPicker.isEnabled, !permissionModePicker.isEnabled else {
             throw SmokeError.failed("Agent without configuration must hide pickers")
         }
-        guard connectionDetails.isHidden, command.isHidden else {
-            throw SmokeError.failed("A built-in agent must not show launch details")
+        guard bannerRow.isHidden, harnessSelection.isEditable else {
+            throw SmokeError.failed("A connected agent must show no banner and stay switchable")
         }
         view.window?.makeFirstResponder(prompt)
         prompt.string = "Draft"
@@ -889,7 +849,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         cancel.performClick(nil)
         try await wait { self.model.phase == .ready && self.model.status == "Cancelled" }
-        guard agents.isEnabled else { throw SmokeError.failed("Idle connected agent picker disabled") }
+        guard harnessSelection.isEditable else { throw SmokeError.failed("Idle connected session cannot switch harness") }
         guard model.errorMessage == nil else { throw SmokeError.failed(model.errorMessage!) }
     }
 
@@ -902,8 +862,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         guard model.messages.isEmpty, FileManager.default.fileExists(atPath: marker.path) else {
             throw SmokeError.failed("Harness selection did not initialize silently")
         }
-        guard selectedRecipe?.requiresNode == true, launchProblem == nil, command.isHidden else {
-            throw SmokeError.failed("Codex fallback was not ready or exposed its command")
+        guard selectedRecipe?.requiresNode == true, launchProblem == nil, bannerRow.isHidden else {
+            throw SmokeError.failed("Codex fallback was not ready, or reported a problem it does not have")
         }
         prompt.string = "First send"
         refresh()
@@ -930,10 +890,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
         // Exercise safe default dismissal and explicit selection using the actual sheet buttons.
         for (buttonIndex, result) in [(-1, "permission cancelled"), (-2, "permission cancelled"), (0, "permission cancelled"), (1, "permission selected")] {
-            customCommand = "sh -c " + AgentCommand.quotedArgument(SmokeAgent.permissionScript)
-            updateAgentCommand()
-            // Each pass needs an empty context. Declare that the way the launch controls do,
-            // because an ordinary reselection resumes and this fixture reports loadSession: false.
+            // Each pass needs an empty context, which a command change already declares:
+            // an ordinary reconnection resumes, and this fixture reports loadSession: false.
+            smokeSetCustomCommand("sh -c " + AgentCommand.quotedArgument(SmokeAgent.permissionScript))
             pendingNewContext = true
             initializeSelection()
             try await wait { self.model.phase == .ready && self.operation == nil }
@@ -994,55 +953,69 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             }
         }
         try checkRemovedControls(view)
+        // Nothing may reintroduce launch plumbing above the transcript: the command field,
+        // its hint, and the executable browser all belong to the Agents settings pane now.
+        func checkRelocatedControls(_ container: NSView) throws {
+            for child in container.subviews {
+                if let button = child as? NSButton, button.title == "Choose Executable…" {
+                    throw SmokeError.failed("The executable browser belongs in Settings, not in a session")
+                }
+                if let field = child as? NSTextField, field.isEditable, field !== prompt,
+                   field.font?.fontName.contains("Mono") == true {
+                    throw SmokeError.failed("A launch command field remains in the session view")
+                }
+                try checkRelocatedControls(child)
+            }
+        }
+        try checkRelocatedControls(view)
+        // The composer carries only the settings that change between messages.
+        guard composerControls.pickerCount == 3 else {
+            throw SmokeError.failed("The composer must not carry the harness picker")
+        }
         let original = window.frame
-        let restoredAgent = selectedAgent
-        let oldHint = agentHint.stringValue
-        let oldError = error.stringValue
-        let errorWasHidden = error.isHidden
+        let restoredProblem = launchProblem
         defer {
-            selectedAgent = restoredAgent
+            launchProblem = restoredProblem
+            banner.resetDismissal()
             refresh()
-            agentHint.stringValue = oldHint
-            error.stringValue = oldError
-            error.isHidden = errorWasHidden
             window.setFrame(original, display: true)
             window.contentView?.layoutSubtreeIfNeeded()
         }
-        // Launch details are shown by the Custom agent, not by a toggle.
-        selectedAgent = .custom
+        // A long failure must wrap inside the banner rather than push the transcript away.
+        launchProblem = String(repeating: "The agent could not start. Install Node.js 22+ with npm, then try again. ", count: 3)
+        banner.resetDismissal()
         refresh()
-        guard !connectionDetails.isHidden, !command.isHidden, !browse.isHidden else {
-            throw SmokeError.failed("Custom agent did not show its command field and executable browser")
-        }
-        agentHint.stringValue = String(repeating: "Choose an installed executable to run as an ACP agent. ", count: 3)
-        error.stringValue = String(repeating: "The agent could not start. Check the command and reselect the harness. ", count: 3)
-        error.isHidden = false
         for size in [window.contentMinSize, NSSize(width: 1600, height: 1000)] {
             window.setContentSize(size)
             window.contentView?.layoutSubtreeIfNeeded()
             view.layoutSubtreeIfNeeded()
-            let controls: [NSView] = [agents, status, command, agentHint, browse, error, conversation, composerBox]
+            guard !bannerRow.isHidden, !banner.isHidden else {
+                throw SmokeError.failed("A launch problem did not raise the banner at \(size)")
+            }
+            let controls: [NSView] = [banner, conversation, composerBox]
             let visible = controls.filter { !$0.isHiddenOrHasHiddenAncestor }
             for (index, control) in visible.enumerated() {
                 let frame = control.convert(control.alignmentRect(forFrame: control.bounds), to: view)
                 guard frame.width > 0, frame.height > 0,
                       view.bounds.insetBy(dx: -1, dy: -1).contains(frame) else {
-                    throw SmokeError.failed("Launch detail clipped at \(size): \(frame)")
+                    throw SmokeError.failed("Session content clipped at \(size): \(frame)")
                 }
                 for other in visible.dropFirst(index + 1) {
                     let otherFrame = other.convert(other.alignmentRect(forFrame: other.bounds), to: view)
                     guard !frame.intersects(otherFrame) else {
-                        throw SmokeError.failed("Launch details overlap at \(size): \(frame), \(otherFrame)")
+                        throw SmokeError.failed("Session content overlaps at \(size): \(frame), \(otherFrame)")
                     }
                 }
             }
-            for label in [agentHint, error] {
-                let needed = label.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.bounds.width, height: 10_000))
-                guard label.bounds.height + 1 >= needed.height else {
-                    throw SmokeError.failed("Wrapping text compressed at \(size): \(label.bounds), needs \(needed)")
-                }
+            guard conversation.frame.height >= 40 else {
+                throw SmokeError.failed("The banner squeezed the transcript out at \(size)")
             }
         }
+        // Dismissing is final for that failure, and it gives the space straight back.
+        banner.performDismissForSmokeTest()
+        refresh()
+        view.layoutSubtreeIfNeeded()
+        guard bannerRow.isHidden else { throw SmokeError.failed("A dismissed banner kept its space") }
     }
 
     private func smokeTestComposerBounds() throws {
@@ -1087,27 +1060,28 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     private func smokeTestSelectionRetry() async throws {
-        customCommand = "/usr/bin/false"
-        updateAgentCommand()
+        smokeSetCustomCommand("/usr/bin/false")
         prompt.string = "Retain this draft"
-        selectAgent()
+        smokeSelectAgent(selectedAgent)
         try await wait { self.operation == nil && self.model.phase == .disconnected && self.model.errorMessage != nil }
         sendPrompt()
-        guard prompt.string == "Retain this draft", !send.isEnabled, operation == nil,
-              command.isEditable, !command.isHidden else {
+        guard prompt.string == "Retain this draft", !send.isEnabled, operation == nil else {
             throw SmokeError.failed("Disconnected Send retried or lost the draft")
         }
+        // A failure states itself once, in the banner, with the actions that resolve it.
+        guard !bannerRow.isHidden, !banner.isHidden else {
+            throw SmokeError.failed("A failed connection did not raise the banner")
+        }
         // Reselecting a failed harness retries, but never sends.
-        selectAgent()
+        smokeSelectAgent(selectedAgent)
         guard operation != nil else { throw SmokeError.failed("Reselection did not retry") }
         try await wait { self.operation == nil && self.model.phase == .disconnected }
-        command.stringValue = "sh -c " + AgentCommand.quotedArgument("while IFS= read -r line; do :; done")
-        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: command))
-        guard operation == nil else { throw SmokeError.failed("Keystroke started initialization") }
-        controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: command))
+        smokeSetCustomCommand("sh -c " + AgentCommand.quotedArgument("while IFS= read -r line; do :; done"))
+        guard operation == nil else { throw SmokeError.failed("Configuring a command connected on its own") }
+        retryConnection()
         try await wait { self.model.phase == .connecting }
         sendPrompt()
-        guard cancel.isEnabled, agents.isEnabled, prompt.isEditable, !send.isEnabled,
+        guard cancel.isEnabled, harnessSelection.isEditable, prompt.isEditable, !send.isEnabled,
               model.messages.isEmpty, prompt.string == "Retain this draft" else {
             throw SmokeError.failed("Connecting must allow drafting, not sending")
         }
@@ -1117,43 +1091,35 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         guard operation == nil, model.messages.isEmpty else { throw SmokeError.failed("Stop allowed Send to reconnect") }
 
         // A hanging initialization must be disconnected before it is awaited; latest selection wins.
-        selectAgent()
+        smokeSelectAgent(selectedAgent)
         try await wait { self.model.phase == .connecting }
-        for agent in [AgentPreset.fx, .codex, .fx] {
-            agents.selectItem(at: AgentPreset.allCases.firstIndex(of: agent)!)
-            selectAgent()
-        }
+        for agent in [AgentPreset.fx, .codex, .fx] { smokeSelectAgent(agent) }
         try await wait { self.operation == nil && self.model.phase == .ready }
         guard selectedAgent == .fx, model.messages.isEmpty, prompt.string == "Retain this draft" else {
             throw SmokeError.failed("Rapid selection sent a draft or retained stale work")
         }
-        selectAgent()
+        smokeSelectAgent(selectedAgent)
         guard operation == nil, model.phase == .ready else { throw SmokeError.failed("Same ready harness restarted") }
-        agents.selectItem(at: AgentPreset.allCases.firstIndex(of: .custom)!)
-        selectAgent()
+        smokeSelectAgent(.custom)
         cancelPrompt() // Stop before the new initialization task starts.
         try await wait { self.operation == nil && self.model.phase == .disconnected }
-        selectAgent()
+        smokeSelectAgent(selectedAgent)
         cancelPrompt()
-        selectAgent() // A new selection wins even while Stop is still draining this same harness.
+        smokeSelectAgent(selectedAgent) // A new selection wins even while Stop drains this same harness.
         try await wait { self.model.phase == .connecting }
         guard model.messages.isEmpty, prompt.string == "Retain this draft" else {
             throw SmokeError.failed("Reselecting during Stop consumed the draft")
         }
         cancel.performClick(nil)
         try await wait { self.operation == nil && self.model.phase == .disconnected }
-        command.stringValue = "sh -c " + AgentCommand.quotedArgument(SmokeAgent.script)
-        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: command))
-        controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: command))
-        try await wait { self.operation == nil && self.model.phase == .ready }
-        controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: command))
-        command.stringValue += " "
-        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: command))
+        smokeSetCustomCommand("sh -c " + AgentCommand.quotedArgument(SmokeAgent.script))
+        // Configuring a command never connects on its own, and Send must not do it either:
+        // reconnecting is Retry's job, and it has to stay the only route back.
         sendPrompt()
-        guard model.messages.isEmpty, prompt.string == "Retain this draft", operation == nil else {
-            throw SmokeError.failed("Send ran a stale command while editing")
+        guard operation == nil, model.messages.isEmpty, model.phase == .disconnected else {
+            throw SmokeError.failed("Send connected a disconnected session")
         }
-        controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: command))
+        retryConnection()
         try await wait { self.operation == nil && self.model.phase == .ready }
         sendPrompt()
         try await wait { self.model.phase == .prompting }
@@ -1166,7 +1132,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         // and the unsent draft. It must never send.
         let sent = model.messages.filter { $0.role == .user }.count
         prompt.string = "Reselection retains draft"
-        selectAgent()
+        smokeSelectAgent(selectedAgent)
         try await wait { self.operation == nil && self.model.phase == .ready }
         guard model.messages.filter({ $0.role == .user }).count == sent,
               prompt.string == "Reselection retains draft" else {
@@ -1177,12 +1143,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     private func smokeTestShutdownDraft() async throws {
-        let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment)
+        let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment,
+                                            settings: settings)
         _ = session.view
-        session.agents.selectItem(at: AgentPreset.allCases.firstIndex(of: .custom)!)
-        session.selectAgent()
-        session.customCommand = "sh -c " + AgentCommand.quotedArgument(SmokeAgent.script)
-        session.updateAgentCommand()
+        session.smokeSelectAgent(.custom)
+        session.smokeSetCustomCommand("sh -c " + AgentCommand.quotedArgument(SmokeAgent.script))
         session.initializeSelection()
         session.prompt.string = "Do not send after shutdown"
         session.sendPrompt()
@@ -1201,8 +1166,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         // Selection retry left a transcript here, so committing an edit would fork a sibling
         // instead (covered in SessionWindowController.smokeTest). Reconfigure in place: the
         // committed-edit path is already exercised by smokeTestSelectionRetry.
-        customCommand = "sh -c " + AgentCommand.quotedArgument(ConfigurationSmokeAgent.script(variant: .permissionMode))
-        updateAgentCommand()
+        smokeSetCustomCommand("sh -c " + AgentCommand.quotedArgument(ConfigurationSmokeAgent.script(variant: .permissionMode)))
         pendingNewContext = true
         initializeSelection()
         try await wait { self.model.phase == .ready && self.operation == nil }
@@ -1281,22 +1245,6 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             }
             try await Task.sleep(for: .milliseconds(10))
         }
-    }
-}
-
-/// Measure at the assigned width; a stack view can otherwise keep a wrapping label one line tall.
-@MainActor
-private final class SettingsWrappingLabel: NSTextField {
-    override var intrinsicContentSize: NSSize {
-        guard bounds.width > 0, let cell else { return super.intrinsicContentSize }
-        let measured = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: bounds.width, height: .greatestFiniteMagnitude))
-        return NSSize(width: NSView.noIntrinsicMetric, height: ceil(measured.height))
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        let widthChanged = abs(newSize.width - frame.width) > 0.5
-        super.setFrameSize(newSize)
-        if widthChanged { invalidateIntrinsicContentSize() }
     }
 }
 

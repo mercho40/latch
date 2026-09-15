@@ -16,7 +16,7 @@ final class AgentPresetTests: XCTestCase {
         let recipe = try XCTUnwrap(AgentPreset.codex.recipe(in: environment))
         XCTAssertEqual(recipe.command, "npx --yes @agentclientprotocol/codex-acp@1.7.0")
         XCTAssertTrue(recipe.requiresNode)
-        XCTAssertEqual(recipe.problem(in: environment), "Install Node.js 22+ with npm, then select this agent again.")
+        XCTAssertEqual(recipe.problem(in: environment), "Install Node.js 22+ with npm, then try again.")
         for preset in AgentPreset.allCases {
             let setup = preset.recipe(in: environment)?.setup ?? ""
             XCTAssertFalse(setup.lowercased().contains("adapter"))

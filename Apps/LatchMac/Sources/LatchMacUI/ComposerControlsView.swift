@@ -42,7 +42,7 @@ final class ComposerControlsView: NSView {
 
     private func placements(width: CGFloat) -> (items: [(NSView, NSRect)], height: CGFloat) {
         // Before Auto Layout assigns a width, report the wide, single-row size.
-        let width = width > 0 ? width : ChatTranscriptView.maximumContentWidth
+        let width = width > 0 ? width : 768
         var items: [(NSView, NSRect)] = []
         var x: CGFloat = 0
         var y: CGFloat = 0

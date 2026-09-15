@@ -83,6 +83,9 @@ actor SessionStore {
             throw StoreError.invalidLibrary
         }
         guard data.count <= Self.maximumFileSize else { throw StoreError.tooLarge }
+        // Quitting must not land between the temporary file and its rename.
+        ProcessInfo.processInfo.disableSuddenTermination()
+        defer { ProcessInfo.processInfo.enableSuddenTermination() }
         try writeAtomically(data)
     }
 

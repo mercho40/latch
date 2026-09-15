@@ -37,7 +37,8 @@ for icon in Resources/Assets.car Resources/Latch.icns; do
         exit 1
     fi
 done
-if ! xcrun assetutil --info "$app/Contents/Resources/Assets.car" | grep -q IconImageStack; then
+# Drain assetutil's output: grep -q may close early and trigger SIGPIPE under pipefail.
+if ! xcrun assetutil --info "$app/Contents/Resources/Assets.car" | grep IconImageStack > /dev/null; then
     echo 'MAC APP: Assets.car has no layered icon stack; Latch.icon was not compiled' >&2
     exit 1
 fi
@@ -82,6 +83,32 @@ service_flags="${service_flags%% hashes=*}"
 if [[ "$service_signing" != *"Signature=adhoc"* || "$service_flags" != *runtime* ]]; then
     echo 'MAC APP: expected the XPC service to be ad-hoc signed with hardened runtime' >&2
     exit 1
+fi
+if [[ "$configuration" == Release ]]; then
+    require_release_symbols() {
+        local binary="$1" dsym="$2" slices binary_uuids dsym_uuids
+        slices="$(/usr/bin/lipo -archs "$binary" | tr ' ' '\n' | LC_ALL=C sort | paste -sd ' ' -)"
+        if [[ "$slices" != 'arm64 x86_64' ]]; then
+            echo "MAC APP: expected universal arm64+x86_64 Release binary: $binary ($slices)" >&2
+            exit 1
+        fi
+        if [[ ! -s "$dsym" ]]; then
+            echo "MAC APP: missing Release dSYM: $dsym" >&2
+            exit 1
+        fi
+        binary_uuids="$(xcrun dwarfdump --uuid "$binary" | awk '{print $2, $3}' | LC_ALL=C sort)"
+        dsym_uuids="$(xcrun dwarfdump --uuid "$dsym" | awk '{print $2, $3}' | LC_ALL=C sort)"
+        if [[ -z "$binary_uuids" || "$binary_uuids" != "$dsym_uuids" ]]; then
+            echo "MAC APP: Release binary/dSYM UUID mismatch: $binary" >&2
+            exit 1
+        fi
+        printf 'MAC APP: Release %s bytes=%s slices=%s; matching dSYM UUIDs:\n%s\n' \
+            "$(basename "$binary")" "$(/usr/bin/stat -f %z "$binary")" "$slices" "$binary_uuids"
+    }
+    require_release_symbols "$app/Contents/MacOS/Latch" \
+        "$derived/Build/Products/Release/Latch.app.dSYM/Contents/Resources/DWARF/Latch"
+    require_release_symbols "$service/Contents/MacOS/LatchAgentXPCService" \
+        "$derived/Build/Products/Release/LatchAgentXPCService.xpc.dSYM/Contents/Resources/DWARF/LatchAgentXPCService"
 fi
 smoke="$("$app/Contents/MacOS/Latch" --smoke-test)"
 printf '%s\n' "$smoke"

@@ -3,7 +3,7 @@ import AppKit
 /// A session-local, selectable transcript. The composer and connection status belong to the parent.
 @MainActor
 final class ChatTranscriptView: NSView {
-    static let maximumContentWidth: CGFloat = 768
+    static let horizontalInset: CGFloat = 16
 
     let scrollView = NSScrollView()
     var messageCount: Int { order.count }
@@ -16,6 +16,10 @@ final class ChatTranscriptView: NSView {
     private var working = false
     private var followsBottom = true
     private var arranging = false
+    private let findBar = TranscriptFindBar()
+    private var matches: [(id: UUID, range: NSRange)] = []
+    private var matchIndex = 0
+    private var findTerm = ""
 
     override var isFlipped: Bool { true }
 
@@ -37,6 +41,12 @@ final class ChatTranscriptView: NSView {
         jump.action = #selector(jumpToLatest)
         jump.isHidden = true
         addSubview(jump)
+        findBar.isHidden = true
+        findBar.onSearch = { [weak self] term in self?.search(term) }
+        findBar.onNext = { [weak self] in self?.findNext() }
+        findBar.onPrevious = { [weak self] in self?.findPrevious() }
+        findBar.onClose = { [weak self] in self?.endFind() }
+        addSubview(findBar)
         NotificationCenter.default.addObserver(
             self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
@@ -82,6 +92,7 @@ final class ChatTranscriptView: NSView {
                 document.addSubview(row)
             }
         }
+        if !findTerm.isEmpty { recomputeMatches() }
         working = isWorking
         let label = working ? "Working…" : ""
         // No live-region announcements or restarting animations on each streaming token.
@@ -100,11 +111,13 @@ final class ChatTranscriptView: NSView {
         guard !arranging else { return }
         arranging = true
         defer { arranging = false }
-        scrollView.frame = bounds
+        let barHeight = findBar.isHidden ? 0 : TranscriptFindBar.height
+        findBar.frame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
+        scrollView.frame = NSRect(x: 0, y: barHeight, width: bounds.width, height: max(1, bounds.height - barHeight))
         scrollView.tile()
         let width = max(1, scrollView.contentSize.width)
-        let sideInset: CGFloat = min(16, width / 12)
-        let columnWidth = min(Self.maximumContentWidth, max(1, width - sideInset * 2))
+        let sideInset = min(Self.horizontalInset, width / 12)
+        let columnWidth = max(1, width - sideInset * 2)
         let inset = (width - columnWidth) / 2
         var y: CGFloat = 16
         for id in order {
@@ -141,6 +154,106 @@ final class ChatTranscriptView: NSView {
         arrange(restoring: anchor())
     }
 
+    // MARK: Find
+
+    var isFindBarVisible: Bool { !findBar.isHidden }
+    var matchCount: Int { matches.count }
+    var currentMatch: Int { matches.isEmpty ? 0 : matchIndex + 1 }
+    var canStepMatches: Bool { !matches.isEmpty }
+
+    func beginFind() {
+        let opening = findBar.isHidden
+        findBar.isHidden = false
+        if opening { arrange(restoring: anchor()) }
+        window?.makeFirstResponder(findBar.field)
+        findBar.field.currentEditor()?.selectAll(nil)
+    }
+
+    /// Escape closes the bar from anywhere in the conversation. It is deliberately not a
+    /// key equivalent on the Done button: AppKit would then fire it on ⌘. as well, which
+    /// belongs to Stop.
+    override func cancelOperation(_ sender: Any?) {
+        guard !findBar.isHidden else { return }
+        endFind()
+    }
+
+    func endFind() {
+        guard !findBar.isHidden else { return }
+        findBar.isHidden = true
+        findBar.field.stringValue = ""
+        findTerm = ""
+        matches = []
+        matchIndex = 0
+        findBar.setStatus(index: 0, total: 0)
+        if window?.firstResponder === findBar.field.currentEditor() { window?.makeFirstResponder(self) }
+        arrange(restoring: anchor())
+    }
+
+    /// Collapsed tool rows are not searched: there is nothing on screen to reveal.
+    func search(_ term: String) {
+        findTerm = term
+        recomputeMatches()
+        matchIndex = 0
+        if matches.isEmpty {
+            findBar.setStatus(index: 0, total: 0)
+        } else {
+            reveal(0)
+        }
+    }
+
+    func findNext() {
+        guard !matches.isEmpty else { return }
+        reveal((matchIndex + 1) % matches.count)
+    }
+
+    func findPrevious() {
+        guard !matches.isEmpty else { return }
+        reveal((matchIndex - 1 + matches.count) % matches.count)
+    }
+
+    private func recomputeMatches() {
+        let previous = matches.indices.contains(matchIndex) ? matches[matchIndex] : nil
+        matches = []
+        guard !findTerm.isEmpty else { return }
+        for id in order {
+            guard let row = rows[id], !row.textView.isHidden else { continue }
+            let haystack = row.textView.string as NSString
+            var location = 0
+            while location < haystack.length {
+                let scope = NSRange(location: location, length: haystack.length - location)
+                let found = haystack.range(of: findTerm, options: [.caseInsensitive, .diacriticInsensitive], range: scope)
+                guard found.location != NSNotFound, found.length > 0 else { break }
+                matches.append((id, found))
+                location = found.location + found.length
+            }
+        }
+        // Stay on the same match across a streaming update where possible.
+        matchIndex = previous.flatMap { match in
+            matches.firstIndex { $0.id == match.id && $0.range == match.range }
+        } ?? min(matchIndex, max(0, matches.count - 1))
+        findBar.setStatus(index: matches.isEmpty ? 0 : matchIndex + 1, total: matches.count)
+    }
+
+    private func reveal(_ index: Int) {
+        guard matches.indices.contains(index), let row = rows[matches[index].id] else { return }
+        matchIndex = index
+        let range = matches[index].range
+        let text = row.textView
+        text.setSelectedRange(range)
+        findBar.setStatus(index: index + 1, total: matches.count)
+        guard let manager = text.layoutManager, let container = text.textContainer else { return }
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let rect = text.convert(manager.boundingRect(forGlyphRange: glyphs, in: container), to: document)
+        followsBottom = false
+        let visible = scrollView.contentView.bounds.height
+        let bottom = max(0, document.frame.height - visible)
+        let target = min(bottom, max(0, rect.midY - visible / 2))
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: target))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        jump.isHidden = bottom == 0
+        text.showFindIndicator(for: range)
+    }
+
     /// Focused real-AppKit checks; uses a separate view and never changes the displayed conversation.
     func smokeTest() throws {
         struct Failure: Error, CustomStringConvertible { let description: String }
@@ -154,7 +267,8 @@ final class ChatTranscriptView: NSView {
         geometry.update(messages: [short, long, markdown], isWorking: true)
         let shortRow = geometry.rows[short.id]!, longRow = geometry.rows[long.id]!
         let plainRow = geometry.rows[markdown.id]!
-        try require(shortRow.frame.width == Self.maximumContentWidth, "Wide column is not capped at 768")
+        try require(shortRow.frame.width == geometry.scrollView.contentSize.width - Self.horizontalInset * 2,
+                    "Transcript does not fill the available pane width")
         try require(abs(shortRow.frame.midX - geometry.scrollView.contentSize.width / 2) < 1, "Wide column is not centered in scroll content")
         try require(shortRow.frame.minX >= 16, "Missing side inset")
         try require(shortRow.bubble.width < longRow.bubble.width && longRow.bubble.width <= longRow.frame.width * 0.8, "User bubbles are not content-sized/capped")
@@ -347,6 +461,8 @@ private final class TranscriptMessageView: NSView {
         let content: NSAttributedString
         if role == .assistant {
             content = ChatMarkdown.render(text)
+        } else if role == .tool {
+            content = ToolTranscriptStyle.render(text)
         } else {
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineBreakMode = .byWordWrapping
@@ -422,7 +538,7 @@ private final class TranscriptMessageView: NSView {
             measuredWidth = textWidth
         }
         let bodyHeight = textView.isHidden ? 0 : measuredHeight + padding * 2
-        let height = headerHeight + bodyHeight + (isDisclosure ? 0 : 24)
+        let height = headerHeight + bodyHeight + (isDisclosure && !expanded ? 0 : 24)
         frame.size = NSSize(width: width, height: height)
         let newBubble = user ? NSRect(x: x, y: 0, width: bubbleWidth, height: bodyHeight) : .zero
         if bubble != newBubble {
@@ -430,7 +546,7 @@ private final class TranscriptMessageView: NSView {
             needsDisplay = true
         }
         label.frame = NSRect(x: 24, y: 3, width: max(1, width - 24), height: 18)
-        copy.frame = NSRect(x: user ? max(0, width - 40) : 0, y: bodyHeight + 2, width: min(40, width), height: 20)
+        copy.frame = NSRect(x: user ? max(0, width - 40) : 0, y: headerHeight + bodyHeight + 2, width: min(40, width), height: 20)
         disclosure.frame = NSRect(x: 0, y: 2, width: min(20, width), height: 20)
         let textFrame = NSRect(x: x + padding, y: headerHeight + padding, width: textWidth, height: measuredHeight)
         if textView.frame != textFrame { textView.frame = textFrame }
@@ -485,6 +601,7 @@ private final class TranscriptMessageView: NSView {
         disclosure.state = expanded ? .on : .off
         updateDisclosureAccessibility()
         textView.isHidden = !expanded
+        copy.isHidden = !expanded
         onDisclosure?()
     }
 }

@@ -173,7 +173,7 @@ final class ChatMessageTests: XCTestCase {
         XCTAssertTrue(model.messages.isEmpty)
         XCTAssertTrue(model.transcript.isEmpty)
         var firstAssistantID: UUID?
-        model.onChange = {
+        model.onTranscriptChange = {
             if firstAssistantID == nil {
                 firstAssistantID = model.messages.first { $0.role == .assistant }?.id
             }
@@ -199,7 +199,7 @@ final class ChatMessageTests: XCTestCase {
         await fulfillment(of: [finished], timeout: 5)
         let conversation = model.messages
         let transcript = model.transcript
-        model.onChange = nil
+        model.onTranscriptChange = nil
         await model.disconnect()
         XCTAssertEqual(model.messages, conversation)
         XCTAssertEqual(model.transcript, transcript)

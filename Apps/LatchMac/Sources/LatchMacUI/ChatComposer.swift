@@ -26,6 +26,40 @@ final class ChatInputView: NSTextView {
     }
 }
 
+/// Measures the native text layout, including wrapping and a trailing empty line.
+/// Long drafts scroll instead of pushing the conversation out of the window.
+@MainActor
+final class ChatComposerScrollView: NSScrollView {
+    static let minimumHeight: CGFloat = 56
+    static let maximumHeight: CGFloat = 184
+    private lazy var height = heightAnchor.constraint(equalToConstant: Self.minimumHeight)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        height.isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+
+    override func tile() {
+        super.tile()
+        refreshHeight()
+    }
+
+    /// Also called after draft restoration, sending, and undo (not just typing).
+    func refreshHeight() {
+        guard let text = documentView as? NSTextView,
+              text.bounds.width > 0,
+              let container = text.textContainer,
+              let layout = text.layoutManager else { return }
+        layout.ensureLayout(for: container)
+        let contentHeight = max(layout.usedRect(for: container).maxY, layout.extraLineFragmentRect.maxY)
+        let measured = ceil(contentHeight + text.textContainerInset.height * 2)
+        let next = min(Self.maximumHeight, max(Self.minimumHeight, measured))
+        if height.constant != next { height.constant = next }
+    }
+}
+
 @MainActor
 final class ChatComposerBox: NSView {
     override func draw(_ dirtyRect: NSRect) {

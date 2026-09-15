@@ -21,10 +21,10 @@ final class SessionModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .ready)
         XCTAssertNil(model.errorMessage)
         let working = expectation(description: "Streamed progress in model")
-        model.onChange = {
+        model.onTranscriptChange = {
             if model.transcript.contains("working") {
                 working.fulfill()
-                model.onChange = nil
+                model.onTranscriptChange = nil
             }
         }
         let prompt = Task { await model.send("Keep going") }

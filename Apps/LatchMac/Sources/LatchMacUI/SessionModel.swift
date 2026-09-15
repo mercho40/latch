@@ -8,14 +8,19 @@ final class SessionModel {
     enum Phase { case disconnected, connecting, ready, prompting, stopping }
     private(set) var phase: Phase = .disconnected
     private(set) var status = "Not connected"
-    private(set) var messages: [ChatMessage] = []
+    // Read a snapshot on demand rather than retaining a second array/String copy
+    // that forces history's next streaming append to copy its growing response.
+    var messages: [ChatMessage] { history.messages }
     var transcript: String { history.transcript }
     private var history = ChatHistory()
     private(set) var errorMessage: String?
     private(set) var cancellationRequested = false
     private(set) var configuration = SessionConfiguration()
     private(set) var isChangingConfiguration = false
+    /// State changes (including permissions) are delivered immediately.
     var onChange: (() -> Void)?
+    /// History is already current; consumers may coalesce its rendering only.
+    var onTranscriptChange: (() -> Void)?
     var serviceTransportDescription: String { client.transportDescription }
 
     let permissions = PermissionQueue()
@@ -28,7 +33,6 @@ final class SessionModel {
     func restore(messages: [ChatMessage], agentSessionID: String?) {
         guard phase == .disconnected else { return }
         history.restore(messages)
-        self.messages = history.messages
         savedAgentSessionID = agentSessionID
         archivedWithoutContext = agentSessionID == nil && !messages.isEmpty
         status = "Saved · Not connected"
@@ -132,7 +136,6 @@ final class SessionModel {
         let resumingID = savedAgentSessionID
         if resumingID == nil { history.reset() }
         else { history.restore(messages) }
-        messages = history.messages
         sessionID = resumingID
         loadedThroughSequence = nil
         clearConfiguration()
@@ -252,6 +255,12 @@ final class SessionModel {
         guard phase == .ready, !isChangingConfiguration, let id = runtimeID,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let token = generation
+        // A prompt is user-initiated work that must keep streaming while Latch is in the
+        // background; App Nap would otherwise throttle the app that renders it. The Mac is
+        // still allowed to sleep on its own schedule.
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep, reason: "Agent prompt in flight")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         errorMessage = nil
         phase = .prompting
         promptGeneration = UUID()
@@ -259,6 +268,7 @@ final class SessionModel {
         status = "Working…"
         history.appendUser(text)
         publishHistory()
+        onChange?()
         do {
             let result = try await client.execute(.prompt(runtimeID: id, text: text))
             guard generation == token else { return }
@@ -396,7 +406,7 @@ final class SessionModel {
                     publishHistory()
                 }
             case let .toolCall(tool, _):
-                history.updateTool(toolCallID: tool.toolCallID, title: tool.title, status: tool.status)
+                history.updateTool(tool)
                 publishHistory()
             default: break
             }
@@ -445,7 +455,6 @@ final class SessionModel {
     }
 
     private func publishHistory() {
-        messages = history.messages
-        onChange?()
+        onTranscriptChange?()
     }
 }

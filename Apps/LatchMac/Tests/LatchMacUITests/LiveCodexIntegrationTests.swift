@@ -23,11 +23,13 @@ final class LiveCodexIntegrationTests: XCTestCase {
             try await exercise(model, workspace: workspace)
         } catch {
             model.onChange = nil
+            model.onTranscriptChange = nil
             try await bounded("failure disconnect", seconds: 15) { await model.disconnect() }
             print("Live Codex: failure disconnect complete")
             throw error
         }
         model.onChange = nil
+        model.onTranscriptChange = nil
         try await bounded("final disconnect", seconds: 15) { await model.disconnect() }
         try require(model.phase == .disconnected, "final disconnect")
         try FileManager.default.removeItem(at: workspace)
@@ -110,6 +112,7 @@ final class LiveCodexIntegrationTests: XCTestCase {
             }
             lastAssistantText = text
         }
+        model.onTranscriptChange = model.onChange
         try await bounded("connect", seconds: 120) {
             await model.connect(command: self.command, workspace: workspace)
         }

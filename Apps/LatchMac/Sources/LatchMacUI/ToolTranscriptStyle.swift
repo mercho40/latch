@@ -33,7 +33,7 @@ enum ToolTranscriptStyle {
                 let color: NSColor = line.hasPrefix("+") ? .systemGreen : .systemRed
                 result.addAttributes([.foregroundColor: color, .backgroundColor: color.withAlphaComponent(0.08)], range: range)
             } else if position == 0 || ["Content:", "Locations:"].contains(line)
-                        || line.hasPrefix("Diff: ") || line.hasPrefix("Input (") || line.hasPrefix("Output (") {
+                        || line.hasPrefix("Diff: ") || line.hasPrefix("rawInput (") || line.hasPrefix("rawOutput (") {
                 result.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), range: range)
             }
             position = end

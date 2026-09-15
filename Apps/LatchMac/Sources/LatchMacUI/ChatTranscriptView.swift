@@ -391,9 +391,12 @@ private final class TranscriptMessageView: NSView {
     private var measuredWidth: CGFloat = -1
     private var measuredHeight: CGFloat = 0
     private var naturalTextWidth: CGFloat = 0
+    private var bubbleRadius: CGFloat = 12
     private var hoverTracking: NSTrackingArea?
     private var hovered = false
     private var isDisclosure: Bool { role == .tool }
+    /// Clears the 20pt disclosure triangle drawn at the row's leading edge.
+    static let disclosureIndent: CGFloat = 24
 
     override var isFlipped: Bool { true }
 
@@ -527,7 +530,9 @@ private final class TranscriptMessageView: NSView {
         let padding: CGFloat = user ? min(12, width * 0.08) : 0
         let bubbleWidth = user ? min(width * 0.8, max(1, naturalTextWidth) + padding * 2) : width
         let x = user ? width - bubbleWidth : 0
-        let textWidth = max(1, bubbleWidth - padding * 2)
+        // Expanded tool text lines up with its header title, not with the disclosure triangle.
+        let bodyIndent: CGFloat = isDisclosure ? Self.disclosureIndent : 0
+        let textWidth = max(1, bubbleWidth - padding * 2 - bodyIndent)
         let headerHeight: CGFloat = isDisclosure ? 24 : 0
         if !textView.isHidden && measuredWidth != textWidth {
             let container = textView.textContainer!
@@ -541,14 +546,19 @@ private final class TranscriptMessageView: NSView {
         let height = headerHeight + bodyHeight + (isDisclosure && !expanded ? 0 : 24)
         frame.size = NSSize(width: width, height: height)
         let newBubble = user ? NSRect(x: x, y: 0, width: bubbleWidth, height: bodyHeight) : .zero
+        if bubbleRadius != padding { bubbleRadius = padding; needsDisplay = true }
         if bubble != newBubble {
             bubble = newBubble
             needsDisplay = true
         }
-        label.frame = NSRect(x: 24, y: 3, width: max(1, width - 24), height: 18)
-        copy.frame = NSRect(x: user ? max(0, width - 40) : 0, y: headerHeight + bodyHeight + 2, width: min(40, width), height: 20)
+        label.frame = NSRect(x: Self.disclosureIndent, y: 3,
+                             width: max(1, width - Self.disclosureIndent), height: 18)
+        // Trailing edge under the bubble text, not under the bubble's rounded edge.
+        let copyX = user ? max(0, width - padding - 40) : bodyIndent
+        copy.frame = NSRect(x: copyX, y: headerHeight + bodyHeight + 2, width: min(40, width), height: 20)
         disclosure.frame = NSRect(x: 0, y: 2, width: min(20, width), height: 20)
-        let textFrame = NSRect(x: x + padding, y: headerHeight + padding, width: textWidth, height: measuredHeight)
+        let textFrame = NSRect(x: x + padding + bodyIndent, y: headerHeight + padding,
+                               width: textWidth, height: measuredHeight)
         if textView.frame != textFrame { textView.frame = textFrame }
         return height
     }
@@ -557,7 +567,8 @@ private final class TranscriptMessageView: NSView {
         super.draw(dirtyRect)
         guard role == .user else { return }
         NSColor.quaternaryLabelColor.setFill()
-        NSBezierPath(roundedRect: bubble, xRadius: 10, yRadius: 10).fill()
+        // Concentric with the text inside: the corner never cuts closer than the padding.
+        NSBezierPath(roundedRect: bubble, xRadius: bubbleRadius, yRadius: bubbleRadius).fill()
     }
 
     override func viewDidChangeEffectiveAppearance() {

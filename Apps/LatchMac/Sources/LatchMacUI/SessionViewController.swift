@@ -340,14 +340,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             composerBox.topAnchor.constraint(equalTo: composerContainer.topAnchor),
             composerBox.bottomAnchor.constraint(equalTo: composerContainer.bottomAnchor),
         ])
+        // No keyboard caption under the composer: the shortcuts stay in the field's
+        // accessibility help, where they cost no chrome.
         root.addArrangedSubview(composerContainer)
-        let keyboardHint = NSTextField(labelWithString: "Return to send · Shift Return for a new line")
-        keyboardHint.font = .systemFont(ofSize: 11)
-        keyboardHint.textColor = .secondaryLabelColor
-        keyboardHint.alignment = .center
-        keyboardHint.setContentCompressionResistancePriority(.required, for: .vertical)
-        root.setCustomSpacing(4, after: composerContainer)
-        root.addArrangedSubview(keyboardHint)
         for view in root.arrangedSubviews {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
@@ -991,8 +986,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                    button.image?.accessibilityDescription == "Session settings" {
                     throw SmokeError.failed("Session settings button remains in the view hierarchy")
                 }
-                if let label = child as? NSTextField, label.stringValue.contains("Local session, not saved") {
-                    throw SmokeError.failed("Composer footer remains in the view hierarchy")
+                if let label = child as? NSTextField,
+                   ["Local session, not saved", "Return to send"].contains(where: label.stringValue.contains) {
+                    throw SmokeError.failed("Composer footer remains in the view hierarchy: \(label.stringValue)")
                 }
                 try checkRemovedControls(child)
             }

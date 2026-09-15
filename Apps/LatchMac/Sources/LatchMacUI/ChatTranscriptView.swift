@@ -318,6 +318,12 @@ final class ChatTranscriptView: NSView {
         try require(codeRange.location != NSNotFound, "Rendered code is missing")
         let codeFont = row.textView.textStorage?.attribute(.font, at: codeRange.location, effectiveRange: nil) as? NSFont
         try require(codeFont == NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), "Fenced code is not monospaced")
+        messages[11].text += "\n\n| Step | Result |\n| --- | ---: |\n| build | ok |"
+        probe.update(messages: messages, isWorking: true)
+        let cellRange = (row.textView.string as NSString).range(of: "build")
+        try require(cellRange.location != NSNotFound && !row.textView.string.contains("| Step |"), "Table markup is still visible")
+        let cellStyle = row.textView.textStorage?.attribute(.paragraphStyle, at: cellRange.location, effectiveRange: nil) as? NSParagraphStyle
+        try require(cellStyle?.textBlocks.first is NSTextTableBlock, "A table cell is not laid out in a text table")
         try require(abs(probe.document.frame.height - probe.scrollView.contentView.bounds.maxY) < 2, "Did not follow bottom")
         probe.scrollView.contentView.scroll(to: NSPoint(x: 0, y: 100))
         probe.scrolled()

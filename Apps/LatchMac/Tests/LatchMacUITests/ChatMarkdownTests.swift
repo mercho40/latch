@@ -82,6 +82,86 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertEqual(font(rendered, at: "[link]").pointSize, ChatMarkdown.codeFontSize)
     }
 
+    @MainActor func testPipeTableCellsAlignmentAndHeader() async {
+        let rendered = ChatMarkdown.render("| Left | Middle | Right |\n| :--- | :----: | ----: |\n| a | b | c |\nafter\n")
+        XCTAssertEqual(rendered.string, "Left\nMiddle\nRight\na\nb\nc\nafter\n")
+        XCTAssertTrue(font(rendered, at: "Left").fontDescriptor.symbolicTraits.contains(.bold))
+        XCTAssertFalse(font(rendered, at: "a").fontDescriptor.symbolicTraits.contains(.bold))
+        XCTAssertNil(block(rendered, at: "after"), "Prose after a table stayed inside it")
+        for (cell, alignment) in [("Left", NSTextAlignment.left), ("Middle", .center), ("Right", .right),
+                                  ("a", .left), ("b", .center), ("c", .right)] {
+            XCTAssertEqual(paragraph(rendered, at: cell)?.alignment, alignment, cell)
+        }
+        let table = block(rendered, at: "Left")?.table
+        XCTAssertEqual(table?.numberOfColumns, 3)
+        for (cell, row, column) in [("Left", 0, 0), ("Middle", 0, 1), ("Right", 0, 2),
+                                    ("a", 1, 0), ("b", 1, 1), ("c", 1, 2)] {
+            XCTAssertEqual(block(rendered, at: cell)?.startingRow, row, cell)
+            XCTAssertEqual(block(rendered, at: cell)?.startingColumn, column, cell)
+            XCTAssertTrue(block(rendered, at: cell)?.table === table, cell)
+        }
+    }
+
+    @MainActor func testPipeTableLaysOutAsAGrid() async {
+        let note = "a sentence that has to wrap inside its own cell"
+        let rendered = ChatMarkdown.render("| Command | Note | Count |\n| --- | --- | ---: |\n| run | \(note) | 12 |\n")
+        let frames = layout(rendered, width: 320)
+        XCTAssertLessThanOrEqual(frames.used.maxX, 321, "Table overflowed its container")
+        XCTAssertEqual(frames["Command"].minX, frames["run"].minX, accuracy: 0.5, "Left column is ragged")
+        XCTAssertEqual(frames["Note"].minX, frames[note].minX, accuracy: 0.5, "Middle column is ragged")
+        XCTAssertEqual(frames["Count"].maxX, frames["12"].maxX, accuracy: 0.5, "Right-aligned column is ragged")
+        XCTAssertLessThan(frames["Command"].maxY, frames["run"].minY, "Rows did not stack")
+        XCTAssertEqual(frames["run"].minY, frames[note].minY, accuracy: 0.5, "Row cells do not share a top")
+        XCTAssertEqual(frames["12"].minY, frames[note].minY, accuracy: 0.5, "Row cells do not share a top")
+        XCTAssertGreaterThan(frames[note].height, frames["run"].height * 1.5, "Long cell did not wrap in place")
+        XCTAssertGreaterThanOrEqual(frames.used.maxY, frames[note].maxY, "Measured height excludes the last row")
+    }
+
+    @MainActor func testPipeTableColumnsAreSizedToTheirContent() async {
+        let note = "a sentence long enough that its column has to earn more room than a one word column"
+        let rendered = ChatMarkdown.render("| Note | Ok | Count |\n| - | - | - |\n| \(note) | yes | 12 |\n")
+        let shares = ["Note", "Ok", "Count"].map { block(rendered, at: $0)?.value(for: .width) ?? 0 }
+        XCTAssertEqual(block(rendered, at: "Note")?.valueType(for: .width), .percentageValueType)
+        XCTAssertEqual(shares.reduce(0, +), 100, accuracy: 0.01, "Columns do not fill the container")
+        XCTAssertGreaterThan(shares[0], shares[1] * 3, "Prose shares the width evenly with a one-word column")
+        // However little a column holds, it keeps enough width to read as a column.
+        for (cell, share) in zip(["Ok", "Count"], shares.dropFirst()) {
+            XCTAssertGreaterThan(share, 5, cell)
+        }
+    }
+
+    @MainActor func testPipeTableNeedsAMatchingDelimiterRow() async {
+        // While streaming, a header arrives before its delimiter; it stays prose until then.
+        for source in ["| a | b |", "| a | b |\n| --- |", "| a | b |\n| --- | :: |", "| a | b |\n| --- | -x- |",
+                       "| a | b |\nplain", "a\n| --- | --- |", "    | a | b |\n    | - | - |"] {
+            XCTAssertEqual(ChatMarkdown.render(source).string, source, source)
+        }
+        XCTAssertEqual(ChatMarkdown.render("```\n| a |\n| - |\n```").string, "| a |\n| - |\n")
+        XCTAssertEqual(ChatMarkdown.render("> | a | b |\n> | - | - |").string, "| a | b |\n| - | - |")
+        XCTAssertEqual(ChatMarkdown.render("# a | b\n| - | - |").string, "a | b\n| - | - |")
+        // A header and its delimiter alone already make a table, just one without body rows.
+        let bodyless = ChatMarkdown.render("| a | b |\n| - | - |")
+        XCTAssertEqual(bodyless.string, "a\nb\n")
+        XCTAssertEqual(block(bodyless, at: "a")?.table.numberOfColumns, 2)
+    }
+
+    @MainActor func testPipeTableCellContent() async {
+        let rendered = ChatMarkdown.render("| Escaped | Styled |\n| - | - |\n| a \\| b | **bold** `code` [web](https://example.com) |\n| only |\n| one | two | three |\n")
+        XCTAssertEqual(rendered.string, "Escaped\nStyled\na | b\nbold code web\nonly\n\none\ntwo\n")
+        XCTAssertTrue(font(rendered, at: "bold").fontDescriptor.symbolicTraits.contains(.bold))
+        XCTAssertEqual(font(rendered, at: "code"), .monospacedSystemFont(ofSize: ChatMarkdown.codeFontSize, weight: .regular))
+        let link = (rendered.string as NSString).range(of: "web")
+        XCTAssertNotNil(rendered.attribute(.link, at: link.location, effectiveRange: nil))
+        // The short row is padded and the long one truncated, so every row fills the same grid.
+        XCTAssertEqual(block(rendered, at: "only")?.startingRow, 2)
+        XCTAssertEqual(block(rendered, at: "one")?.startingRow, 3)
+        XCTAssertEqual(block(rendered, at: "two")?.startingColumn, 1)
+        XCTAssertEqual((rendered.string as NSString).range(of: "three").location, NSNotFound)
+        let image = ChatMarkdown.render("| a | b |\n| - | - |\n| ![alt](https://example.com/i.png) | x |\n")
+        XCTAssertEqual(image.string, "a\nb\n![alt](https://example.com/i.png)\nx\n")
+        assertNoLinksOrAttachments(image)
+    }
+
     @MainActor private func font(_ rendered: NSAttributedString, at text: String) -> NSFont {
         let range = (rendered.string as NSString).range(of: text)
         guard range.location != NSNotFound,
@@ -90,6 +170,47 @@ final class ChatMarkdownTests: XCTestCase {
             return .systemFont(ofSize: 0)
         }
         return font
+    }
+
+    @MainActor private func paragraph(_ rendered: NSAttributedString, at text: String) -> NSParagraphStyle? {
+        let range = (rendered.string as NSString).range(of: text)
+        guard range.location != NSNotFound else {
+            XCTFail("Missing \(text)")
+            return nil
+        }
+        return rendered.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+    }
+
+    @MainActor private func block(_ rendered: NSAttributedString, at text: String) -> NSTextTableBlock? {
+        paragraph(rendered, at: text)?.textBlocks.first as? NSTextTableBlock
+    }
+
+    /// Lays the rendered text out the way a transcript row does, so the assertions read
+    /// real TextKit geometry rather than the attributes that were asked for.
+    @MainActor private func layout(_ rendered: NSAttributedString, width: CGFloat) -> TableLayout {
+        let storage = NSTextStorage(attributedString: rendered)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        manager.ensureLayout(for: container)
+        return TableLayout(storage: storage, manager: manager, container: container)
+    }
+
+    @MainActor private struct TableLayout {
+        let storage: NSTextStorage
+        let manager: NSLayoutManager
+        let container: NSTextContainer
+
+        var used: NSRect { manager.usedRect(for: container) }
+
+        subscript(cell: String) -> NSRect {
+            let range = (storage.string as NSString).range(of: cell)
+            guard range.location != NSNotFound else { return .zero }
+            return manager.boundingRect(forGlyphRange: manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil),
+                                        in: container)
+        }
     }
 
     @MainActor private func assertNoLinksOrAttachments(_ rendered: NSAttributedString) {

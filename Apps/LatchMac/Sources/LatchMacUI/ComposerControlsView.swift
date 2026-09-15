@@ -3,22 +3,39 @@ import AppKit
 /// Keeps native controls comfortably sized, wrapping instead of squeezing their hit targets.
 @MainActor
 final class ComposerControlsView: NSView {
+    /// A picker and the width it is allowed to take. Stated per control rather than by
+    /// position, so adding one to the row cannot silently resize the others.
+    struct Slot {
+        let button: NSPopUpButton
+        let minimumWidth: CGFloat
+        let maximumWidth: CGFloat
+
+        init(_ button: NSPopUpButton, minimumWidth: CGFloat = 140, maximumWidth: CGFloat = 220) {
+            self.button = button
+            self.minimumWidth = minimumWidth
+            self.maximumWidth = maximumWidth
+        }
+    }
+
     static let controlHeight: CGFloat = 36
-    private let pickers: [NSPopUpButton]
+    private let pickers: [Slot]
     private let actions: [NSButton]
     private let gap: CGFloat = 8
 
-    init(pickers: [NSPopUpButton], actions: [NSButton]) {
+    init(pickers: [Slot], actions: [NSButton]) {
         self.pickers = pickers
         self.actions = actions
         super.init(frame: .zero)
-        for control in pickers + actions { addSubview(control) }
+        for control in pickers.map(\.button) as [NSView] + actions { addSubview(control) }
         setContentCompressionResistancePriority(.required, for: .vertical)
         setContentHuggingPriority(.required, for: .vertical)
     }
 
     required init?(coder: NSCoder) { fatalError("Not used") }
     override var isFlipped: Bool { true }
+
+    /// How many pickers the composer carries, for the smoke run's bounds check.
+    var pickerCount: Int { pickers.count }
 
     func refreshLayout() {
         invalidateIntrinsicContentSize()
@@ -46,12 +63,11 @@ final class ComposerControlsView: NSView {
         var items: [(NSView, NSRect)] = []
         var x: CGFloat = 0
         var y: CGFloat = 0
-        for (index, picker) in pickers.enumerated() where !picker.isHidden {
-            let maximum: CGFloat = index == 0 ? 260 : (index == 1 ? 150 : 220)
-            let minimum: CGFloat = index == 1 ? 96 : 140
-            let size = min(width, max(minimum, min(maximum, picker.intrinsicContentSize.width + 8)))
+        for slot in pickers where !slot.button.isHidden {
+            let size = min(width, max(slot.minimumWidth,
+                                      min(slot.maximumWidth, slot.button.intrinsicContentSize.width + 8)))
             if x > 0 && x + size > width { x = 0; y += Self.controlHeight + gap }
-            items.append((picker, NSRect(x: x, y: y, width: size, height: Self.controlHeight)))
+            items.append((slot.button, NSRect(x: x, y: y, width: size, height: Self.controlHeight)))
             x += size + gap
         }
         let visibleActions = actions.filter { !$0.isHidden }

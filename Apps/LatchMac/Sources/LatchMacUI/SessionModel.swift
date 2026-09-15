@@ -190,7 +190,7 @@ final class SessionModel {
             phase = .disconnected
             status = resumingID == nil ? "Not connected" : "Saved · Resume failed"
             errorMessage = resumingID == nil ? error.localizedDescription
-                : "\(error.localizedDescription) Saved history is unchanged. Select the harness to retry, or create a new session."
+                : "\(error.localizedDescription) Saved history is unchanged. Retry, or create a new session."
         }
         onChange?()
     }
@@ -305,7 +305,7 @@ final class SessionModel {
         cancellationRequested = false
         phase = .stopping
         status = "Sign-in required"
-        errorMessage = "\(error.localizedDescription) Sign in with the agent, then select the harness again to reconnect."
+        errorMessage = "\(error.localizedDescription) Sign in with the agent, then try again."
         onChange?()
         let stoppingClient = client
         let stop = Task {

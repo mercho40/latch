@@ -14,7 +14,7 @@ final class SessionForkTests: XCTestCase {
             let sidebar = try fixture.sidebar(in: window)
             let original = try XCTUnwrap(sidebar.selectedSession)
 
-            try fixture.selectAgent(.fx, in: original)
+            try fixture.selectAgent(.fx, in: window)
 
             // The original is untouched: same harness, transcript, agent context, and command.
             XCTAssertEqual(original.savedSession, saved)
@@ -50,7 +50,7 @@ final class SessionForkTests: XCTestCase {
             let sidebar = try fixture.sidebar(in: window)
             let session = try XCTUnwrap(sidebar.selectedSession)
 
-            try fixture.selectAgent(.fx, in: session)
+            try fixture.selectAgent(.fx, in: window)
 
             // Nothing to preserve, so the session keeps its identity and changes harness.
             XCTAssertEqual(sidebar.allSessions.count, 1)
@@ -61,7 +61,7 @@ final class SessionForkTests: XCTestCase {
         }
     }
 
-    @MainActor func testCommittedCommandChangeWithHistoryForksOntoTheNewCommand() async throws {
+    @MainActor func testSettingsCommandChangeLeavesASessionWithHistoryAlone() async throws {
         try await withFixture { fixture in
             let saved = fixture.session(1, messages: true)
             try await fixture.store.save(SavedSessionLibrary(sessions: [saved], selectedSessionID: saved.id))
@@ -69,43 +69,36 @@ final class SessionForkTests: XCTestCase {
             await window.restoreSessions(launchEnvironment: fixture.environment)
             let sidebar = try fixture.sidebar(in: window)
             let original = try XCTUnwrap(sidebar.selectedSession)
-            let field: NSTextField = try fixture.control(in: original.view, label: "ACP agent command")
-            let replacement = "/usr/bin/false --forked"
 
-            field.stringValue = replacement
-            original.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
-            original.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: field))
+            fixture.settings.setCustomCommand("/usr/bin/false --reconfigured")
 
-            XCTAssertEqual(original.savedSession, saved, "A committed edit must not rewrite the original")
-            XCTAssertEqual(field.stringValue, saved.customCommand, "The field reverts to the committed command")
-            XCTAssertEqual(sidebar.allSessions.count, 2)
-            let fork = try XCTUnwrap(sidebar.allSessions.last)
-            XCTAssertTrue(sidebar.selectedSession === fork)
-            XCTAssertEqual(fork.savedSession.agentID, AgentPreset.custom.rawValue)
-            XCTAssertEqual(fork.savedSession.customCommand, replacement)
-            XCTAssertTrue(fork.model.messages.isEmpty)
+            // The command is a default for new sessions. A session that already holds a
+            // conversation keeps the command it connected with, and is not forked: a global
+            // preference must never spawn a sibling for every open session.
+            XCTAssertEqual(original.savedSession, saved)
+            XCTAssertEqual(sidebar.allSessions.count, 1, "Changing a default must not fork")
+            await window.flushPersistence()
+            let persisted = try await fixture.store.load()
+            XCTAssertEqual(persisted.sessions, [saved])
         }
     }
 
-    @MainActor func testUncommittedCommandEditKeepsSavedHistoryAndContext() async throws {
+    @MainActor func testSettingsCommandChangeIsAdoptedByAnIdleSessionWithoutHistory() async throws {
         try await withFixture { fixture in
-            let saved = fixture.session(1, messages: true)
+            let saved = fixture.session(1, messages: false)
             try await fixture.store.save(SavedSessionLibrary(sessions: [saved], selectedSessionID: saved.id))
             let window = fixture.window()
             await window.restoreSessions(launchEnvironment: fixture.environment)
             let sidebar = try fixture.sidebar(in: window)
             let session = try XCTUnwrap(sidebar.selectedSession)
-            let field: NSTextField = try fixture.control(in: session.view, label: "ACP agent command")
+            _ = session.view
 
-            field.stringValue = "/usr/bin/false --half-typed"
-            session.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+            fixture.settings.setCustomCommand("/usr/bin/false --reconfigured")
 
-            // Typing is transient UI state; a quit here must not lose the conversation.
-            XCTAssertEqual(session.savedSession, saved)
-            XCTAssertEqual(sidebar.allSessions.count, 1, "Typing must not fork")
-            await window.flushPersistence()
-            let persisted = try await fixture.store.load()
-            XCTAssertEqual(persisted.sessions, [saved])
+            // Nothing to preserve, so the next connection uses what was just configured.
+            XCTAssertEqual(sidebar.allSessions.count, 1)
+            XCTAssertEqual(session.savedSession.customCommand, "/usr/bin/false --reconfigured")
+            XCTAssertNil(session.savedSession.agentSessionID)
         }
     }
 
@@ -127,6 +120,8 @@ final class SessionForkTests: XCTestCase {
         let storeDirectory: URL
         let store: SessionStore
         let environment: AgentLaunchEnvironment
+        let settings: AgentSettings
+        private let defaultsSuite: String
         private var windows: [SessionWindowController] = []
 
         init() throws {
@@ -134,6 +129,8 @@ final class SessionForkTests: XCTestCase {
             workspace = root.appendingPathComponent("workspace")
             storeDirectory = root.appendingPathComponent("store")
             store = SessionStore(directory: storeDirectory)
+            defaultsSuite = "SessionForkTests-\(UUID().uuidString)"
+            settings = AgentSettings(defaults: UserDefaults(suiteName: defaultsSuite)!)
             let home = root.appendingPathComponent("home")
             // No harness is installed here, so no selection can launch a process.
             environment = AgentLaunchEnvironment(environment: ["HOME": home.path, "PATH": "/usr/bin:/bin"],
@@ -169,7 +166,7 @@ final class SessionForkTests: XCTestCase {
         }
 
         func window() -> SessionWindowController {
-            let window = SessionWindowController(store: SessionStore(directory: storeDirectory))
+            let window = SessionWindowController(store: SessionStore(directory: storeDirectory), settings: settings)
             windows.append(window)
             return window
         }
@@ -187,11 +184,11 @@ final class SessionForkTests: XCTestCase {
             return try XCTUnwrap(find(view), "Missing accessible control: \(label)")
         }
 
-        /// Drives the real popup action rather than calling into private selection code.
-        func selectAgent(_ agent: AgentPreset, in session: SessionViewController) throws {
-            let popup: NSPopUpButton = try control(in: session.view, label: "ACP agent")
-            popup.selectItem(at: try XCTUnwrap(AgentPreset.allCases.firstIndex(of: agent)))
-            NSApp.sendAction(try XCTUnwrap(popup.action), to: popup.target, from: popup)
+        /// Drives the window's real harness control rather than calling into selection code.
+        func selectAgent(_ agent: AgentPreset, in window: SessionWindowController) throws {
+            XCTAssertTrue(window.harnessMenu.items.contains { $0.representedObject as? String == agent.rawValue },
+                          "The harness control does not offer \(agent.title)")
+            window.chooseHarnessFromToolbar(agent)
         }
 
         func cleanup() async {
@@ -200,6 +197,7 @@ final class SessionForkTests: XCTestCase {
                 window.close()
             }
             windows.removeAll()
+            UserDefaults().removePersistentDomain(forName: defaultsSuite)
             try? FileManager.default.removeItem(at: root)
         }
     }

@@ -19,6 +19,9 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     private let sessionUndo = UndoManager()
     private let attention: AttentionCenter?
     private let menuBar: MenuBarController?
+    /// Agent preferences every session in this window reads. Tests pass their own so a run
+    /// never reads or writes the developer's real settings.
+    private let settings: AgentSettings
     private(set) var persistenceError: String?
 
     var savedLibrary: SavedSessionLibrary {
@@ -29,10 +32,12 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// Tests and UI smoke runs opt out unless given their own temporary store.
     /// They also run without an attention center or menu bar extra, so no test posts a
     /// notification, claims the Dock badge, or adds a status item.
-    init(store: SessionStore? = nil, attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil) {
+    init(store: SessionStore? = nil, attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil,
+         settings: AgentSettings? = nil) {
         self.store = store
         self.attention = attention
         self.menuBar = menuBar
+        self.settings = settings ?? .shared
         persistenceReady = store == nil
         restoreFinished = store == nil
         let window = NSWindow(
@@ -126,7 +131,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     @discardableResult
     func addSession(workspace: URL, launchEnvironment: AgentLaunchEnvironment? = nil) -> SessionViewController {
-        let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment)
+        let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment,
+                                            settings: settings)
         adopt(session)
         sidebar.add(session)
         NSDocumentController.shared.noteNewRecentDocumentURL(workspace)
@@ -157,7 +163,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         guard !shuttingDown, restoreFinished else { return }
         let fork = SessionViewController(workspace: session.workspace,
                                          launchEnvironment: session.injectedEnvironment,
-                                         initialAgent: agent, initialCommand: command)
+                                         initialAgent: agent, initialCommand: command,
+                                         settings: settings)
         adopt(fork)
         sidebar.add(fork, after: session)
         scheduleSave()
@@ -193,7 +200,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     private func reopen(_ snapshot: SavedSession, launchEnvironment: AgentLaunchEnvironment?, at slot: SidebarViewController.Slot) {
         guard !shuttingDown else { return }
         let session = SessionViewController(workspace: URL(fileURLWithPath: snapshot.workspacePath),
-                                            launchEnvironment: launchEnvironment, savedSession: snapshot)
+                                            launchEnvironment: launchEnvironment, savedSession: snapshot,
+                                            settings: settings)
         adopt(session)
         sidebar.insert(session, at: slot)
         sessionUndo.setActionName("Close Session")
@@ -290,6 +298,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     private func show(_ session: SessionViewController?) {
         detail.show(session)
+        refreshHarness()
         updateTitle()
         publishAttention()
         scheduleSave()
@@ -297,6 +306,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     private func sessionChanged() {
         sidebar.refreshRows()
+        refreshHarness()
         updateTitle()
         publishAttention()
         scheduleSave()
@@ -320,7 +330,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             guard !shuttingDown else { return }
             for saved in library.sessions {
                 let session = SessionViewController(workspace: URL(fileURLWithPath: saved.workspacePath),
-                                                    launchEnvironment: launchEnvironment, savedSession: saved)
+                                                    launchEnvironment: launchEnvironment, savedSession: saved,
+                                                    settings: settings)
                 adopt(session)
                 // Building the sidebar must not start every saved command.
                 sidebar.add(session, selecting: false)
@@ -408,12 +419,97 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    // MARK: Harness
+
+    /// One control that both reports which agent this session runs on and switches it, so
+    /// status and selection stop being two separate things.
+    ///
+    /// A pop-up button rather than `NSMenuToolbarItem`: the latter renders correctly but is
+    /// never published to the accessibility tree, so VoiceOver cannot reach it.
+    private let harnessPopUp: NSPopUpButton = {
+        let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 168, height: 24), pullsDown: false)
+        popUp.setAccessibilityLabel("Agent")
+        popUp.cell?.lineBreakMode = .byTruncatingTail
+        popUp.menu?.autoenablesItems = false
+        return popUp
+    }()
+
+    private lazy var harness: NSToolbarItem = {
+        let item = NSToolbarItem(itemIdentifier: Self.harnessItem)
+        item.label = "Agent"
+        item.paletteLabel = "Agent"
+        item.autovalidates = false
+        item.view = harnessPopUp
+        harnessPopUp.target = self
+        harnessPopUp.action = #selector(harnessChanged)
+        return item
+    }()
+
+    /// Tests read the real menu rather than reaching into selection code.
+    var harnessMenu: NSMenu { harnessPopUp.menu ?? NSMenu() }
+
+    /// Drives the real pop-up, so a test exercises the same path a click takes.
+    func chooseHarnessFromToolbar(_ preset: AgentPreset) {
+        guard let index = harnessPopUp.itemArray.firstIndex(where: { $0.representedObject as? String == preset.rawValue })
+        else { return }
+        harnessPopUp.selectItem(at: index)
+        NSApp.sendAction(harnessPopUp.action!, to: harnessPopUp.target, from: harnessPopUp)
+    }
+
+    private func refreshHarness() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        defer {
+            harnessPopUp.menu = menu
+            harnessPopUp.invalidateIntrinsicContentSize()
+        }
+        guard let session = sidebar.selectedSession else {
+            harnessPopUp.isEnabled = false
+            harnessPopUp.toolTip = "No session selected"
+            menu.addItem(withTitle: "Agent", action: nil, keyEquivalent: "").isEnabled = false
+            return
+        }
+        let selection = session.harnessSelection
+        harnessPopUp.isEnabled = selection.isEditable
+        harnessPopUp.toolTip = selection.problem ?? "The agent this session runs on"
+        var current: NSMenuItem?
+        for row in selection.rows {
+            let item = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
+            item.representedObject = row.preset.rawValue
+            // What the agent needs, and what choosing it would do, without putting a second
+            // line under every row. Install state has a home of its own in Settings.
+            item.toolTip = row.detail
+            item.isEnabled = true
+            menu.addItem(item)
+            if row.isCurrent { current = item }
+        }
+        menu.addItem(.separator())
+        // Mirrors the system menus that end in their own settings entry.
+        menu.addItem(withTitle: "Agent Settings…", action: nil, keyEquivalent: "")
+        harnessPopUp.select(current)
+    }
+
+    /// The pop-up also carries a settings entry, which is not a selection. Restore the
+    /// session's harness before handing off, so the control never lies about its state.
+    @objc private func harnessChanged(_ sender: NSPopUpButton) {
+        guard let chosen = sender.selectedItem else { return }
+        guard let raw = chosen.representedObject as? String, let preset = AgentPreset(rawValue: raw) else {
+            refreshHarness()
+            NSApp.sendAction(#selector(LatchApplicationDelegate.showSettings(_:)), to: nil, from: nil)
+            return
+        }
+        sidebar.selectedSession?.chooseHarness(preset)
+        refreshHarness()
+    }
+
     // MARK: Toolbar
 
     private static let newSessionItem = NSToolbarItem.Identifier("newSession")
+    private static let harnessItem = NSToolbarItem.Identifier("harness")
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, Self.newSessionItem, .sidebarTrackingSeparator, .flexibleSpace]
+        // The harness sits at the trailing edge, where macOS keeps window-level state.
+        [.toggleSidebar, Self.newSessionItem, .sidebarTrackingSeparator, .flexibleSpace, Self.harnessItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -421,6 +517,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if identifier == Self.harnessItem { return harness }
         guard identifier == Self.newSessionItem else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.label = "New Session"

@@ -2,7 +2,7 @@ import AppKit
 
 /// Sidebar of workspaces and sessions beside the selected session's detail view.
 @MainActor
-final class SessionWindowController: NSWindowController, NSToolbarDelegate {
+final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSMenuItemValidation {
     private let split = NSSplitViewController()
     private let sidebar = SidebarViewController()
     private let detail = DetailHostViewController()
@@ -13,6 +13,12 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
     private var restoreFinished = false
     private var debounceSave: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    /// Closed sessions still draining their agent, awaited before the app quits.
+    private var closing: [UUID: Task<Void, Never>] = [:]
+    /// Session closes are undoable; text editing keeps its own manager in the composer.
+    private let sessionUndo = UndoManager()
+    private let attention: AttentionCenter?
+    private let menuBar: MenuBarController?
     private(set) var persistenceError: String?
 
     var savedLibrary: SavedSessionLibrary {
@@ -21,8 +27,12 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
     }
 
     /// Tests and UI smoke runs opt out unless given their own temporary store.
-    init(store: SessionStore? = nil) {
+    /// They also run without an attention center or menu bar extra, so no test posts a
+    /// notification, claims the Dock badge, or adds a status item.
+    init(store: SessionStore? = nil, attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil) {
         self.store = store
+        self.attention = attention
+        self.menuBar = menuBar
         persistenceReady = store == nil
         restoreFinished = store == nil
         let window = NSWindow(
@@ -47,6 +57,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         split.splitView.autosaveName = "LatchSessionSplit"
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1040, height: 720))
+        window.delegate = self
 
         let toolbar = NSToolbar(identifier: "LatchSessionToolbar")
         toolbar.delegate = self
@@ -55,10 +66,35 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         window.toolbar = toolbar
 
         sidebar.onSelect = { [weak self] session in self?.show(session) }
+        sidebar.onCloseSession = { [weak self] session in self?.close(session) }
+        sidebar.onOpenWorkspace = { [weak self] url in self?.openWorkspace(url) }
         detail.onNewSession = { [weak self] in self?.newSession(nil) }
+        detail.onOpenWorkspace = { [weak self] url in self?.openWorkspace(url) }
+        attention?.isSessionVisible = { [weak self] id in
+            guard let self, NSApp.isActive, self.window?.isVisible == true else { return false }
+            return self.sidebar.selectedSession?.id == id
+        }
+        attention?.onReveal = { [weak self] id in self?.reveal(id) }
+        attention?.onResolvePermission = { [weak self] id, request, option in
+            guard let session = self?.sidebar.allSessions.first(where: { $0.id == id }) else { return }
+            session.resolvePermission(request: request, optionID: option)
+            self?.publishAttention()
+        }
+        menuBar?.sessions = { [weak self] in self?.sidebar.allSessions.map(\.menuBarRow) ?? [] }
+        menuBar?.onSelect = { [weak self] id in self?.reveal(id) }
+        menuBar?.onNewSession = { [weak self] in self?.newSession(nil) }
+        menuBar?.apply()
         show(nil)
-        window.center()
+        // Centre only the first launch; afterwards the window reopens where it was left.
+        if !window.setFrameUsingName(Self.frameAutosaveName) { window.center() }
+        window.setFrameAutosaveName(Self.frameAutosaveName)
     }
+
+    private static let frameAutosaveName = NSWindow.FrameAutosaveName("LatchSessionWindow")
+
+    /// Reached through the responder chain whenever the first responder has no manager of
+    /// its own, so ⌘Z undoes a closed session but never someone's half-typed prompt.
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { sessionUndo }
 
     required init?(coder: NSCoder) { fatalError("Not used") }
 
@@ -66,6 +102,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
 
     @objc func newSession(_ sender: Any?) {
         guard let window, !shuttingDown, restoreFinished else { return }
+        // The menu bar extra can start a session with the window closed; a sheet needs it.
+        window.makeKeyAndOrderFront(nil)
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -78,25 +116,199 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         }
     }
 
+    /// Every route to a new session — ⌘N, a dropped folder, Open Recent, or the Dock —
+    /// arrives here, so all of them are remembered as recent workspaces.
+    func openWorkspace(_ url: URL) {
+        guard !shuttingDown, restoreFinished else { return }
+        window?.makeKeyAndOrderFront(nil)
+        addSession(workspace: url)
+    }
+
     @discardableResult
     func addSession(workspace: URL, launchEnvironment: AgentLaunchEnvironment? = nil) -> SessionViewController {
         let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment)
-        session.onChange = { [weak self] in self?.sessionChanged() }
+        adopt(session)
         sidebar.add(session)
+        NSDocumentController.shared.noteNewRecentDocumentURL(workspace)
         scheduleSave()
         return session
+    }
+
+    /// Bring a session on screen because something outside the window asked for it.
+    func reveal(_ id: UUID) {
+        guard let session = sidebar.allSessions.first(where: { $0.id == id }) else { return }
+        window?.makeKeyAndOrderFront(nil)
+        sidebar.select(session)
+    }
+
+    private func adopt(_ session: SessionViewController) {
+        session.onChange = { [weak self] in self?.sessionChanged() }
+        session.onTranscriptChange = { [weak self] in self?.scheduleSave() }
+        session.onForkSession = { [weak self, weak session] agent, command in
+            guard let self, let session else { return }
+            self.forkSession(from: session, agent: agent, command: command)
+        }
+    }
+
+    /// A session that already holds a transcript owns its harness. Selecting another one
+    /// opens a sibling session beside it in the same workspace, so the original keeps its
+    /// history and agent context and no folder has to be chosen again.
+    private func forkSession(from session: SessionViewController, agent: AgentPreset, command: String) {
+        guard !shuttingDown, restoreFinished else { return }
+        let fork = SessionViewController(workspace: session.workspace,
+                                         launchEnvironment: session.injectedEnvironment,
+                                         initialAgent: agent, initialCommand: command)
+        adopt(fork)
+        sidebar.add(fork, after: session)
+        scheduleSave()
+    }
+
+    @objc func closeSession(_ sender: Any?) {
+        guard let session = sidebar.selectedSession else { return }
+        close(session)
+    }
+
+    /// Takes the session out of the sidebar, stops its agent, and leaves an undo behind.
+    /// The transcript, draft, and agent context survive in the snapshot, so undo restores
+    /// the session rather than an empty row.
+    private func close(_ session: SessionViewController) {
+        guard !shuttingDown, restoreFinished else { return }
+        let snapshot = session.savedSession
+        let environment = session.injectedEnvironment
+        guard let slot = sidebar.remove(session) else { return }
+        let token = UUID()
+        closing[token] = Task { [weak self] in
+            await session.shutdown()
+            self?.closing[token] = nil
+        }
+        sessionUndo.setActionName("Close Session")
+        sessionUndo.registerUndo(withTarget: self) { controller in
+            controller.reopen(snapshot, launchEnvironment: environment, at: slot)
+        }
+        show(sidebar.selectedSession)
+    }
+
+    /// Undo of a close. The agent process is gone, so this rebuilds the session from its
+    /// saved snapshot exactly as a restore at launch would, and resumes context on select.
+    private func reopen(_ snapshot: SavedSession, launchEnvironment: AgentLaunchEnvironment?, at slot: SidebarViewController.Slot) {
+        guard !shuttingDown else { return }
+        let session = SessionViewController(workspace: URL(fileURLWithPath: snapshot.workspacePath),
+                                            launchEnvironment: launchEnvironment, savedSession: snapshot)
+        adopt(session)
+        sidebar.insert(session, at: slot)
+        sessionUndo.setActionName("Close Session")
+        sessionUndo.registerUndo(withTarget: self) { controller in
+            controller.close(session)
+        }
+        show(session)
+    }
+
+    @objc func stopSession(_ sender: Any?) { sidebar.selectedSession?.stopActivity() }
+
+    @objc func disconnectSession(_ sender: Any?) { sidebar.selectedSession?.disconnectSession() }
+
+    @objc func forkSelectedSession(_ sender: Any?) { sidebar.selectedSession?.forkSession() }
+
+    @objc func renameSession(_ sender: Any?) {
+        guard let session = sidebar.selectedSession else { return }
+        sidebar.beginRename(session)
+    }
+
+    @objc func nextSession(_ sender: Any?) { step(by: 1) }
+
+    @objc func previousSession(_ sender: Any?) { step(by: -1) }
+
+    private func step(by offset: Int) {
+        let sessions = sidebar.allSessions
+        guard !sessions.isEmpty else { return }
+        let current = sidebar.selectedSession.flatMap { session in sessions.firstIndex { $0 === session } } ?? 0
+        let next = (current + offset + sessions.count) % sessions.count
+        sidebar.select(sessions[next])
+    }
+
+    @objc func revealWorkspace(_ sender: Any?) {
+        guard let session = sidebar.selectedSession else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([session.workspace])
+    }
+
+    @objc func openWorkspaceInTerminal(_ sender: Any?) {
+        guard let session = sidebar.selectedSession,
+              let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
+        else { return }
+        NSWorkspace.shared.open([session.workspace], withApplicationAt: terminal,
+                                configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    // MARK: Find
+
+    @objc func performFindPanelAction(_ sender: Any?) {
+        guard let transcript = sidebar.selectedSession?.conversation else { return }
+        transcript.beginFind()
+    }
+
+    @objc func findNextMatch(_ sender: Any?) { sidebar.selectedSession?.conversation.findNext() }
+
+    @objc func findPreviousMatch(_ sender: Any?) { sidebar.selectedSession?.conversation.findPrevious() }
+
+    @objc func toggleMenuBarItem(_ sender: Any?) {
+        guard let menuBar else { return }
+        menuBar.isVisible.toggle()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let session = sidebar.selectedSession
+        switch menuItem.action {
+        case #selector(closeSession(_:)), #selector(renameSession(_:)):
+            return session != nil && restoreFinished && !shuttingDown
+        case #selector(copyConversation(_:)):
+            return !(session?.model.transcript.isEmpty ?? true)
+        case #selector(newSession(_:)):
+            return restoreFinished && !shuttingDown
+        case #selector(stopSession(_:)):
+            return session?.canStop ?? false
+        case #selector(disconnectSession(_:)):
+            return session?.canDisconnect ?? false
+        case #selector(forkSelectedSession(_:)):
+            return (session?.canFork ?? false) && restoreFinished && !shuttingDown
+        case #selector(nextSession(_:)), #selector(previousSession(_:)):
+            return sidebar.allSessions.count > 1
+        case #selector(revealWorkspace(_:)):
+            return session != nil
+        case #selector(openWorkspaceInTerminal(_:)):
+            return session != nil && NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") != nil
+        case #selector(performFindPanelAction(_:)):
+            return session != nil
+        case #selector(findNextMatch(_:)), #selector(findPreviousMatch(_:)):
+            return session?.conversation.canStepMatches ?? false
+        case #selector(toggleMenuBarItem(_:)):
+            menuItem.state = menuBar?.isVisible == true ? .on : .off
+            return menuBar != nil
+        default:
+            return true
+        }
     }
 
     private func show(_ session: SessionViewController?) {
         detail.show(session)
         updateTitle()
+        publishAttention()
         scheduleSave()
     }
 
     private func sessionChanged() {
         sidebar.refreshRows()
         updateTitle()
+        publishAttention()
         scheduleSave()
+    }
+
+    /// The Dock badge, notifications, and the menu bar extra all read the same snapshot.
+    private func publishAttention() {
+        guard attention != nil || menuBar != nil else { return }
+        var states: [UUID: AttentionCenter.State] = [:]
+        for session in sidebar.allSessions { states[session.id] = session.attention }
+        attention?.update(states)
+        menuBar?.refresh()
     }
 
     func restoreSessions(launchEnvironment: AgentLaunchEnvironment? = nil) async {
@@ -109,7 +321,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
             for saved in library.sessions {
                 let session = SessionViewController(workspace: URL(fileURLWithPath: saved.workspacePath),
                                                     launchEnvironment: launchEnvironment, savedSession: saved)
-                session.onChange = { [weak self] in self?.sessionChanged() }
+                adopt(session)
                 // Building the sidebar must not start every saved command.
                 sidebar.add(session, selecting: false)
             }
@@ -181,7 +393,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
 
     func shutdown() async {
         shuttingDown = true
+        sessionUndo.removeAllActions()
+        attention?.clear()
         await flushPersistence()
+        for task in closing.values { await task.value }
         for session in sidebar.allSessions { await session.shutdown() }
         // Teardown may deliver a final chunk. IDs, drafts and history survive disconnect.
         await flushPersistence()
@@ -275,13 +490,123 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
         let originalSize = window?.contentView?.frame.size
         if let window { window.setContentSize(window.contentMinSize) }
         defer { if let originalSize { window?.setContentSize(originalSize) } }
-        try await first.smokeTest(fixtureHome: fixtureHome)
+        try await first.smokeTestConversation(fixtureHome: fixtureHome)
         guard window?.title == "Keep working" else { throw SmokeError.failed("Window title did not follow the session title") }
+
+        // A started conversation owns its harness: selecting another one forks a sibling
+        // beside it and leaves this transcript and agent context alone.
+        let transcript = first.model.transcript
+        let context = first.savedSession.agentSessionID
+        let fallback = try smokeFork(from: first, to: .codex, expecting: 3)
+        guard first.model.transcript == transcript, !transcript.isEmpty,
+              first.savedSession.agentID == AgentPreset.fx.rawValue,
+              first.savedSession.agentSessionID == context, context != nil else {
+            throw SmokeError.failed("Switching harness discarded the original conversation")
+        }
+        try await fallback.smokeTestFallbackHarness(fixtureHome: fixtureHome)
+        let lifecycle = try smokeFork(from: fallback, to: .custom, expecting: 4)
+        try await lifecycle.smokeTestLaunchLifecycle(fixtureHome: fixtureHome)
         split.splitViewItems[0].animator().isCollapsed = true
         guard split.splitViewItems[0].isCollapsed else { throw SmokeError.failed("Sidebar did not collapse") }
         split.splitViewItems[0].isCollapsed = false
         window?.contentView?.layoutSubtreeIfNeeded()
         try checkSidebarRowLayout()
+        try smokeTestFind(first)
+        try smokeTestMenuBarListing()
+        try smokeTestCloseAndUndo(second)
+    }
+
+    /// ⌘F over a real transcript: the bar takes its strip above the conversation, matches
+    /// the text that is actually on screen, steps, and gives the space back.
+    private func smokeTestFind(_ session: SessionViewController) throws {
+        sidebar.select(session)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        guard let word = session.model.messages.first(where: { $0.role == .user })?.text
+            .split(whereSeparator: { $0.isWhitespace }).first.map(String.init), word.count >= 3 else {
+            throw SmokeError.failed("Expected a user message in the transcript to search for")
+        }
+        let transcript = session.conversation
+        let closedTop = transcript.scrollView.frame.minY
+        performFindPanelAction(nil)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        guard transcript.isFindBarVisible, transcript.scrollView.frame.minY >= closedTop + TranscriptFindBar.height else {
+            throw SmokeError.failed("The find bar did not open above the transcript")
+        }
+        transcript.search(word)
+        guard transcript.matchCount >= 1, transcript.currentMatch == 1 else {
+            throw SmokeError.failed("Find did not match \(word) in the visible transcript")
+        }
+        findNextMatch(nil)
+        guard transcript.currentMatch == (transcript.matchCount == 1 ? 1 : 2) else {
+            throw SmokeError.failed("Find Next did not step through matches")
+        }
+        transcript.endFind()
+        window?.contentView?.layoutSubtreeIfNeeded()
+        guard !transcript.isFindBarVisible, transcript.scrollView.frame.minY == closedTop, transcript.matchCount == 0 else {
+            throw SmokeError.failed("Closing the find bar did not give its strip back")
+        }
+    }
+
+    /// Every session is listed in the menu bar extra, not only the one on screen.
+    private func smokeTestMenuBarListing() throws {
+        guard let menuBar else { return }
+        let rows = menuBar.buildMenu().items.filter { $0.representedObject is UUID }
+        guard rows.count == sidebar.allSessions.count,
+              rows.map(\.title) == sidebar.allSessions.map(\.sessionTitle),
+              attention?.badgeCount == 0 else {
+            throw SmokeError.failed("The menu bar extra does not list every session")
+        }
+    }
+
+    /// Closing takes the session out of the sidebar, the detail view, and the saved library;
+    /// undo puts it back in the same slot with its title and transcript.
+    private func smokeTestCloseAndUndo(_ session: SessionViewController) throws {
+        let expected = session.savedSession
+        let rows = sidebar.outline.numberOfRows
+        sidebar.select(session)
+        guard sidebar.selectedSession === session else {
+            throw SmokeError.failed("Could not select the session to close")
+        }
+        closeSession(nil)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        guard sidebar.outline.numberOfRows == rows - 1,
+              !sidebar.allSessions.contains(where: { $0 === session }),
+              let successor = sidebar.selectedSession, successor !== session,
+              detail.children.first === successor,
+              !savedLibrary.sessions.contains(where: { $0.id == expected.id }) else {
+            throw SmokeError.failed("Closing a session did not remove its row, selection, and saved entry")
+        }
+        guard let undo = window?.undoManager, undo.canUndo else {
+            throw SmokeError.failed("Closing a session left nothing to undo")
+        }
+        undo.undo()
+        window?.contentView?.layoutSubtreeIfNeeded()
+        guard sidebar.outline.numberOfRows == rows, let restored = sidebar.selectedSession,
+              restored.id == expected.id, restored.sessionTitle == expected.title,
+              restored.model.messages.map(\.id) == expected.messages.map(\.id),
+              detail.children.first === restored, undo.canRedo else {
+            throw SmokeError.failed("Undo did not restore the closed session in place")
+        }
+    }
+
+    /// Selecting another harness on a started conversation must open a sibling session in the
+    /// same workspace, place it next to its parent, select it, and start it empty.
+    private func smokeFork(from session: SessionViewController, to agent: AgentPreset,
+                           expecting count: Int) throws -> SessionViewController {
+        session.smokeSelectAgent(agent)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        let sessions = sidebar.allSessions
+        guard sessions.count == count, let fork = sidebar.selectedSession, fork !== session,
+              let parent = sessions.firstIndex(where: { $0 === session }),
+              sessions.firstIndex(where: { $0 === fork }) == parent + 1,
+              sidebar.workspaces.count == 1,
+              fork.workspace.standardizedFileURL == session.workspace.standardizedFileURL,
+              fork.savedSession.agentID == agent.rawValue, fork.model.messages.isEmpty,
+              fork.savedSession.agentSessionID == nil,
+              session.view.window == nil, fork.view.window != nil else {
+            throw SmokeError.failed("Selecting another harness did not fork a sibling session")
+        }
+        return fork
     }
 
     private func checkSidebarRowLayout() throws {
@@ -312,13 +637,18 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate {
 @MainActor
 final class DetailHostViewController: NSViewController {
     var onNewSession: (() -> Void)?
+    var onOpenWorkspace: ((URL) -> Void)? {
+        didSet { (view as? WorkspaceDropView)?.onDrop = onOpenWorkspace }
+    }
     private let placeholder = NSStackView()
 
     override func loadView() {
-        view = NSView()
+        let drop = WorkspaceDropView()
+        drop.onDrop = onOpenWorkspace
+        view = drop
         let title = NSTextField(labelWithString: "No session selected")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString: "Choose a workspace folder to get started.")
+        let body = NSTextField(wrappingLabelWithString: "Choose a workspace folder to get started, or drag one here from the Finder.")
         body.textColor = .secondaryLabelColor
         body.alignment = .center
         body.preferredMaxLayoutWidth = 360
@@ -359,5 +689,57 @@ final class DetailHostViewController: NSViewController {
             session.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             session.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+    }
+}
+
+/// The detail pane accepts a folder dropped from the Finder, so the empty state is a real
+/// target rather than a label pointing at the toolbar.
+@MainActor
+final class WorkspaceDropView: NSView {
+    var onDrop: ((URL) -> Void)?
+    private var highlighted = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        highlighted = !folders(in: sender).isEmpty
+        needsDisplay = true
+        return highlighted ? .copy : []
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        highlighted = false
+        needsDisplay = true
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        highlighted = false
+        needsDisplay = true
+        let dropped = folders(in: sender)
+        guard !dropped.isEmpty else { return false }
+        for folder in dropped { onDrop?(folder) }
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard highlighted else { return }
+        NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).setFill()
+        bounds.fill()
+    }
+
+    private func folders(in info: any NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]
+        else { return [] }
+        return urls.filter { url in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
     }
 }

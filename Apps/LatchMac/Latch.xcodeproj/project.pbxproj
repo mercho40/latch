@@ -180,6 +180,9 @@
 		A70000000000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				// Apple silicon only: the x86_64 slice doubled every binary in the bundle
+				// and Latch is not distributed to Intel Macs.
+				ARCHS = arm64;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				ONLY_ACTIVE_ARCH = YES;
@@ -191,6 +194,11 @@
 		A70000000000000000000002 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
+				// The inherited default is NO. Measured no change to the shipped bundle
+				// today — the static package archives carry nothing unreachable — but it
+				// is the right default as the dependency graph grows.
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				// Strip each executable before signing, including ordinary Release builds.
 				DEPLOYMENT_POSTPROCESSING = YES;

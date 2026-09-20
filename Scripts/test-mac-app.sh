@@ -88,8 +88,8 @@ if [[ "$configuration" == Release ]]; then
     require_release_symbols() {
         local binary="$1" dsym="$2" slices binary_uuids dsym_uuids
         slices="$(/usr/bin/lipo -archs "$binary" | tr ' ' '\n' | LC_ALL=C sort | paste -sd ' ' -)"
-        if [[ "$slices" != 'arm64 x86_64' ]]; then
-            echo "MAC APP: expected universal arm64+x86_64 Release binary: $binary ($slices)" >&2
+        if [[ "$slices" != 'arm64' ]]; then
+            echo "MAC APP: expected an arm64-only Release binary: $binary ($slices)" >&2
             exit 1
         fi
         if [[ ! -s "$dsym" ]]; then

@@ -20,6 +20,7 @@ OTHER_CODE_SIGN_FLAGS = $(inherited) --options runtime
 
 // Icon Composer icon; actool renders the legacy sizes for pre-26 systems.
 ASSETCATALOG_COMPILER_APPICON_NAME = Latch
+ASSETCATALOG_COMPILER_OPTIMIZATION = space
 
 GENERATE_INFOPLIST_FILE = YES
 INFOPLIST_KEY_CFBundleDisplayName = Latch

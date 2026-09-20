@@ -181,6 +181,29 @@ final class SessionCloseTests: XCTestCase {
         XCTAssertEqual(find.items.map(\.title), ["Find…", "Find Next", "Find Previous"])
         XCTAssertEqual(find.items.first?.keyEquivalent, "f")
         XCTAssertNotNil(file.items.first { $0.title == "Open Recent" }?.submenu)
+
+        // The composer is a real text view, so the standard text commands have to be in
+        // the menu bar too — that is where people look for them, not just on the keyboard.
+        let pasteMatching = try XCTUnwrap(edit.items.first { $0.title == "Paste and Match Style" })
+        XCTAssertEqual(pasteMatching.keyEquivalent, "v")
+        XCTAssertEqual(pasteMatching.keyEquivalentModifierMask, [.command, .option, .shift])
+        XCTAssertNotNil(edit.items.first { $0.title == "Delete" })
+        let spelling = try XCTUnwrap(edit.items.first { $0.title == "Spelling and Grammar" }?.submenu)
+        XCTAssertEqual(spelling.items.map(\.title),
+                       ["Show Spelling and Grammar", "Check Document Now", "",
+                        "Check Spelling While Typing", "Check Grammar With Spelling",
+                        "Correct Spelling Automatically"])
+        let substitutions = try XCTUnwrap(edit.items.first { $0.title == "Substitutions" }?.submenu)
+        XCTAssertEqual(substitutions.items.map(\.title), ["Smart Quotes", "Smart Dashes", "Text Replacement"])
+        let emoji = try XCTUnwrap(edit.items.first { $0.title == "Emoji & Symbols" })
+        XCTAssertEqual(emoji.keyEquivalentModifierMask, [.command, .control])
+    }
+
+    /// Restorable state is encoded with the secure coder, not AppKit's legacy fallback.
+    @MainActor func testTheAppOptsIntoSecureRestorableState() {
+        _ = NSApplication.shared
+        let delegate = LatchApplicationDelegate()
+        XCTAssertTrue(delegate.applicationSupportsSecureRestorableState(NSApp))
     }
 
 }

@@ -82,7 +82,7 @@ final class UserNotificationPresenter: NSObject, AttentionPresenting, UNUserNoti
             if let key = pair.key as? String, let value = pair.value as? String { result[key] = value }
         }
         await MainActor.run { [weak self] in
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             self?.onAction?(action, userInfo)
         }
     }

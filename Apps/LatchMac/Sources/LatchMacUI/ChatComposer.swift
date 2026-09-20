@@ -48,6 +48,9 @@ final class ChatComposerScrollView: NSScrollView {
 
     /// Also called after draft restoration, sending, and undo (not just typing).
     func refreshHeight() {
+        // TextKit 1 for the same reason the transcript uses it: the composer is sized to
+        // its whole draft, so it needs a full height on every keystroke rather than a
+        // viewport's worth. See TranscriptMessageView.arrange(width:).
         guard let text = documentView as? NSTextView,
               text.bounds.width > 0,
               let container = text.textContainer,

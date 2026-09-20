@@ -10,6 +10,9 @@ final class SettingsWindowController: NSWindowController {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        // The tab controller supplies the toolbar; this is what makes macOS lay it out as
+        // a Settings window rather than a document one.
+        window.toolbarStyle = .preference
         super.init(window: window)
         tabs.tabStyle = .toolbar
         let agents = AgentsSettingsViewController(settings: settings)
@@ -27,6 +30,6 @@ final class SettingsWindowController: NSWindowController {
 
     func show() {
         window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
     }
 }

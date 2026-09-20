@@ -37,7 +37,7 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         )
         self.controller = controller
         controller.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         if !smokeTest { Task { await controller.restoreSessions() } }
         if smokeTest {
             DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
@@ -58,6 +58,10 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
             }
         }
     }
+
+    /// Latch encodes nothing but its own window state, so the secure coder is free to
+    /// use. Without this AppKit keeps the legacy unarchiver for restorable state.
+    public func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     /// Latch keeps agents running, so closing the window is not quitting; the menu bar
     /// extra and the Dock icon both still lead back to the sessions.
@@ -142,6 +146,11 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        // The composer is plain text, but a paste carrying styles still arrives from other
+        // apps, and macOS users look for this item rather than stripping it by hand.
+        edit.addItem(withTitle: "Paste and Match Style", action: #selector(NSTextView.pasteAsPlainText(_:)), keyEquivalent: "v")
+            .keyEquivalentModifierMask = [.command, .option, .shift]
+        edit.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
         let findItem = edit.addItem(withTitle: "Find", action: nil, keyEquivalent: "")
@@ -151,6 +160,28 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         find.addItem(withTitle: "Find Previous", action: #selector(SessionWindowController.findPreviousMatch(_:)), keyEquivalent: "g")
             .keyEquivalentModifierMask = [.command, .shift]
         findItem.submenu = find
+        // Everything below already works in the composer through the responder chain; it
+        // was only unreachable from the menu bar, which is where people look for it.
+        let spellingItem = edit.addItem(withTitle: "Spelling and Grammar", action: nil, keyEquivalent: "")
+        let spelling = NSMenu(title: "Spelling and Grammar")
+        spelling.addItem(withTitle: "Show Spelling and Grammar", action: #selector(NSText.showGuessPanel(_:)), keyEquivalent: ":")
+        spelling.addItem(withTitle: "Check Document Now", action: #selector(NSText.checkSpelling(_:)), keyEquivalent: ";")
+        spelling.addItem(.separator())
+        spelling.addItem(withTitle: "Check Spelling While Typing", action: #selector(NSTextView.toggleContinuousSpellChecking(_:)), keyEquivalent: "")
+        spelling.addItem(withTitle: "Check Grammar With Spelling", action: #selector(NSTextView.toggleGrammarChecking(_:)), keyEquivalent: "")
+        spelling.addItem(withTitle: "Correct Spelling Automatically", action: #selector(NSTextView.toggleAutomaticSpellingCorrection(_:)), keyEquivalent: "")
+        spellingItem.submenu = spelling
+        // Latch starts these off so pasted code survives; the menu is how a user asks for
+        // them back, and AppKit ticks each one from the composer's own state.
+        let substitutionsItem = edit.addItem(withTitle: "Substitutions", action: nil, keyEquivalent: "")
+        let substitutions = NSMenu(title: "Substitutions")
+        substitutions.addItem(withTitle: "Smart Quotes", action: #selector(NSTextView.toggleAutomaticQuoteSubstitution(_:)), keyEquivalent: "")
+        substitutions.addItem(withTitle: "Smart Dashes", action: #selector(NSTextView.toggleAutomaticDashSubstitution(_:)), keyEquivalent: "")
+        substitutions.addItem(withTitle: "Text Replacement", action: #selector(NSTextView.toggleAutomaticTextReplacement(_:)), keyEquivalent: "")
+        substitutionsItem.submenu = substitutions
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Emoji & Symbols", action: #selector(NSApplication.orderFrontCharacterPalette(_:)), keyEquivalent: " ")
+            .keyEquivalentModifierMask = [.command, .control]
         edit.addItem(.separator())
         edit.addItem(withTitle: "Copy Conversation", action: #selector(SessionWindowController.copyConversation(_:)), keyEquivalent: "")
         editItem.submenu = edit

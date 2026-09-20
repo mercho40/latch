@@ -130,12 +130,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func selectSession(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? UUID else { return }
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        NSApplication.shared.activate()
         onSelect?(id)
     }
 
     @objc private func newSession() {
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        NSApplication.shared.activate()
         onNewSession?()
     }
 

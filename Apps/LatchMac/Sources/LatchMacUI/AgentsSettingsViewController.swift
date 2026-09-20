@@ -9,6 +9,8 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
     private let table = NSTableView()
     private let scroll = NSScrollView()
     private var catalog: AgentCatalog
+    /// Tests and smoke runs pin the environment; a real pane rescans the filesystem.
+    private let injectedEnvironment: AgentLaunchEnvironment?
 
     private let detailTitle = NSTextField(labelWithString: "")
     private let detailBadge = NSTextField(labelWithString: "")
@@ -28,6 +30,7 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
     /// reads the developer's real agents or writes their real preferences.
     init(settings: AgentSettings = .shared, environment: AgentLaunchEnvironment? = nil) {
         self.settings = settings
+        injectedEnvironment = environment
         catalog = AgentCatalog(environment: environment ?? AgentLaunchEnvironment(),
                                customCommand: settings.customCommand)
         super.init(nibName: nil, bundle: nil)
@@ -149,7 +152,8 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
     // MARK: Data
 
     private func rescan() {
-        catalog = AgentCatalog(environment: AgentLaunchEnvironment(), customCommand: settings.customCommand)
+        catalog = AgentCatalog(environment: injectedEnvironment ?? AgentLaunchEnvironment(),
+                               customCommand: settings.customCommand)
         table.reloadData()
         selectRow(for: selected)
         refreshDetail()

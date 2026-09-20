@@ -581,6 +581,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         rescanLaunchEnvironment()
         updateAgentCommand()
         refresh()
+        // The window's harness control renders from this session's catalog, so it can only
+        // be told after the rescan — telling it from its own observer would race this one
+        // and leave it reporting the previous scan.
+        onChange?()
     }
 
     private var canEditLaunch: Bool {

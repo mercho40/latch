@@ -62,19 +62,36 @@ struct AgentCatalog {
     /// The command a custom agent runs. Held here so the picker can say whether the custom
     /// entry is usable without reaching into the session's text field.
     let customCommand: String
+    /// The scan itself, taken once. Resolving one agent stats every search directory, and
+    /// the window's harness control reads all of them on every transcript chunk and every
+    /// keystroke in the composer — resolving per read put milliseconds of filesystem work
+    /// on the main thread between frames.
+    private let scan: [AgentPreset: AgentStatus]
 
     init(environment: AgentLaunchEnvironment, customCommand: String = "") {
         self.environment = environment
         self.customCommand = customCommand
+        scan = Dictionary(uniqueKeysWithValues: AgentPreset.allCases.map {
+            ($0, Self.resolve($0, in: environment, customCommand: customCommand))
+        })
     }
 
+    /// A lookup into the scan this catalog was built from, never a fresh one.
     func status(for preset: AgentPreset) -> AgentStatus {
-        guard let recipe = preset.recipe(in: environment) else { return customStatus() }
-        return AgentStatus(preset: preset, command: recipe.command,
-                           readiness: readiness(of: recipe), setup: recipe.setup)
+        // The scan covers `allCases`, so the fallback resolves nothing in practice.
+        scan[preset] ?? Self.resolve(preset, in: environment, customCommand: customCommand)
     }
 
-    private func readiness(of recipe: AgentLaunchRecipe) -> AgentReadiness {
+    private static func resolve(_ preset: AgentPreset, in environment: AgentLaunchEnvironment,
+                                customCommand: String) -> AgentStatus {
+        guard let recipe = preset.recipe(in: environment) else {
+            return customStatus(command: customCommand, in: environment)
+        }
+        return AgentStatus(preset: preset, command: recipe.command,
+                           readiness: readiness(of: recipe, in: environment), setup: recipe.setup)
+    }
+
+    private static func readiness(of recipe: AgentLaunchRecipe, in environment: AgentLaunchEnvironment) -> AgentReadiness {
         if let problem = recipe.problem(in: environment) { return .unavailable(problem: problem) }
         // A recipe with no problem either resolved on disk or is an npx adapter with Node
         // present, whose package is fetched on the first connection.
@@ -84,8 +101,8 @@ struct AgentCatalog {
         return .installed(path: path)
     }
 
-    private func customStatus() -> AgentStatus {
-        let trimmed = customCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func customStatus(command: String, in environment: AgentLaunchEnvironment) -> AgentStatus {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return AgentStatus(preset: .custom, command: "",
                                readiness: .unconfigured(detail: "No command set yet."),

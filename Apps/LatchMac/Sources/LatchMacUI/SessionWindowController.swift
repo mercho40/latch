@@ -427,12 +427,22 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// A pop-up button rather than `NSMenuToolbarItem`: the latter renders correctly but is
     /// never published to the accessibility tree, so VoiceOver cannot reach it.
     private let harnessPopUp: NSPopUpButton = {
-        let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 168, height: 24), pullsDown: false)
+        // Pull-down, not select-style: a select-style pop-up positions the selected row
+        // over the button, which clips against the menu bar for a control sitting this
+        // close to the top of the screen. A pull-down always drops below it.
+        let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 168, height: 24), pullsDown: true)
         popUp.setAccessibilityLabel("Agent")
         popUp.cell?.lineBreakMode = .byTruncatingTail
-        popUp.menu?.autoenablesItems = false
         return popUp
     }()
+
+    /// The control itself, so a test can read what it actually reports rather than trusting
+    /// the state it was asked to render.
+    var harnessControl: NSPopUpButton { harnessPopUp }
+
+    /// The toolbar measures the view through its constraints; `minSize`/`maxSize` have been
+    /// deprecated since macOS 12.
+    private lazy var harnessWidth = harnessPopUp.widthAnchor.constraint(equalToConstant: 168)
 
     private lazy var harness: NSToolbarItem = {
         let item = NSToolbarItem(itemIdentifier: Self.harnessItem)
@@ -440,6 +450,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         item.paletteLabel = "Agent"
         item.autovalidates = false
         item.view = harnessPopUp
+        harnessPopUp.translatesAutoresizingMaskIntoConstraints = false
+        harnessWidth.isActive = true
         harnessPopUp.target = self
         harnessPopUp.action = #selector(harnessChanged)
         return item
@@ -448,45 +460,63 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// Tests read the real menu rather than reaching into selection code.
     var harnessMenu: NSMenu { harnessPopUp.menu ?? NSMenu() }
 
-    /// Drives the real pop-up, so a test exercises the same path a click takes.
+    /// Drives the real pop-up, so a test exercises the same path a click takes: menu
+    /// tracking picks an item through the menu, which is what establishes the pull-down's
+    /// selection. Selecting the row by hand first would hide a control that never does.
     func chooseHarnessFromToolbar(_ preset: AgentPreset) {
-        guard let index = harnessPopUp.itemArray.firstIndex(where: { $0.representedObject as? String == preset.rawValue })
+        guard let index = harnessMenu.items.firstIndex(where: { $0.representedObject as? String == preset.rawValue })
         else { return }
-        harnessPopUp.selectItem(at: index)
-        NSApp.sendAction(harnessPopUp.action!, to: harnessPopUp.target, from: harnessPopUp)
+        harnessMenu.performActionForItem(at: index)
     }
 
     private func refreshHarness() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        defer {
-            harnessPopUp.menu = menu
-            harnessPopUp.invalidateIntrinsicContentSize()
-        }
         guard let session = sidebar.selectedSession else {
             harnessPopUp.isEnabled = false
             harnessPopUp.toolTip = "No session selected"
-            menu.addItem(withTitle: "Agent", action: nil, keyEquivalent: "").isEnabled = false
+            menu.addItem(withTitle: "Agent", action: nil, keyEquivalent: "")
+            harnessPopUp.menu = menu
+            resizeHarnessToTitle()
             return
         }
         let selection = session.harnessSelection
         harnessPopUp.isEnabled = selection.isEditable
         harnessPopUp.toolTip = selection.problem ?? "The agent this session runs on"
-        var current: NSMenuItem?
+        // A pull-down's first item is the button's own title and is never listed, so the
+        // control states the session's agent directly rather than inferring it from a
+        // selection that a menu swap can reset.
+        menu.addItem(withTitle: selection.title, action: nil, keyEquivalent: "")
         for row in selection.rows {
             let item = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
             item.representedObject = row.preset.rawValue
             // What the agent needs, and what choosing it would do, without putting a second
             // line under every row. Install state has a home of its own in Settings.
             item.toolTip = row.detail
+            item.state = row.isCurrent ? .on : .off
             item.isEnabled = true
             menu.addItem(item)
-            if row.isCurrent { current = item }
         }
         menu.addItem(.separator())
         // Mirrors the system menus that end in their own settings entry.
         menu.addItem(withTitle: "Agent Settings…", action: nil, keyEquivalent: "")
-        harnessPopUp.select(current)
+        harnessPopUp.menu = menu
+        resizeHarnessToTitle()
+    }
+
+    /// The agent the control is reporting, as rendered.
+    var harnessTitle: String { harnessPopUp.itemTitle(at: 0) }
+
+    /// The row the control marks as current.
+    var harnessCheckedAgent: String? {
+        harnessMenu.items.first { $0.state == .on }?.representedObject as? String
+    }
+
+    /// Agent names run from "fx" to "Custom ACP Agent". Size the control to whichever one
+    /// is showing, within bounds, so a short name leaves no dead button and a long one is
+    /// not truncated.
+    private func resizeHarnessToTitle() {
+        harnessWidth.constant = min(220, max(120, harnessPopUp.intrinsicContentSize.width))
     }
 
     /// The pop-up also carries a settings entry, which is not a selection. Restore the

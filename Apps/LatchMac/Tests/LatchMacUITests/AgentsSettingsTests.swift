@@ -85,6 +85,47 @@ final class AgentsSettingsTests: XCTestCase {
         XCTAssertFalse(settings.enabled.contains(.fx))
     }
 
+    /// Turning agents off is an instruction. A new session must not open on one the user
+    /// switched off just because it is the one that happens to be installed.
+    func testANewSessionPrefersAnOfferedAgentOverAnInstalledOneThatIsOff() {
+        makeSettings()
+        let installed = AgentCatalog(environment: nodeEnvironment())
+        XCTAssertEqual(settings.suggested(in: installed), .fx)
+
+        // fx is the only agent that resolves here; turning it off must move the suggestion
+        // to an offered agent, even though that one cannot start yet.
+        settings.setEnabled(false, for: .fx)
+        settings.setEnabled(false, for: .codex)
+        settings.setEnabled(false, for: .claudeCode)
+        XCTAssertEqual(settings.suggested(in: installed), .openCode)
+        XCTAssertFalse(installed.status(for: .openCode).readiness.isUsable,
+                       "The suggestion is offered but not ready, so the banner has something to say")
+
+        // With nothing offered at all there is no instruction left to honour, so the
+        // filesystem decides: fx is the one agent on the path here.
+        settings.setEnabled(false, for: .openCode)
+        settings.setEnabled(false, for: .custom)
+        XCTAssertEqual(settings.suggested(in: installed), .fx)
+    }
+
+    /// Being able to start is what decides the suggestion; `.custom` only loses to the
+    /// agents Latch knows how to talk about when both are equally ready.
+    func testACustomAgentIsSuggestedOnlyWhenItIsTheOneThatCanStart() {
+        makeSettings()
+        settings.setCustomCommand("/bin/echo acp")
+
+        let nothingElse = AgentCatalog(environment: emptyEnvironment(), customCommand: settings.customCommand)
+        XCTAssertTrue(nothingElse.status(for: .custom).readiness.isUsable, "The custom command resolves")
+        XCTAssertFalse(nothingElse.status(for: .fx).readiness.isUsable, "Nothing else does")
+        XCTAssertEqual(settings.suggested(in: nothingElse), .custom,
+                       "A working custom agent beats an offered one that cannot start")
+
+        let fxInstalled = AgentCatalog(environment: nodeEnvironment(), customCommand: settings.customCommand)
+        XCTAssertTrue(fxInstalled.status(for: .custom).readiness.isUsable)
+        XCTAssertEqual(settings.suggested(in: fxInstalled), .fx,
+                       "Both can start, so the agent Latch can report on wins")
+    }
+
     func testASessionKeepsAHarnessThatIsNoLongerOffered() throws {
         makeSettings()
         let workspace = FileManager.default.temporaryDirectory

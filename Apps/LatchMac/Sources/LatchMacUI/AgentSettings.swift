@@ -50,12 +50,22 @@ final class AgentSettings {
         broadcast()
     }
 
-    /// The agent a new session starts on: the first enabled agent that can actually start,
-    /// falling back to the filesystem suggestion when nothing is ready.
+    /// The agent a new session starts on: the first offered agent that can actually start.
+    ///
+    /// When nothing offered can start, still prefer an agent the user has left on — opening
+    /// a session on one they turned off, just because it happens to be installed, ignores
+    /// the only instruction they gave. The banner then says what that agent needs. The
+    /// filesystem suggestion is the last resort, for when nothing is offered at all.
+    ///
+    /// `.custom` sorts last within each of those steps, ready or not: it is whichever
+    /// command the user typed, so Latch can say nothing useful about it when it fails.
+    /// Being able to start still outranks that — a working custom agent beats an offered
+    /// preset that cannot run.
     func suggested(in catalog: AgentCatalog) -> AgentPreset {
-        let ready = AgentPreset.allCases.first { preset in
-            preset != .custom && isEnabled(preset) && catalog.status(for: preset).readiness.isUsable
-        }
-        return ready ?? AgentPreset.suggested(in: catalog.environment)
+        let offered = AgentPreset.allCases.filter(isEnabled)
+        let preferred = offered.filter { $0 != .custom } + offered.filter { $0 == .custom }
+        if let ready = preferred.first(where: { catalog.status(for: $0).readiness.isUsable }) { return ready }
+        if let first = preferred.first { return first }
+        return AgentPreset.suggested(in: catalog.environment)
     }
 }

@@ -7,6 +7,9 @@ final class ChatTranscriptView: NSView {
 
     let scrollView = NSScrollView()
     var messageCount: Int { order.count }
+    /// Row geometry in transcript order, so a layout test can compare what the
+    /// viewport-limited resize path produced against a full measurement.
+    var rowFrames: [NSRect] { order.compactMap { rows[$0]?.frame } }
 
     private let document = TranscriptDocumentView()
     private let status = NSTextField(wrappingLabelWithString: "")
@@ -107,6 +110,26 @@ final class ChatTranscriptView: NSView {
         arrange(restoring: anchor())
     }
 
+    /// While the window edge is being dragged, only the rows the reader can see are
+    /// re-measured; the rest keep the height they had until the drag ends. Re-wrapping
+    /// every row's text on every step cost 30ms a frame at the history bound, which is two
+    /// dropped frames at 60Hz and four on a ProMotion display.
+    ///
+    /// Internal because no unit test can enter a real AppKit resize loop.
+    var limitsMeasurementToViewport = false
+
+    override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        limitsMeasurementToViewport = true
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        limitsMeasurementToViewport = false
+        // Settle every deferred row against the width the reader actually stopped at.
+        arrange(restoring: anchor())
+    }
+
     private func arrange(restoring saved: Anchor) {
         guard !arranging else { return }
         arranging = true
@@ -120,9 +143,16 @@ final class ChatTranscriptView: NSView {
         let columnWidth = max(1, width - sideInset * 2)
         let inset = (width - columnWidth) / 2
         var y: CGFloat = 16
+        // A screen either side of the viewport, so a row that scrolls in mid-drag is
+        // already exact. Rows are deferred against their previous height, so this window
+        // drifts as it goes — that is what the margin is for.
+        let viewport = scrollView.contentView.bounds
+        let measured = viewport.insetBy(dx: 0, dy: -max(viewport.height, 1))
         for id in order {
             guard let row = rows[id] else { continue }
-            let height = row.arrange(width: columnWidth)
+            let deferrable = limitsMeasurementToViewport && row.frame.height > 0
+                && !measured.intersects(NSRect(x: inset, y: y, width: columnWidth, height: row.frame.height))
+            let height = deferrable ? row.deferArrange(width: columnWidth) : row.arrange(width: columnWidth)
             row.frame.origin = NSPoint(x: inset, y: y)
             y += height + 12
         }
@@ -392,6 +422,9 @@ private final class TranscriptMessageView: NSView {
     private let copy = TranscriptCopyButton(title: "Copy", target: nil, action: nil)
     private let disclosure = NSButton(title: "", target: nil, action: nil)
     private(set) var rawText: String?
+    /// Resumable Markdown state for this row, so a streaming answer re-parses from its
+    /// first changed line instead of from the top on every frame. Unused by other roles.
+    private let markdown = ChatMarkdown.Cache()
     private var expanded = false
     private(set) var bubble = NSRect.zero
     private var measuredWidth: CGFloat = -1
@@ -469,7 +502,7 @@ private final class TranscriptMessageView: NSView {
         let selection = textView.selectedRanges
         let content: NSAttributedString
         if role == .assistant {
-            content = ChatMarkdown.render(text)
+            content = ChatMarkdown.render(text, into: markdown)
         } else if role == .tool {
             content = ToolTranscriptStyle.render(text)
         } else {
@@ -481,8 +514,17 @@ private final class TranscriptMessageView: NSView {
                 .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
             ])
         }
-        let restored = Self.remap(selection, from: previous, to: content.string as NSString)
-        textView.textStorage?.setAttributedString(content)
+        let next = content.string as NSString
+        let shared = Self.sharedPrefix(previous, next)
+        // Streaming only ever appends, and an append moves nothing that is already
+        // selected. The diff below is for the rarer case of a rewrite.
+        let restored = shared == previous.length ? selection : Self.remap(selection, from: previous, to: next)
+        if let storage = textView.textStorage {
+            // An assistant row renders through a cache that already knows how much output
+            // it carried over untouched, so there is nothing to rediscover.
+            Self.apply(content, to: storage, sharedPrefix: shared,
+                       reusing: role == .assistant ? markdown.reusedLength : nil)
+        }
         textView.selectedRanges = restored
         if role == .user {
             // Measure once per source update, not on every viewport layout.
@@ -494,6 +536,64 @@ private final class TranscriptMessageView: NSView {
             label.toolTip = firstLine
             updateDisclosureAccessibility()
         }
+    }
+
+    /// Write only what changed. `setAttributedString` invalidates the whole layout, so a
+    /// streaming answer re-laid out its entire text on every frame — 68ms per frame at the
+    /// 200,000-character history bound. An edit confined to the changed range lets
+    /// `NSLayoutManager` keep the layout it already has, which measures at 3ms.
+    private static func apply(_ content: NSAttributedString, to storage: NSTextStorage,
+                              sharedPrefix: Int, reusing reusable: Int?) {
+        // Characters agreeing is not enough: closing a Markdown construct restyles text
+        // that is already on screen, and a table rebuilds the cells above its new row, so
+        // the styling has to match too. What a renderer carried over verbatim is known to
+        // match and can be skipped; the rest is found by walking the attribute runs, which
+        // is what carries an answer the renderer could not resume — one long line.
+        let known = min(reusable ?? 0, sharedPrefix)
+        let shared = styledPrefix(storage, content, from: known, upTo: sharedPrefix)
+        let replaced = NSRange(location: shared, length: storage.length - shared)
+        let inserted = NSRange(location: shared, length: content.length - shared)
+        guard replaced.length > 0 || inserted.length > 0 else { return }
+        storage.replaceCharacters(in: replaced, with: content.attributedSubstring(from: inserted))
+    }
+
+    /// Length of the common UTF-16 prefix. Compared in blocks through `getCharacters` —
+    /// bridging either string to `[UInt16]` costs more than the comparison it feeds.
+    private static func sharedPrefix(_ old: NSString, _ new: NSString) -> Int {
+        let limit = min(old.length, new.length)
+        var matched = 0
+        let block = 4096
+        var left = [unichar](repeating: 0, count: block)
+        var right = [unichar](repeating: 0, count: block)
+        while matched < limit {
+            let count = min(block, limit - matched)
+            let range = NSRange(location: matched, length: count)
+            old.getCharacters(&left, range: range)
+            new.getCharacters(&right, range: range)
+            var index = 0
+            while index < count, left[index] == right[index] { index += 1 }
+            matched += index
+            if index < count { break }
+        }
+        return matched
+    }
+
+    /// How much of that common prefix also carries identical attributes. Walks attribute
+    /// runs rather than characters, and starts at the point the caller already knows to be
+    /// identical — for densely marked-up text those runs are the bulk of the work.
+    private static func styledPrefix(_ old: NSAttributedString, _ new: NSAttributedString,
+                                     from start: Int, upTo limit: Int) -> Int {
+        var location = start
+        while location < limit {
+            let scope = NSRange(location: location, length: limit - location)
+            var oldRun = NSRange()
+            var newRun = NSRange()
+            let oldAttributes = old.attributes(at: location, longestEffectiveRange: &oldRun, in: scope)
+            let newAttributes = new.attributes(at: location, longestEffectiveRange: &newRun, in: scope)
+            guard NSDictionary(dictionary: oldAttributes).isEqual(to: newAttributes) else { return location }
+            location = min(NSMaxRange(oldRun), NSMaxRange(newRun))
+        }
+        return limit
     }
 
     /// Diff rendered UTF-16, never source offsets: closing Markdown can change earlier glyphs.
@@ -531,6 +631,14 @@ private final class TranscriptMessageView: NSView {
         }
     }
 
+    /// Keep the height measured at the previous width, and mark the row for re-measurement
+    /// the next time it is arranged exactly. Only for rows that are off screen.
+    func deferArrange(width: CGFloat) -> CGFloat {
+        measuredWidth = -1
+        frame.size.width = width
+        return frame.height
+    }
+
     func arrange(width: CGFloat) -> CGFloat {
         let user = role == .user
         let padding: CGFloat = user ? min(12, width * 0.08) : 0
@@ -541,6 +649,11 @@ private final class TranscriptMessageView: NSView {
         let textWidth = max(1, bubbleWidth - padding * 2 - bodyIndent)
         let headerHeight: CGFloat = isDisclosure ? 24 : 0
         if !textView.isHidden && measuredWidth != textWidth {
+            // Deliberately TextKit 1: reaching for `layoutManager` is what drops this view
+            // out of TextKit 2, and that is the right trade here. A row is sized to its
+            // whole message, so viewport layout buys nothing, and `NSTextLayoutManager`
+            // has to lay out the full document for each height — measured at 1.57ms per
+            // append over 2,000 lines against 0.072ms here, and it does not flatten out.
             let container = textView.textContainer!
             container.containerSize = NSSize(width: textWidth, height: .greatestFiniteMagnitude)
             let manager = textView.layoutManager!

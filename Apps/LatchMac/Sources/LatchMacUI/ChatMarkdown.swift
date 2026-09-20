@@ -14,12 +14,75 @@ internal enum ChatMarkdown {
     static let codeFontSize: CGFloat = 12
     static let tableCellPadding: CGFloat = 6
 
+    typealias Line = (content: String, ending: String)
+
+    /// Rendered output plus enough state to restart mid-answer. A streaming message only
+    /// ever grows at the end, so re-parsing from the first changed line beats re-parsing
+    /// the whole answer on every frame: a 190,000-character marked-up answer cost 199ms a
+    /// frame to render whole. A class because this is one row's mutable scratch space, and
+    /// copying it per frame would defeat the point.
+    @MainActor
+    final class Cache {
+        fileprivate struct Fence {
+            let marker: Character
+            let count: Int
+        }
+
+        /// Where the renderer stood at the top of one loop iteration. Lines swallowed by a
+        /// table get no entry, so resuming at "the last checkpoint at or before line n"
+        /// lands on that table's first line and rebuilds the whole grid.
+        fileprivate struct Checkpoint {
+            let line: Int
+            let outputLength: Int
+            let fence: Fence?
+        }
+
+        fileprivate var lines: [Line] = []
+        fileprivate var checkpoints: [Checkpoint] = []
+        fileprivate let output = NSMutableAttributedString()
+
+        /// How much of the last render's output the render before it produced verbatim.
+        /// The caller writes that output straight into a text storage, so this is also the
+        /// length of storage it can leave untouched — exactly, and without comparing it.
+        private(set) var reusedLength = 0
+
+        fileprivate func recordReuse(_ length: Int) { reusedLength = length }
+
+        /// The furthest point the previous render can be restarted from, given new source.
+        /// Drops every checkpoint at or after it, so the render loop re-records them.
+        fileprivate func resume(for lines: [Line]) -> Checkpoint {
+            var difference = 0
+            let shared = min(lines.count, self.lines.count)
+            while difference < shared, lines[difference] == self.lines[difference] { difference += 1 }
+            // Never resume at the edge of the change: a line already rendered as prose can
+            // be reinterpreted once the following line arrives, because a pipe table is
+            // only a table once its delimiter row is there to prove it.
+            let safe = difference - 2
+            guard safe > 0, let index = checkpoints.lastIndex(where: { $0.line <= safe }) else {
+                checkpoints.removeAll()
+                return Checkpoint(line: 0, outputLength: 0, fence: nil)
+            }
+            let checkpoint = checkpoints[index]
+            checkpoints.removeSubrange(index...)
+            return checkpoint
+        }
+    }
+
     static func render(_ source: String) -> NSAttributedString {
-        let output = NSMutableAttributedString(string: "")
-        var fence: (marker: Character, count: Int)?
+        render(source, into: Cache())
+    }
+
+    static func render(_ source: String, into cache: Cache) -> NSAttributedString {
         let lines = split(source)
-        var index = 0
+        let resume = cache.resume(for: lines)
+        cache.recordReuse(resume.outputLength)
+        let output = cache.output
+        output.deleteCharacters(in: NSRange(location: resume.outputLength,
+                                            length: output.length - resume.outputLength))
+        var fence = resume.fence
+        var index = resume.line
         while index < lines.count {
+            cache.checkpoints.append(Cache.Checkpoint(line: index, outputLength: output.length, fence: fence))
             let start = index
             let (line, ending) = lines[start]
             index += 1
@@ -36,7 +99,7 @@ internal enum ChatMarkdown {
             }
             if let candidate = fenceMarker(line),
                candidate.marker != "`" || !candidate.tail.contains("`") {
-                fence = (candidate.marker, candidate.count)
+                fence = Cache.Fence(marker: candidate.marker, count: candidate.count)
                 continue
             }
             if let table = pipeTable(at: start, in: lines) {
@@ -46,13 +109,14 @@ internal enum ChatMarkdown {
             }
             output.append(prose(line, ending: ending))
         }
+        cache.lines = lines
         return NSAttributedString(attributedString: output)
     }
 
     /// NSString line ranges preserve CRLF as well as Unicode paragraph separators.
-    private static func split(_ source: String) -> [(content: String, ending: String)] {
+    private static func split(_ source: String) -> [Line] {
         let text = source as NSString
-        var lines: [(content: String, ending: String)] = []
+        var lines: [Line] = []
         var offset = 0
         while offset < text.length {
             var end = 0
@@ -76,7 +140,7 @@ internal enum ChatMarkdown {
         let lineCount: Int
     }
 
-    private static func pipeTable(at index: Int, in lines: [(content: String, ending: String)]) -> PipeTable? {
+    private static func pipeTable(at index: Int, in lines: [Line]) -> PipeTable? {
         guard index + 1 < lines.count, let header = tableCells(lines[index].content),
               let alignments = delimiterAlignments(lines[index + 1].content),
               alignments.count == header.count else { return nil }

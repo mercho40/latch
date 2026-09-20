@@ -213,6 +213,133 @@ final class ChatMarkdownTests: XCTestCase {
         }
     }
 
+    // MARK: Resumable rendering
+
+    /// Text, runs, and every attribute that decides how a run looks — but text blocks by
+    /// their position in the grid rather than by object identity. Two renders of the same
+    /// table build two `NSTextTable` objects, so even a full render never equals itself.
+    @MainActor private static func signature(_ rendered: NSAttributedString) -> String {
+        var lines = [rendered.string.debugDescription]
+        rendered.enumerateAttributes(in: NSRange(location: 0, length: rendered.length)) { attributes, range, _ in
+            var parts = ["\(range.location)+\(range.length)"]
+            for key in attributes.keys.map(\.rawValue).sorted() {
+                let value = attributes[NSAttributedString.Key(key)]
+                switch value {
+                case let style as NSParagraphStyle:
+                    let blocks = style.textBlocks.map { block in
+                        guard let cell = block as? NSTextTableBlock else { return "block" }
+                        return "cell(\(cell.startingRow)+\(cell.rowSpan),\(cell.startingColumn)+\(cell.columnSpan))"
+                    }
+                    parts.append("\(key)=[align \(style.alignment.rawValue), spacing \(style.lineSpacing), "
+                                 + "head \(style.headIndent), first \(style.firstLineHeadIndent), "
+                                 + "break \(style.lineBreakMode.rawValue), blocks \(blocks)]")
+                case let font as NSFont:
+                    parts.append("\(key)=\(font.fontName)@\(font.pointSize)")
+                default:
+                    parts.append("\(key)=\(String(describing: value))")
+                }
+            }
+            lines.append(parts.joined(separator: " "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Guards the guard: the comparison above has to be blind to table identity but still
+    /// see a genuine difference.
+    @MainActor func testTheRenderSignatureIgnoresTableIdentityButNotContent() {
+        let table = "| Step | Result |\n| --- | ---: |\n| build | ok |\n"
+        XCTAssertEqual(Self.signature(ChatMarkdown.render(table)), Self.signature(ChatMarkdown.render(table)))
+        XCTAssertNotEqual(Self.signature(ChatMarkdown.render(table)),
+                          Self.signature(ChatMarkdown.render("| Step | Result |\n| ---: | --- |\n| build | ok |\n")),
+                          "Column alignment is part of the rendering and must be compared")
+        XCTAssertNotEqual(Self.signature(ChatMarkdown.render("plain")), Self.signature(ChatMarkdown.render("**plain**")))
+    }
+
+
+    /// Every construct the renderer carries state across: a table that keeps gaining rows,
+    /// a fence that opens and later closes, emphasis that completes, and a heading.
+    private static let streamingCorpus = """
+    Intro prose before anything structural.
+    # A heading
+    Some **bold** and `code` here.
+
+    | Step | Result |
+    | --- | ---: |
+    | build | ok |
+    | test | ok |
+
+    ```swift
+    let value = 42
+    ```
+
+    - item one
+    - item two
+
+    > quoted line
+
+        indented code
+    Closing prose with an unclosed **bold
+    """
+
+    /// The cache must be indistinguishable from re-rendering the whole answer, at every
+    /// single character of the stream — that is the only property that makes it safe.
+    @MainActor func testResumedRenderMatchesAFullRenderAtEveryPrefix() {
+        let cache = ChatMarkdown.Cache()
+        var streamed = ""
+        for character in Self.streamingCorpus {
+            streamed.append(character)
+            XCTAssertEqual(Self.signature(ChatMarkdown.render(streamed, into: cache)),
+                           Self.signature(ChatMarkdown.render(streamed)),
+                           "Resumed render diverged after \(streamed.count) characters")
+        }
+    }
+
+    /// Chunks arrive as whole runs of text, not one character at a time.
+    @MainActor func testResumedRenderMatchesForRaggedChunks() {
+        let cache = ChatMarkdown.Cache()
+        var streamed = ""
+        var remaining = Substring(Self.streamingCorpus)
+        var size = 1
+        while !remaining.isEmpty {
+            let chunk = remaining.prefix(size)
+            remaining = remaining.dropFirst(size)
+            streamed += chunk
+            size = size % 17 + 1
+            XCTAssertEqual(Self.signature(ChatMarkdown.render(streamed, into: cache)),
+                           Self.signature(ChatMarkdown.render(streamed)))
+        }
+    }
+
+    /// The history bound trims a message from the front, and a reused row can be handed an
+    /// unrelated answer. Neither may reuse anything the previous render left behind.
+    @MainActor func testResumedRenderSurvivesRewritesAndTrimming() {
+        let cache = ChatMarkdown.Cache()
+        let full = Self.streamingCorpus
+        XCTAssertEqual(Self.signature(ChatMarkdown.render(full, into: cache)), Self.signature(ChatMarkdown.render(full)))
+        for rewritten in [String(full.dropFirst(120)),
+                          String(full.dropLast(200)),
+                          "An entirely different answer.\n\n| a | b |\n| - | - |\n| 1 | 2 |",
+                          "",
+                          full] {
+            XCTAssertEqual(Self.signature(ChatMarkdown.render(rewritten, into: cache)),
+                           Self.signature(ChatMarkdown.render(rewritten)),
+                           "Resumed render diverged after a rewrite")
+        }
+    }
+
+    /// A table only becomes a table when its delimiter row lands, and it keeps growing
+    /// afterwards. Both retroactively change lines the previous frame already rendered.
+    @MainActor func testResumedRenderRebuildsATableThatKeepsGrowing() {
+        let cache = ChatMarkdown.Cache()
+        var source = "before\n| Step | Result |"
+        for addition in ["\n| --- | ---: |", "\n| build | ok |", "\n| test | ok |", "\n| ship | ok |", "\nafter"] {
+            source += addition
+            XCTAssertEqual(Self.signature(ChatMarkdown.render(source, into: cache)),
+                           Self.signature(ChatMarkdown.render(source)),
+                           "Resumed render diverged while the table grew")
+        }
+    }
+
     @MainActor private func assertNoLinksOrAttachments(_ rendered: NSAttributedString) {
         rendered.enumerateAttributes(in: NSRange(location: 0, length: rendered.length)) { attributes, _, _ in
             XCTAssertNil(attributes[.link])

@@ -278,3 +278,26 @@ final class SessionPersistenceTests: XCTestCase {
         }
     }
 }
+
+extension SessionPersistenceTests {
+    /// A transcript saved without the agent's context can be read and never continued. That is
+    /// a state, so it must not be dressed as a failure with a Retry that can only fail again.
+    @MainActor func testReadOnlyArchiveIsNotReportedAsAFailure() async throws {
+        try await WindowFixture.run { fixture in
+            var archived = fixture.session(1)
+            archived.agentSessionID = nil
+            archived.customCommand = "/bin/sh"
+            let (_, sidebar) = try await fixture.restored(archived)
+            let selected = try XCTUnwrap(sidebar.selectedSession)
+            try await fixture.settle { !selected.banner.isHidden }
+            XCTAssertNil(selected.model.errorMessage)
+            XCTAssertEqual(selected.banner.displayedSeverity, .info)
+            XCTAssertEqual(selected.banner.displayedTitle, "This conversation is read-only")
+            XCTAssertEqual(selected.banner.displayedActions.filter { $0 == "Retry" }, [])
+            XCTAssertTrue(selected.banner.displayedActions.contains("Continue in New Session"))
+            XCTAssertFalse(selected.composerAcceptsText, "There is nowhere to send a draft from an archive")
+            XCTAssertEqual(selected.composerPlaceholder, "This conversation is read-only")
+            XCTAssertEqual(selected.model.messages, archived.messages)
+        }
+    }
+}

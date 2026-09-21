@@ -4,7 +4,8 @@ import AppKit
 /// resources, or creating actionable file/URL links. Copy and search stay literal.
 @MainActor
 enum ToolTranscriptStyle {
-    static func render(_ text: String) -> NSAttributedString {
+    /// `titled` is false for text whose title line is shown elsewhere, so its first line is ordinary content.
+    static func render(_ text: String, titled: Bool = true) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         paragraph.lineSpacing = 2
@@ -32,7 +33,7 @@ enum ToolTranscriptStyle {
             } else if diffHunk && (line.hasPrefix("+") || line.hasPrefix("-")) {
                 let color: NSColor = line.hasPrefix("+") ? .systemGreen : .systemRed
                 result.addAttributes([.foregroundColor: color, .backgroundColor: color.withAlphaComponent(0.08)], range: range)
-            } else if position == 0 || ["Content:", "Locations:"].contains(line)
+            } else if (titled && position == 0) || ["Content:", "Locations:"].contains(line)
                         || line.hasPrefix("Diff: ") || line.hasPrefix("rawInput (") || line.hasPrefix("rawOutput (") {
                 result.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), range: range)
             }

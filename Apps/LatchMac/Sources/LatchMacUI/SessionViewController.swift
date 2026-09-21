@@ -132,6 +132,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// appears above the transcript only while there is something to say. It is the
     /// session's whole error surface, so tests read it rather than a hidden label.
     let banner = SessionBannerView()
+    /// Whether a draft can be typed, for tests.
+    var composerAcceptsText: Bool { prompt.isEditable }
+    var composerPlaceholder: String { prompt.placeholder }
     /// Collapses out of the stack with the banner, so a session with nothing wrong gives
     /// the whole column to the transcript.
     private let bannerRow = NSView()
@@ -345,14 +348,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         refreshPermission()
         refreshBanner()
         // Drafting can continue during connection setup; only a queued send locks the ready composer.
-        prompt.isEditable = !shuttingDown && (operation == nil || model.phase != .ready)
+        // A read-only archive has nowhere to send a draft; an editable field there would promise otherwise.
+        let readOnlyArchive = model.archivedWithoutContext && model.phase == .disconnected
+        prompt.isEditable = !shuttingDown && !readOnlyArchive && (operation == nil || model.phase != .ready)
         refreshPickers()
         send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let preparing = operation != nil || model.phase == .connecting
         cancel.isEnabled = canStop
         cancel.isHidden = !preparing && model.phase != .prompting
         composerControls.refreshLayout()
-        prompt.placeholder = "Message \(selectedAgent.title)…"
+        prompt.placeholder = readOnlyArchive ? "This conversation is read-only" : "Message \(selectedAgent.title)…"
         prompt.needsDisplay = true
         composer.refreshHeight()
         // State transitions must show their final text immediately, even when a
@@ -392,6 +397,17 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// always gets its say.
     private func refreshBanner() {
         let disconnected = model.phase == .disconnected
+        if disconnected, model.archivedWithoutContext, model.errorMessage == nil, !shuttingDown {
+            // A saved transcript that cannot be continued is a state, not a failure: no red, no Retry.
+            banner.update(
+                key: "archive\u{0}\(selectedAgent.rawValue)",
+                title: "This conversation is read-only",
+                message: "It was saved without the agent’s context, so it can’t be picked up where it left off. Its history stays here.",
+                severity: .info,
+                actions: canFork ? [SessionBannerView.Action(title: "Continue in New Session") { [weak self] in self?.forkSession() }] : [])
+            bannerRow.isHidden = banner.isHidden
+            return
+        }
         let failure = model.errorMessage.map { message in
             selectedAgent != .custom && disconnected ? startupError(message) : message
         } ?? launchProblem

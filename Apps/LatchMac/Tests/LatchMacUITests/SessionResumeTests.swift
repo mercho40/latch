@@ -138,7 +138,8 @@ final class SessionResumeTests: XCTestCase {
         await model.send("Not allowed")
         XCTAssertEqual(model.phase, .disconnected)
         XCTAssertEqual(model.status, "Saved · Read only")
-        XCTAssertNotNil(model.errorMessage)
+        XCTAssertTrue(model.archivedWithoutContext)
+        XCTAssertNil(model.errorMessage, "A read-only archive is a state, not a failure to retry")
         XCTAssertEqual(model.messages, cached)
         XCTAssertNil(model.savedAgentSessionID)
         let commands = await client.commands

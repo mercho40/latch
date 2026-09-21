@@ -20,7 +20,7 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
     private let browse = NSButton(title: "Choose Executable…", target: nil, action: nil)
     private let copyCommand = NSButton(title: "Copy Command", target: nil, action: nil)
     private let enableSwitch = NSSwitch()
-    private let enableLabel = NSTextField(labelWithString: "Offer in the composer")
+    private let enableLabel = NSTextField(labelWithString: "Offer in the agent menu")
     private let commandCaption = NSTextField(labelWithString: "Command")
     private let detail = NSStackView()
 
@@ -113,7 +113,7 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
         copyCommand.controlSize = .small
         enableSwitch.target = self
         enableSwitch.action = #selector(toggleEnabled)
-        enableSwitch.setAccessibilityLabel("Offer in the composer")
+        enableSwitch.setAccessibilityLabel("Offer in the agent menu")
         enableLabel.font = .systemFont(ofSize: 12)
 
         let heading = NSStackView(views: [detailTitle, detailBadge, NSView()])
@@ -213,8 +213,8 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
         commandCaption.stringValue = isCustom ? "Command" : "Launch command"
         browse.isHidden = !isCustom
         copyCommand.isEnabled = !status.command.isEmpty
-        setupLabel.stringValue = status.setup ?? ""
-        setupLabel.isHidden = (status.setup ?? "").isEmpty
+        setupLabel.stringValue = status.guidance ?? ""
+        setupLabel.isHidden = status.guidance == nil
     }
 
     // MARK: Actions

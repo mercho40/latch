@@ -32,10 +32,11 @@ final class SessionBannerView: NSView {
     }
 
     enum Severity {
-        case warning, error
+        case info, warning, error
 
         var tint: NSColor {
             switch self {
+            case .info: .secondaryLabelColor
             case .warning: .systemOrange
             case .error: .systemRed
             }
@@ -43,6 +44,7 @@ final class SessionBannerView: NSView {
 
         var symbol: String {
             switch self {
+            case .info: "clock.arrow.circlepath"
             case .warning: "exclamationmark.triangle.fill"
             case .error: "exclamationmark.octagon.fill"
             }
@@ -193,6 +195,8 @@ final class SessionBannerView: NSView {
     /// What the banner is currently telling the user, for tests and accessibility checks.
     var displayedTitle: String { titleLabel.stringValue }
     var displayedMessage: String { messageLabel.stringValue }
+    var displayedSeverity: Severity { severity }
+    var displayedActions: [String] { actionRow.arrangedSubviews.compactMap { ($0 as? NSButton)?.title } }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)

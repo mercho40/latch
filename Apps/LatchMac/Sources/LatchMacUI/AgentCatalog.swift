@@ -51,8 +51,19 @@ struct AgentStatus: Equatable {
     let readiness: AgentReadiness
     /// What the user has to do when the agent cannot start, from the preset's recipe.
     let setup: String?
+    /// What is left to do for an agent that can already start. Nil for a custom command.
+    var signIn: String? = nil
 
     var title: String { preset.title }
+
+    /// The one line of advice worth showing under the command. An agent that cannot start already
+    /// states its problem, and that problem is the setup text, so repeating it helps nobody.
+    var guidance: String? {
+        switch readiness {
+        case .installed, .installsOnFirstUse: signIn
+        case .unavailable, .unconfigured: nil
+        }
+    }
 }
 
 /// Resolves every agent against one filesystem scan. A rescan builds a new catalog rather
@@ -88,7 +99,7 @@ struct AgentCatalog {
             return customStatus(command: customCommand, in: environment)
         }
         return AgentStatus(preset: preset, command: recipe.command,
-                           readiness: readiness(of: recipe, in: environment), setup: recipe.setup)
+                           readiness: readiness(of: recipe, in: environment), setup: recipe.setup, signIn: recipe.signIn)
     }
 
     private static func readiness(of recipe: AgentLaunchRecipe, in environment: AgentLaunchEnvironment) -> AgentReadiness {

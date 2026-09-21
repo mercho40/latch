@@ -390,7 +390,7 @@ final class ChatTranscriptView: NSView {
         let toolHeight = toolRow.frame.height
         try require(toolRow.textView.isHidden && toolRow.bubble == .zero && toolHeight == 24, "Tool is not a compact collapsed unboxed row")
         toolRow.toggleDisclosure()
-        try require(!toolRow.textView.isHidden && toolRow.frame.height > toolHeight && toolRow.textView.string == tool.text, "Tool disclosure lost full content")
+        try require(!toolRow.textView.isHidden && toolRow.frame.height > toolHeight && toolRow.textView.string == TranscriptMessageView.toolBody(tool.text), "Tool disclosure lost its details")
         tool.text = "Read Sources · completed\nUpdated tool details"
         probe.update(messages: [tool], isWorking: false)
         try require(ObjectIdentifier(probe.rows[tool.id]!) == toolIdentity && !toolRow.textView.isHidden && toolRow.textView.string == tool.text, "Tool update replaced/collapsed row or lost details")
@@ -504,7 +504,9 @@ private final class TranscriptMessageView: NSView {
         if role == .assistant {
             content = ChatMarkdown.render(text, into: markdown)
         } else if role == .tool {
-            content = ToolTranscriptStyle.render(text)
+            // The header label already carries the title line; repeating it as the body's first line
+            // made every expanded row say the same thing twice.
+            content = ToolTranscriptStyle.render(Self.toolBody(text), titled: false)
         } else {
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineBreakMode = .byWordWrapping
@@ -536,6 +538,12 @@ private final class TranscriptMessageView: NSView {
             label.toolTip = firstLine
             updateDisclosureAccessibility()
         }
+    }
+
+    /// A tool message is its title line, then its details. Copy still takes the whole message.
+    static func toolBody(_ text: String) -> String {
+        guard let lineEnd = text.firstIndex(where: \.isNewline) else { return "" }
+        return String(text[lineEnd...].drop(while: \.isNewline))
     }
 
     /// Write only what changed. `setAttributedString` invalidates the whole layout, so a

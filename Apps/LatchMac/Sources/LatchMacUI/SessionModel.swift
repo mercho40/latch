@@ -27,7 +27,9 @@ final class SessionModel {
     private var sessionID: String?
     /// Agent-owned context identity survives runtime teardown. Never persist a runtime ID.
     private(set) var savedAgentSessionID: String?
-    private var archivedWithoutContext = false
+    /// History restored without the agent's session ID. It can be read, never continued: there is
+    /// no context to resume, and prompting a fresh agent under an old transcript would misrepresent it.
+    private(set) var archivedWithoutContext = false
     private var loadedThroughSequence: UInt64?
 
     func restore(messages: [ChatMessage], agentSessionID: String?) {
@@ -107,8 +109,8 @@ final class SessionModel {
         guard phase == .disconnected else { return }
         errorMessage = nil
         if !startNewSession, archivedWithoutContext {
+            // Not a failure: nothing was attempted, so there is nothing to retry.
             status = "Saved · Read only"
-            errorMessage = "This conversation has no saved agent context. Its history is still available. Create a new session to continue."
             onChange?()
             return
         }

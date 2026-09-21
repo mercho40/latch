@@ -87,3 +87,16 @@ final class ToolTranscriptStyleTests: XCTestCase {
                        .labelColor)
     }
 }
+
+extension ToolTranscriptStyleTests {
+    /// The row's header shows the title line, so the expanded body starts at the details and its
+    /// first line is only emphasised when it is a section header.
+    @MainActor func testUntitledBodyDoesNotEmphasiseItsFirstLine() {
+        let plain = ToolTranscriptStyle.render("plain output\nsecond line", titled: false)
+        let font = plain.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        XCTAssertFalse(font?.fontDescriptor.symbolicTraits.contains(.bold) ?? true)
+        let section = ToolTranscriptStyle.render("Content:\nvalue", titled: false)
+        let header = section.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(header?.fontDescriptor.symbolicTraits.contains(.bold) ?? false)
+    }
+}

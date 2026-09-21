@@ -9,7 +9,7 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
   <img alt="A Latch window: sessions grouped by workspace in the sidebar, a conversation with tool calls, a table and a code block, and a composer with model, effort and permission pickers." src="docs/images/latch-light.png" width="860">
 </picture>
 
-> **Early development.** Latch is pre-release and there is no published release yet, so today you build it from source. Expect bugs and breaking changes. Issues are welcome; please read [CONTRIBUTING.md](.github/CONTRIBUTING.md) before opening a pull request.
+> **Early development.** Latch is at 0.1: expect bugs and breaking changes. Issues are welcome; please read [CONTRIBUTING.md](.github/CONTRIBUTING.md) before opening a pull request.
 
 ## What works today
 
@@ -45,7 +45,7 @@ Other known gaps:
 curl -fsSL https://raw.githubusercontent.com/mercho40/latch/main/Scripts/install.sh | sh
 ```
 
-[The script](Scripts/install.sh) downloads the latest release, checks its SHA-256 and code signature, and puts `Latch.app` in `/Applications`; run it again to update. Until the first release is published it says so and exits.
+[The script](Scripts/install.sh) downloads the latest release, checks its SHA-256 and code signature, and puts `Latch.app` in `/Applications`; run it again to update.
 
 Latch is not notarized: it is signed ad hoc, without an Apple Developer ID, so macOS cannot tell you who built it. Installing with `curl` avoids the Gatekeeper prompt because `curl` does not quarantine what it downloads. If you download the zip from the [releases page](https://github.com/mercho40/latch/releases) in a browser instead, macOS will refuse to open it until you run `xattr -dr com.apple.quarantine /Applications/Latch.app` or allow it under System Settings → Privacy & Security. The checksum comes from the same release as the archive, so it detects a corrupted download, not a compromised one; if that is not enough assurance, build from source.
 

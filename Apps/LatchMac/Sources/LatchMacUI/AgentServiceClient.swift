@@ -33,7 +33,7 @@ final class InProcessAgentServiceClient: AgentServiceClient {
 
 /// Talks to the XPC service embedded in the application bundle.
 final class XPCAgentServiceClient: AgentServiceClient {
-    static let serviceName = "sh.latch.mac.agent"
+    static let serviceName = "dev.latchapp.mac.agent"
     static let bundleName = "LatchAgentXPCService.xpc"
 
     private let client: LatchAgentXPCClient

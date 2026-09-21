@@ -9,7 +9,7 @@ import LatchServiceProtocol
     func shutdown()
 }
 
-private let serviceName = "sh.latch.process-probe.service"
+private let serviceName = "dev.latchapp.process-probe.service"
 
 @main
 struct LatchXPCProcessProbe {

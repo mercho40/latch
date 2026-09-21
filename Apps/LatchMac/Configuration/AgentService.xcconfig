@@ -1,7 +1,7 @@
 // XPC service embedded in Latch.app. It hosts every ACP runtime for the application.
 PRODUCT_NAME = LatchAgentXPCService
-PRODUCT_BUNDLE_IDENTIFIER = sh.latch.mac.agent
-MARKETING_VERSION = 0.0.0
+PRODUCT_BUNDLE_IDENTIFIER = dev.latchapp.mac.agent
+MARKETING_VERSION = 0.1.0
 CURRENT_PROJECT_VERSION = 1
 MACOSX_DEPLOYMENT_TARGET = 15.0
 SDKROOT = macosx

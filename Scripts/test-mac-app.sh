@@ -24,7 +24,7 @@ require_plist() {
         exit 1
     fi
 }
-require_plist CFBundleIdentifier sh.latch.mac
+require_plist CFBundleIdentifier dev.latchapp.mac
 require_plist CFBundleExecutable Latch
 require_plist CFBundlePackageType APPL
 require_plist LSMinimumSystemVersion 15.0
@@ -70,7 +70,7 @@ require_service_plist() {
         exit 1
     fi
 }
-require_service_plist CFBundleIdentifier sh.latch.mac.agent
+require_service_plist CFBundleIdentifier dev.latchapp.mac.agent
 require_service_plist CFBundlePackageType 'XPC!'
 require_service_plist XPCService:ServiceType Application
 # Without this the service gets its own security session and every keychain read

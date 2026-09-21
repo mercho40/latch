@@ -16,7 +16,7 @@ bin="$(swift build --package-path "$package" --show-bin-path)"
 staging="$(mktemp -d "${TMPDIR:-/tmp}/latch-xpc-process.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 app="$staging/LatchXPCProcessProbe.app"
-service="$app/Contents/XPCServices/sh.latch.process-probe.service.xpc"
+service="$app/Contents/XPCServices/dev.latchapp.process-probe.service.xpc"
 mkdir -p "$app/Contents/MacOS" "$service/Contents/MacOS"
 cp "$bin/LatchXPCProcessProbe" "$app/Contents/MacOS/LatchXPCProcessProbe"
 cp "$bin/LatchXPCProcessProbe" "$service/Contents/MacOS/LatchXPCProcessProbe"
@@ -25,7 +25,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>sh.latch.process-probe</string>
+<key>CFBundleIdentifier</key><string>dev.latchapp.process-probe</string>
 <key>CFBundleExecutable</key><string>LatchXPCProcessProbe</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
@@ -36,7 +36,7 @@ cat > "$service/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>sh.latch.process-probe.service</string>
+<key>CFBundleIdentifier</key><string>dev.latchapp.process-probe.service</string>
 <key>CFBundleExecutable</key><string>LatchXPCProcessProbe</string>
 <key>CFBundlePackageType</key><string>XPC!</string>
 <key>CFBundleVersion</key><string>1</string>

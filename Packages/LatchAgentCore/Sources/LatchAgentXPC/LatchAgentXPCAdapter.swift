@@ -12,7 +12,7 @@ public enum LatchAgentXPCErrorCode: Int, Sendable {
     case invalidPayload = 1
     case replyEncodingFailed = 2
 
-    public static let domain = "sh.latch.agent.xpc"
+    public static let domain = "dev.latchapp.agent.xpc"
 }
 
 /// Export on a connection only after its peer has been authorized by the host.

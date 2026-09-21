@@ -169,7 +169,7 @@ Done: AppKit shell and session UI, workspace management, local IPC through an em
 - In-app attention alerts while the iOS client is connected
 - Session restoration
 - Diagnostics and exportable logs with redaction
-- Signed and notarized builds with an installation/update path
+- An update notice in the app, on top of the ad-hoc-signed releases and installer that exist today
 - Threat-model review
 
 Background iOS push notifications are deferred until Latch has an optional relay or another trusted APNs provider. A direct Mac-to-iPhone connection cannot reliably wake a suspended iOS application.
@@ -179,7 +179,7 @@ Background iOS push notifications are deferred until Latch has an optional relay
 1. **Deployment targets:** macOS 15 and iOS/iPadOS 18.
 2. **Repository layout:** one Xcode project containing the application targets, backed by local Swift packages for the ACP client, transport protocol, models, and reusable UI-independent logic.
 3. **Local IPC:** an XPC Mach service between the macOS app and Latch Agent. The remote transport remains a separate Network.framework protocol.
-4. **Distribution:** direct signed and notarized macOS builds with Hardened Runtime, outside the Mac App Store and without App Sandbox for v0.1. Repository access remains explicit and user-selected.
+4. **Distribution:** direct ad-hoc-signed macOS builds with Hardened Runtime, installed by script from GitHub releases, outside the Mac App Store and without App Sandbox. There is no Apple Developer ID, so builds are not notarized. Repository access remains explicit and user-selected.
 5. **Background service:** bundle Latch Agent inside the macOS application and register it as a per-user launch agent with `SMAppService`. The app owns installation, status, updates, and removal.
 6. **Initial remote access:** work over user-managed Tailscale connections without bundling its SDK. LAN use requires no third-party service.
 7. **License:** Apache-2.0, with no Contributor License Agreement.

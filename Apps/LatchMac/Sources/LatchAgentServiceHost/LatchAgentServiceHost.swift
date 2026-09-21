@@ -8,7 +8,7 @@ import LatchAgentXPC
 /// the application does; runtimes are stopped by explicit commands before that.
 public enum LatchAgentServiceHost {
     /// Bundle identifier of the application allowed to connect.
-    public static let clientIdentifier = "sh.latch.mac"
+    public static let clientIdentifier = "dev.latchapp.mac"
 
     /// The listener holds its delegate weakly; keep the host alive for the process lifetime.
     nonisolated(unsafe) private static var host: LatchAgentXPCHost?

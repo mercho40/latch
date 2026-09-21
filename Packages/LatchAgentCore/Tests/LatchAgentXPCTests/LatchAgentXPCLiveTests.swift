@@ -88,18 +88,11 @@ final class LatchAgentXPCLiveTests: XCTestCase {
         XCTAssertEqual(response.stopReason, "end_turn")
 
         // Request replies and event callbacks are independent XPC channels.
-        let streamed = expectation(description: "Live assistant text received over XPC")
-        let observer = Task {
-            while !Task.isCancelled {
-                if Self.assistantText(receiver.envelopes, runtimeID: id).trimmingCharacters(in: .whitespacesAndNewlines) == expected {
-                    streamed.fulfill()
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(10))
-            }
+        let deadline = ContinuousClock.now + .seconds(15)
+        while Self.assistantText(receiver.envelopes, runtimeID: id).trimmingCharacters(in: .whitespacesAndNewlines) != expected,
+              ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
         }
-        await fulfillment(of: [streamed], timeout: 15)
-        observer.cancel()
         let envelopes = receiver.envelopes
         let text = Self.assistantText(envelopes, runtimeID: id).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(text, expected)

@@ -34,7 +34,7 @@ Other known gaps:
 ## Requirements
 
 - macOS 15 or later on Apple silicon
-- Xcode 26 or later (Swift 6; the app icon is an Icon Composer document)
+- Xcode 27. The packages and their tests also build with Xcode 26.6, which is what CI uses, but its `actool` fails on the app's Icon Composer icon, so the app bundle needs 27.
 - At least one ACP agent. For Codex, sign in with `codex login`; for Claude Code, set up your Claude login and Node.js 22+. First-time setup of either may download its ACP adapter through npm. OpenCode and fx use their installed commands and existing authentication.
 
 ## Build and run

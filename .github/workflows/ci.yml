@@ -22,20 +22,21 @@ jobs:
       matrix:
         package: [Packages/LatchACP, Packages/LatchServiceProtocol, Packages/LatchAgentCore]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: swift --version
       - run: swift test --package-path ${{ matrix.package }}
 
   app:
-    name: App tests and bundle
+    name: App tests and XPC probe
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: xcodebuild -version
       # Window tests and the smoke test need a window server; hosted macOS runners have a logged-in GUI session.
       - run: swift test --package-path Apps/LatchMac
-      - run: bash Scripts/test-mac-app.sh --release
+      # Scripts/test-mac-app.sh is not run here: actool in Xcode 26.6, the newest on hosted runners,
+      # throws while compiling Latch.icon. Add it back once the runner image carries Xcode 27.
       - run: bash Scripts/test-xpc-process.sh
 
   secrets:
@@ -43,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Scan full history with gitleaks

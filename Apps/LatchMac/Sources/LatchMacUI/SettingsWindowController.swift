@@ -22,6 +22,9 @@ final class SettingsWindowController: NSWindowController {
         item.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: "Agents")
         tabs.addTabViewItem(item)
         window.contentViewController = tabs
+        // The tab controller titles the window when a tab is selected, but its first selection
+        // happens before it has a window, which left the title bar blank.
+        window.title = item.label
         window.center()
         window.setFrameAutosaveName("LatchSettingsWindow")
     }

@@ -39,6 +39,12 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         if selectedAgent != .custom, model.status.hasPrefix("Connected · ") {
             return "Connected · \(selectedAgent.title)"
         }
+        // An idle saved session is the ordinary case, and the hollow indicator already says it is
+        // not connected. Repeating that on every row told the reader nothing; which agent the
+        // session belongs to is what differs between rows.
+        if model.phase == .disconnected, model.errorMessage == nil, model.status == SessionModel.idleSavedStatus {
+            return selectedAgent.title
+        }
         return model.status
     }
 

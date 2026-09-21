@@ -14,6 +14,7 @@ final class SessionModel {
     var transcript: String { history.transcript }
     private var history = ChatHistory()
     private(set) var errorMessage: String?
+    static let idleSavedStatus = "Saved · Not connected"
     private(set) var cancellationRequested = false
     private(set) var configuration = SessionConfiguration()
     private(set) var isChangingConfiguration = false
@@ -37,7 +38,7 @@ final class SessionModel {
         history.restore(messages)
         savedAgentSessionID = agentSessionID
         archivedWithoutContext = agentSessionID == nil && !messages.isEmpty
-        status = "Saved · Not connected"
+        status = Self.idleSavedStatus
         onChange?()
     }
     private var client: AgentServiceClient

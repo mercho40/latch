@@ -301,3 +301,21 @@ extension SessionPersistenceTests {
         }
     }
 }
+
+extension SessionPersistenceTests {
+    /// Every idle row used to read "Saved · Not connected", which the hollow indicator already
+    /// says. The row names its agent instead; a state worth knowing about still takes the line.
+    @MainActor func testIdleSavedRowNamesItsAgentAndAnArchiveStillSaysSo() async throws {
+        try await WindowFixture.run { fixture in
+            var archived = fixture.session(1)
+            archived.agentSessionID = nil
+            archived.customCommand = "/bin/sh"
+            let (_, sidebar) = try await fixture.restored(archived, fixture.session(2))
+            let selected = try XCTUnwrap(sidebar.selectedSession)
+            try await fixture.settle { selected.displayStatus == "Saved · Read only" }
+            let idle = try XCTUnwrap(sidebar.allSessions.last)
+            XCTAssertFalse(idle.isViewLoaded)
+            XCTAssertEqual(idle.displayStatus, AgentPreset.custom.title)
+        }
+    }
+}

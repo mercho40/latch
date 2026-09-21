@@ -8,6 +8,7 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
     private let settings: AgentSettings
     private let table = NSTableView()
     private let scroll = NSScrollView()
+    private let listWell = NSBox()
     private var catalog: AgentCatalog
     /// Tests and smoke runs pin the environment; a real pane rescans the filesystem.
     private let injectedEnvironment: AgentLaunchEnvironment?
@@ -44,11 +45,11 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
         buildList()
         buildDetail()
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            scroll.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
-            scroll.widthAnchor.constraint(equalToConstant: 232),
-            detail.leadingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: 20),
+            listWell.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            listWell.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            listWell.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
+            listWell.widthAnchor.constraint(equalToConstant: 232),
+            detail.leadingAnchor.constraint(equalTo: listWell.trailingAnchor, constant: 20),
             detail.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             detail.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             detail.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -20),
@@ -81,9 +82,21 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.borderType = .bezelBorder
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scroll)
+        // Inset rows have rounded selections; a square bezel around them fought that. The list sits
+        // in a rounded well instead, its radius the row's plus the inset between them.
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        table.backgroundColor = .clear
+        listWell.boxType = .custom
+        listWell.titlePosition = .noTitle
+        listWell.cornerRadius = 10
+        listWell.borderWidth = 1
+        listWell.borderColor = .separatorColor
+        listWell.fillColor = .quaternarySystemFill
+        listWell.contentViewMargins = NSSize(width: 0, height: 4)
+        listWell.contentView = scroll
+        listWell.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(listWell)
     }
 
     private func buildDetail() {

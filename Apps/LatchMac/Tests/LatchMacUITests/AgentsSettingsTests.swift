@@ -169,3 +169,11 @@ final class AgentsSettingsTests: XCTestCase {
         return view.subviews.lazy.compactMap { self.find(in: $0, label: label) as T? }.first
     }
 }
+
+extension AgentsSettingsTests {
+    /// The tab controller only titles the window on a selection it makes while it has one.
+    @MainActor func testSettingsWindowIsTitledAfterItsPane() {
+        let controller = SettingsWindowController(settings: AgentSettings(defaults: UserDefaults(suiteName: "LatchTitle-\(UUID().uuidString)")!))
+        XCTAssertEqual(controller.window?.title, "Agents")
+    }
+}

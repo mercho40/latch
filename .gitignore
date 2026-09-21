@@ -9,3 +9,8 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# Local agent tooling
+.claude/
+.agents/
+skills-lock.json

@@ -1,5 +1,6 @@
 /*
   X-Content-Type-Options: nosniff
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   Referrer-Policy: strict-origin-when-cross-origin
   Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'sha256-sq9/IZE8J88CKwT2bys4zhwBmgE4+0dgXtSsZJn7/ug='; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
 

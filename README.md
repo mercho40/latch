@@ -42,7 +42,7 @@ Other known gaps:
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mercho40/latch/main/Scripts/install.sh | sh
+curl -fsSL https://latchapp.dev/install.sh | sh
 ```
 
 [The script](Scripts/install.sh) downloads the latest release, checks its SHA-256 and code signature, and puts `Latch.app` in `/Applications`; run it again to update.

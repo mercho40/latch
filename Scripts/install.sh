@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install or update Latch from a GitHub release:
-#   curl -fsSL https://raw.githubusercontent.com/mercho40/latch/main/Scripts/install.sh | sh
+#   curl -fsSL https://latchapp.dev/install.sh | sh
 #
 # LATCH_VERSION=0.1.0   install that release instead of the latest
 # LATCH_INSTALL_DIR=... install somewhere other than /Applications

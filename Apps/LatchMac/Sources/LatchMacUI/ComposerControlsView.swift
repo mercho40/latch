@@ -21,7 +21,7 @@ final class ComposerControlsView: NSView {
     static let controlHeight: CGFloat = 28
     private let pickers: [Slot]
     private let actions: [NSButton]
-    private let gap: CGFloat = 4
+    private let gap: CGFloat = 6
 
     init(pickers: [Slot], actions: [NSButton]) {
         self.pickers = pickers
@@ -63,7 +63,8 @@ final class ComposerControlsView: NSView {
     private static func fittedWidth(of button: NSPopUpButton) -> CGFloat {
         let title = (button.titleOfSelectedItem ?? button.title) as NSString
         let font = button.font ?? .systemFont(ofSize: NSFont.systemFontSize)
-        return ceil(title.size(withAttributes: [.font: font]).width) + 30
+        // Room for the arrows, and for a capsule's rounded ends where there is a bezel.
+        return ceil(title.size(withAttributes: [.font: font]).width) + (button.isBordered ? 44 : 30)
     }
 
     private func placements(width: CGFloat) -> (items: [(NSView, NSRect)], height: CGFloat) {

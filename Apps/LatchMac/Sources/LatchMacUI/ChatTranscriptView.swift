@@ -15,7 +15,7 @@ final class ChatTranscriptView: NSView {
 
     private let document = TranscriptDocumentView()
     private let status = NSTextField(wrappingLabelWithString: "")
-    private let jump = FloatingRoundButton(symbol: "arrow.down", label: "Jump to Latest")
+    private let jump = FloatingRoundButton.make(symbol: "arrow.down", label: "Jump to Latest")
     private var rows: [UUID: TranscriptMessageView] = [:]
     private var order: [UUID] = []
     private var working = false
@@ -171,7 +171,8 @@ final class ChatTranscriptView: NSView {
         let restored = saved.id.flatMap { rows[$0] }.map { $0.frame.minY + saved.offset } ?? saved.origin
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: followsBottom ? bottom : min(bottom, max(0, restored))))
         scrollView.reflectScrolledClipView(scrollView.contentView)
-        jump.sizeToFit()
+        // A glass button's fitted size is its glyph's, which made a disc too small to hit or see.
+        jump.setFrameSize(NSSize(width: FloatingRoundButton.diameter, height: FloatingRoundButton.diameter))
         jump.frame.origin = NSPoint(x: max(0, (bounds.width - jump.frame.width) / 2), y: max(0, bounds.height - jump.frame.height - 12))
         jump.isHidden = followsBottom || bottom == 0
     }
@@ -839,7 +840,23 @@ private final class TranscriptTextView: NSTextView {
 /// it is lost against a transcript; the shadow, not a heavier border, is what lifts it.
 @MainActor
 final class FloatingRoundButton: NSButton {
-    static let diameter: CGFloat = 30
+    static let diameter: CGFloat = 32
+
+    /// On macOS 26 a glass button is a surface of its own, which is what this control lacked, and
+    /// it has to be a plain NSButton: a subclass that overrides `draw` is not given the glass. The
+    /// drawn disc below is for the systems before it.
+    static func make(symbol: String, label: String) -> NSButton {
+        guard #available(macOS 26.0, *) else { return FloatingRoundButton(symbol: symbol, label: label) }
+        let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(),
+                              target: nil, action: nil)
+        button.bezelStyle = .glass
+        button.borderShape = .circle
+        button.controlSize = .large
+        button.imagePosition = .imageOnly
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+        return button
+    }
 
     init(symbol: String, label: String) {
         super.init(frame: NSRect(x: 0, y: 0, width: Self.diameter, height: Self.diameter))

@@ -260,9 +260,15 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             // Three bezelled pop-ups in a row made the composer look like a form. Borderless, a
             // pop-up is its title and the system's own arrows, which is all the affordance it needs.
             picker.controlSize = .regular
-            picker.isBordered = false
             picker.font = .systemFont(ofSize: NSFont.systemFontSize)
-            picker.contentTintColor = .secondaryLabelColor
+            if #available(macOS 26.0, *) {
+                // Controls that float over content are what Liquid Glass is for; a capsule per picker.
+                picker.bezelStyle = .glass
+                picker.borderShape = .capsule
+            } else {
+                picker.isBordered = false
+                picker.contentTintColor = .secondaryLabelColor
+            }
             picker.target = self
             picker.cell?.lineBreakMode = .byTruncatingTail
             picker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -300,6 +306,12 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         send.target = self
         send.action = #selector(sendPrompt)
         send.bezelStyle = .circular
+        if #available(macOS 26.0, *) {
+            for button in [send, cancel] {
+                button.bezelStyle = .glass
+                button.borderShape = .circle
+            }
+        }
         send.keyEquivalent = "\r"
         send.keyEquivalentModifierMask = [.command]
         cancel.target = self
@@ -1212,7 +1224,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         for picker in [modelPicker, effortPicker, permissionModePicker] {
             let bounds = picker.convert(picker.bounds, to: view)
             guard bounds.minX >= 0, bounds.maxX <= view.bounds.width,
-                  !picker.isBordered, picker.font?.pointSize == NSFont.systemFontSize,
+                  picker.font?.pointSize == NSFont.systemFontSize,
                   picker.frame.height >= picker.intrinsicContentSize.height,
                   picker.frame.height >= ComposerControlsView.controlHeight else {
                 throw SmokeError.failed("Configuration picker is clipped")

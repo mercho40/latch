@@ -137,3 +137,13 @@ LATCH_DOWNLOAD_BASE=file:///tmp/rel LATCH_VERSION=0.2.0 LATCH_INSTALL_DIR=/tmp/a
 ```
 
 A copy installed that way shares the real session library in `~/Library/Application Support/Latch` if you launch it.
+
+## The website
+
+`site/` is latchapp.dev, deployed to Cloudflare Pages as it stands: there is no build step. It is one HTML file with its CSS and script inlined, system fonts, and no third-party requests, so the whole page arrives in the server's first flight and the screenshot is the only other download.
+
+- `python3 Scripts/check-site.py` is what CI runs. It fails if the gzipped HTML passes 14 KB, if HTML plus the largest image passes 100 KB, if the page loads anything from another origin, if `site/install.sh` differs from `Scripts/install.sh`, or if the inline script no longer matches the hash in `site/_headers`.
+- `bash Scripts/build-site-images.sh` regenerates `site/img` from `docs/images/latch-{light,dark}.png` (needs `cwebp`). The directory is named for a hash of its sources, so images are cached forever and a new screenshot gets new URLs; the script rewrites the page to match.
+- After changing `Scripts/install.sh`, copy it to `site/install.sh`. After changing the inline script, update the hash the check prints.
+- To look at it: `cd site && python3 -m http.server`.
+

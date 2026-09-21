@@ -1,0 +1,18 @@
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'sha256-sq9/IZE8J88CKwT2bys4zhwBmgE4+0dgXtSsZJn7/ug='; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+/
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
+
+/img/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=300
+
+/agents.md
+  Content-Type: text/markdown; charset=utf-8
+  Cache-Control: public, max-age=300

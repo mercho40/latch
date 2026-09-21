@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Latch</title>
+<meta name="description" content="A native macOS client for coding agents: Codex, Claude Code, OpenCode, or anything that speaks ACP.">
+<link rel="canonical" href="https://latchapp.dev/">
+<link rel="alternate" type="text/markdown" href="/agents.md">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='190 175 680 680'%3E%3Crect x='220' y='205' width='500' height='500' rx='150' fill='%232f4a63'/%3E%3Crect x='430' y='355' width='410' height='470' rx='145' fill='%230a84ff' fill-opacity='.88'/%3E%3C/svg%3E">
+<meta property="og:title" content="Latch">
+<meta property="og:description" content="A native macOS client for coding agents.">
+<meta property="og:image" content="https://latchapp.dev/img/df8ba03a/og.jpg">
+<meta property="og:url" content="https://latchapp.dev/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: light)" imagesrcset="/img/df8ba03a/latch-light-800.avif 800w, /img/df8ba03a/latch-light-1200.avif 1200w, /img/df8ba03a/latch-light-1600.avif 1600w, /img/df8ba03a/latch-light-2400.avif 2400w" imagesizes="(min-width: 1180px) 1100px, calc(100vw - 40px)">
+<link rel="preload" as="image" type="image/avif" media="(prefers-color-scheme: dark)" imagesrcset="/img/df8ba03a/latch-dark-800.avif 800w, /img/df8ba03a/latch-dark-1200.avif 1200w, /img/df8ba03a/latch-dark-1600.avif 1600w, /img/df8ba03a/latch-dark-2400.avif 2400w" imagesizes="(min-width: 1180px) 1100px, calc(100vw - 40px)">
+<style>
+:root{--page:#fff;--text:#1d1d1f;--muted:#6e6e73;--line:#d2d2d7;--surface:#f5f5f7;--window:#fff;--focus:#0a84ff;
+--lift:0 0 0 1px rgb(0 0 0/.12),0 40px 90px -20px rgb(0 0 0/.35);
+--sans:-apple-system,BlinkMacSystemFont,ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--page:#000;--text:#f5f5f7;--muted:#a1a1a6;--line:#2c2c2e;--surface:#1c1c1e;--window:#1e1e1e;--lift:0 0 0 1px #2c2c2e}}
+*{box-sizing:border-box}
+html{background:var(--page);color:var(--text);font-family:var(--sans);-webkit-text-size-adjust:100%}
+body{margin:0}
+::selection{background:var(--focus);color:#fff}
+main{width:min(1100px,100vw - 40px);margin:0 auto;padding:clamp(56px,12vh,120px) 0 64px}
+.intro{max-width:640px}
+h1{margin:0 0 20px;font-size:clamp(44px,8vw,64px);font-weight:600;line-height:1;letter-spacing:-.025em}
+h1 span{margin-left:.35em;color:var(--muted);font:500 .3em/1 var(--mono);letter-spacing:0}
+p{margin:0;color:var(--muted);font-size:clamp(18px,2.4vw,21px);line-height:1.45}
+button{display:flex;width:100%;margin:36px 0 22px;padding:17px 18px;align-items:center;justify-content:space-between;gap:18px;
+border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--text);font:15px/1.5 var(--mono);text-align:left;cursor:pointer}
+button:hover{border-color:var(--muted)}
+code{font:inherit;overflow-wrap:break-word;user-select:all;-webkit-user-select:all}
+button span{flex:none;color:var(--muted);font:14px var(--sans)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
+nav{display:flex;flex-wrap:wrap;gap:6px 22px}
+a{color:var(--text);font-size:15px;text-decoration-thickness:1px;text-underline-offset:4px}
+a:hover{text-decoration-thickness:2px}
+picture{display:block;margin:clamp(48px,9vh,88px) 0 clamp(32px,6vw,72px)}
+img{display:block;width:100%;height:auto;aspect-ratio:5/4;border-radius:2.17%/2.71%;background:var(--window);box-shadow:var(--lift)}
+footer{max-width:640px;color:var(--muted);font-size:15px;line-height:1.5}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<main>
+<div class="intro">
+<h1>Latch<span>0.1</span></h1>
+<p>A native macOS client for coding agents: Codex, Claude Code, OpenCode, or anything that speaks ACP.</p>
+<button type="button" aria-label="Copy the install command"><code>curl -fsSL <wbr>https://latchapp.dev/<wbr>install.sh | sh</code><span aria-live="polite">Copy</span></button>
+<nav aria-label="Project">
+<a href="https://github.com/mercho40/latch">Source</a>
+<a href="https://github.com/mercho40/latch/releases/latest">Download</a>
+<a href="https://github.com/mercho40/latch/security/policy">Security</a>
+</nav>
+</div>
+<picture>
+<source media="(prefers-color-scheme: dark)" type="image/avif" srcset="/img/df8ba03a/latch-dark-800.avif 800w, /img/df8ba03a/latch-dark-1200.avif 1200w, /img/df8ba03a/latch-dark-1600.avif 1600w, /img/df8ba03a/latch-dark-2400.avif 2400w" sizes="(min-width: 1180px) 1100px, calc(100vw - 40px)">
+<source media="(prefers-color-scheme: dark)" type="image/webp" srcset="/img/df8ba03a/latch-dark-800.webp 800w, /img/df8ba03a/latch-dark-1200.webp 1200w, /img/df8ba03a/latch-dark-1600.webp 1600w, /img/df8ba03a/latch-dark-2400.webp 2400w" sizes="(min-width: 1180px) 1100px, calc(100vw - 40px)">
+<source type="image/avif" srcset="/img/df8ba03a/latch-light-800.avif 800w, /img/df8ba03a/latch-light-1200.avif 1200w, /img/df8ba03a/latch-light-1600.avif 1600w, /img/df8ba03a/latch-light-2400.avif 2400w" sizes="(min-width: 1180px) 1100px, calc(100vw - 40px)">
+<img src="/img/df8ba03a/latch-light-1200.webp" srcset="/img/df8ba03a/latch-light-800.webp 800w, /img/df8ba03a/latch-light-1200.webp 1200w, /img/df8ba03a/latch-light-1600.webp 1600w, /img/df8ba03a/latch-light-2400.webp 2400w" sizes="(min-width: 1180px) 1100px, calc(100vw - 40px)" width="1200" height="960" fetchpriority="high" decoding="async" alt="A Latch window. The sidebar groups sessions by workspace and names each one's agent. The conversation shows a request, two tool calls, a table, a code block and the reply. The composer has pickers for model, effort and permission mode.">
+</picture>
+<footer>macOS 15 or later, Apple silicon. Not notarized: <a href="https://github.com/mercho40/latch#install">see how it's signed</a>. Apache-2.0.</footer>
+</main>
+<script>const b=document.querySelector("button"),s=b.lastElementChild,c=b.firstElementChild;b.onclick=async()=>{try{await navigator.clipboard.writeText(c.textContent);s.textContent="Copied";setTimeout(()=>s.textContent="Copy",2e3)}catch{getSelection().selectAllChildren(c)}}</script>
+</body>
+</html>

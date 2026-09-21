@@ -39,6 +39,14 @@ jobs:
       # throws while compiling Latch.icon. Add it back once the runner image carries Xcode 27.
       - run: bash Scripts/test-xpc-process.sh
 
+  site:
+    name: Site budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 Scripts/check-site.py
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest

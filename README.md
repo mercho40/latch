@@ -86,6 +86,7 @@ swift test --package-path Apps/LatchMac
 | `Packages/LatchServiceProtocol` | Codable commands, events, and versioned envelopes between clients and the service |
 | `Packages/LatchAgentCore` | Runtime registry, the agent service, and its XPC adapter, host, client, and event hub |
 | `Scripts` | Bundle and XPC verification, the release script, and the installer |
+| `site` | [latchapp.dev](https://latchapp.dev): one static page, no build step |
 | `docs` | [Using Latch](docs/using-latch.md) · [Architecture](docs/architecture.md) · [Building and testing](docs/building-and-testing.md) · [Roadmap](docs/roadmap.md) |
 
 There are no third-party dependencies.

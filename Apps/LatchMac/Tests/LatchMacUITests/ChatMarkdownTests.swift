@@ -26,7 +26,7 @@ final class ChatMarkdownTests: XCTestCase {
         let code = "    let 🌍 = \"**literal**\"  \r\n\t<raw> ![image](https://example.com/a)\r\n\r\n"
         let rendered = ChatMarkdown.render("Before\r\n```swift\r\n" + code + "```\r\nAfter")
         XCTAssertEqual(rendered.string, "Before\r\n" + code + "After")
-        XCTAssertEqual(font(rendered, at: "let"), .monospacedSystemFont(ofSize: 12, weight: .regular))
+        XCTAssertEqual(font(rendered, at: "let"), .monospacedSystemFont(ofSize: ChatMarkdown.codeFontSize, weight: .regular))
         XCTAssertEqual(font(rendered, at: "After"), .systemFont(ofSize: 14))
         assertNoLinksOrAttachments(rendered)
     }
@@ -57,7 +57,8 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertTrue(font(rendered, at: "Small").fontDescriptor.symbolicTraits.contains(.bold))
         let range = (rendered.string as NSString).range(of: "quoted")
         XCTAssertEqual(rendered.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor, .secondaryLabelColor)
-        XCTAssertEqual((rendered.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle)?.headIndent, 12)
+        XCTAssertEqual((rendered.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle)?.headIndent, TranscriptLayoutManager.quoteIndent)
+        XCTAssertNotNil(rendered.attribute(.latchQuote, at: range.location, effectiveRange: nil), "A quote is marked so its bar can be drawn")
     }
 
     @MainActor func testLinkAllowlist() async {
@@ -231,7 +232,8 @@ final class ChatMarkdownTests: XCTestCase {
                         return "cell(\(cell.startingRow)+\(cell.rowSpan),\(cell.startingColumn)+\(cell.columnSpan))"
                     }
                     parts.append("\(key)=[align \(style.alignment.rawValue), spacing \(style.lineSpacing), "
-                                 + "head \(style.headIndent), first \(style.firstLineHeadIndent), "
+                                 + "head \(style.headIndent), first \(style.firstLineHeadIndent), tail \(style.tailIndent), "
+                                 + "before \(style.paragraphSpacingBefore), after \(style.paragraphSpacing), "
                                  + "break \(style.lineBreakMode.rawValue), blocks \(blocks)]")
                 case let font as NSFont:
                     parts.append("\(key)=\(font.fontName)@\(font.pointSize)")
@@ -346,5 +348,35 @@ final class ChatMarkdownTests: XCTestCase {
             XCTAssertNil(attributes[.attachment])
             XCTAssertNil(attributes[NSAttributedString.Key("NSImageURL")])
         }
+    }
+
+    /// A code block is one panel: every line carries the block's identity and the side insets,
+    /// the first line carries the top padding, and the last only gains its bottom padding once
+    /// the fence closes, because until then nobody knows it is the last.
+    @MainActor func testCodeBlockIsMarkedInsetAndPaddedOnceClosed() {
+        func style(_ text: NSAttributedString, at needle: String) -> NSParagraphStyle? {
+            let range = (text.string as NSString).range(of: needle)
+            return text.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        }
+        let open = ChatMarkdown.render("Before\n```\nfirst\nlast\n")
+        XCTAssertEqual(style(open, at: "first")?.paragraphSpacingBefore, TranscriptLayoutManager.codePadding)
+        XCTAssertEqual(style(open, at: "last")?.paragraphSpacing, 0, "An unclosed block has no bottom yet")
+        let closed = ChatMarkdown.render("Before\n```\nfirst\nlast\n```\nAfter")
+        XCTAssertEqual(style(closed, at: "first")?.headIndent, TranscriptLayoutManager.codeInset)
+        XCTAssertEqual(style(closed, at: "first")?.tailIndent, -TranscriptLayoutManager.codeInset)
+        XCTAssertEqual(style(closed, at: "first")?.paragraphSpacing, 0)
+        XCTAssertEqual(style(closed, at: "last")?.paragraphSpacing, TranscriptLayoutManager.codePadding)
+        var block = NSRange()
+        let first = (closed.string as NSString).range(of: "first")
+        XCTAssertNotNil(closed.attribute(.latchCodeBlock, at: first.location, longestEffectiveRange: &block,
+                                         in: NSRange(location: 0, length: closed.length)))
+        XCTAssertEqual((closed.string as NSString).substring(with: block), "first\nlast\n", "One block, exactly its lines")
+        XCTAssertNil(closed.attribute(.backgroundColor, at: first.location, effectiveRange: nil),
+                     "A per-character fill would draw over the panel and square its corners")
+
+        let two = ChatMarkdown.render("```\na\n```\n```\nb\n```\n")
+        let a = two.attribute(.latchCodeBlock, at: 0, effectiveRange: nil) as? Int
+        let b = two.attribute(.latchCodeBlock, at: 2, effectiveRange: nil) as? Int
+        XCTAssertNotEqual(a, b, "Adjacent blocks stay separate panels")
     }
 }

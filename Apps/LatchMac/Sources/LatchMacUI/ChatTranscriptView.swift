@@ -4,6 +4,8 @@ import AppKit
 @MainActor
 final class ChatTranscriptView: NSView {
     static let horizontalInset: CGFloat = 16
+    static let rowSpacing: CGFloat = 12
+    static let groupedRowSpacing: CGFloat = 2
 
     let scrollView = NSScrollView()
     var messageCount: Int { order.count }
@@ -148,13 +150,16 @@ final class ChatTranscriptView: NSView {
         // drifts as it goes — that is what the margin is for.
         let viewport = scrollView.contentView.bounds
         let measured = viewport.insetBy(dx: 0, dy: -max(viewport.height, 1))
-        for id in order {
+        for (position, id) in order.enumerated() {
             guard let row = rows[id] else { continue }
             let deferrable = limitsMeasurementToViewport && row.frame.height > 0
                 && !measured.intersects(NSRect(x: inset, y: y, width: columnWidth, height: row.frame.height))
             let height = deferrable ? row.deferArrange(width: columnWidth) : row.arrange(width: columnWidth)
             row.frame.origin = NSPoint(x: inset, y: y)
-            y += height + 12
+            // A run of collapsed tool calls is one burst of activity, so its rows sit together as a
+            // group; the ordinary gap is what separates that group from the messages around it.
+            let next = position + 1 < order.count ? rows[order[position + 1]] : nil
+            y += height + (row.isCollapsedTool && next?.isCollapsedTool == true ? Self.groupedRowSpacing : Self.rowSpacing)
         }
         if !status.isHidden {
             let size = status.sizeThatFits(NSSize(width: columnWidth, height: .greatestFiniteMagnitude))
@@ -347,7 +352,7 @@ final class ChatTranscriptView: NSView {
         let codeRange = (row.textView.string as NSString).range(of: "let value")
         try require(codeRange.location != NSNotFound, "Rendered code is missing")
         let codeFont = row.textView.textStorage?.attribute(.font, at: codeRange.location, effectiveRange: nil) as? NSFont
-        try require(codeFont == NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), "Fenced code is not monospaced")
+        try require(codeFont == NSFont.monospacedSystemFont(ofSize: ChatMarkdown.codeFontSize, weight: .regular), "Fenced code is not monospaced")
         messages[11].text += "\n\n| Step | Result |\n| --- | ---: |\n| build | ok |"
         probe.update(messages: messages, isWorking: true)
         let cellRange = (row.textView.string as NSString).range(of: "build")
@@ -393,7 +398,7 @@ final class ChatTranscriptView: NSView {
         try require(!toolRow.textView.isHidden && toolRow.frame.height > toolHeight && toolRow.textView.string == TranscriptMessageView.toolBody(tool.text), "Tool disclosure lost its details")
         tool.text = "Read Sources · completed\nUpdated tool details"
         probe.update(messages: [tool], isWorking: false)
-        try require(ObjectIdentifier(probe.rows[tool.id]!) == toolIdentity && !toolRow.textView.isHidden && toolRow.textView.string == tool.text, "Tool update replaced/collapsed row or lost details")
+        try require(ObjectIdentifier(probe.rows[tool.id]!) == toolIdentity && !toolRow.textView.isHidden && toolRow.textView.string == TranscriptMessageView.toolBody(tool.text), "Tool update replaced/collapsed row or lost details")
         try require(toolRow.subviews.compactMap { $0 as? NSButton }.contains { !$0.isHidden && $0.accessibilityLabel()?.contains("completed") == true }, "Tool status update is not accessibility discoverable")
         toolRow.toggleDisclosure()
         try require(toolRow.textView.isHidden && toolRow.frame.height == toolHeight, "Tool did not collapse")
@@ -434,6 +439,7 @@ private final class TranscriptMessageView: NSView {
     private var hoverTracking: NSTrackingArea?
     private var hovered = false
     private var isDisclosure: Bool { role == .tool }
+    var isCollapsedTool: Bool { isDisclosure && !expanded }
     /// Clears the 20pt disclosure triangle drawn at the row's leading edge.
     static let disclosureIndent: CGFloat = 24
 
@@ -483,6 +489,8 @@ private final class TranscriptMessageView: NSView {
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = false
         textView.textContainerInset = .zero
+        // Code panels and quote bars are drawn behind the text; see TranscriptLayoutManager.
+        textView.textContainer?.replaceLayoutManager(TranscriptLayoutManager())
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.heightTracksTextView = false
@@ -534,10 +542,28 @@ private final class TranscriptMessageView: NSView {
         }
         if isDisclosure {
             let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-            label.stringValue = firstLine.isEmpty ? "Tool activity" : firstLine
+            label.attributedStringValue = Self.toolHeader(firstLine.isEmpty ? "Tool activity" : firstLine, font: label.font)
             label.toolTip = firstLine
             updateDisclosureAccessibility()
         }
+    }
+
+    /// "Title · status", with the status coloured when it is one a reader should not skim past.
+    /// Colour backs up the word, never replaces it, so nothing depends on seeing red.
+    static func toolHeader(_ line: String, font: NSFont?) -> NSAttributedString {
+        let base: [NSAttributedString.Key: Any] = [.font: font ?? .systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]
+        let result = NSMutableAttributedString(string: line, attributes: base)
+        guard let separator = line.range(of: " · ", options: .backwards) else { return result }
+        let status = line[separator.upperBound...].lowercased()
+        let color: NSColor? = switch status {
+        case "failed", "error", "cancelled", "canceled": .systemRed
+        case "running", "in_progress", "pending": .labelColor
+        default: nil
+        }
+        if let color {
+            result.addAttribute(.foregroundColor, value: color, range: NSRange(separator.upperBound..<line.endIndex, in: line))
+        }
+        return result
     }
 
     /// A tool message is its title line, then its details. Copy still takes the whole message.

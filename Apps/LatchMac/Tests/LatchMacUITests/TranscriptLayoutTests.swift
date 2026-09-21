@@ -64,4 +64,22 @@ final class TranscriptLayoutTests: XCTestCase {
         XCTAssertEqual(resized.rowFrames, reference.rowFrames)
         XCTAssertFalse(resized.limitsMeasurementToViewport)
     }
+
+    /// Consecutive collapsed tool calls read as one group; the ordinary gap separates the group
+    /// from the messages on either side of it.
+    func testCollapsedToolCallsAreGroupedBetweenMessages() throws {
+        let messages = [
+            ChatMessage(role: .user, text: "Go ahead."),
+            ChatMessage(role: .tool, text: "Read a.swift · completed\ndetails"),
+            ChatMessage(role: .tool, text: "Edit a.swift · completed\ndetails"),
+            ChatMessage(role: .tool, text: "Run tests · failed\ndetails"),
+            ChatMessage(role: .assistant, text: "Done."),
+        ]
+        let frames = transcript(messages).rowFrames
+        XCTAssertEqual(frames.count, 5)
+        let gaps = zip(frames, frames.dropFirst()).map { $1.minY - $0.maxY }
+        XCTAssertEqual(gaps, [ChatTranscriptView.rowSpacing, ChatTranscriptView.groupedRowSpacing,
+                              ChatTranscriptView.groupedRowSpacing, ChatTranscriptView.rowSpacing])
+    }
 }
+

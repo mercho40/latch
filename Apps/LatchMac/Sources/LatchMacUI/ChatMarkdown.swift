@@ -11,7 +11,7 @@ import Foundation
 @MainActor
 internal enum ChatMarkdown {
     static let bodyFontSize: CGFloat = 14
-    static let codeFontSize: CGFloat = 12
+    static let codeFontSize: CGFloat = 13
     static let tableCellPadding: CGFloat = 6
 
     typealias Line = (content: String, ending: String)
@@ -26,6 +26,8 @@ internal enum ChatMarkdown {
         fileprivate struct Fence {
             let marker: Character
             let count: Int
+            /// The source line of the opening fence: the block's identity, and how its first line is known.
+            let openedAt: Int
         }
 
         /// Where the renderer stood at the top of one loop iteration. Lines swallowed by a
@@ -92,14 +94,15 @@ internal enum ChatMarkdown {
                    candidate.count >= active.count,
                    candidate.tail.trimmingCharacters(in: .whitespaces).isEmpty {
                     fence = nil
+                    closeCodeBlock(active.openedAt, in: output)
                 } else {
-                    output.append(literal(line + ending, code: true))
+                    output.append(literal(line + ending, codeBlock: active.openedAt, first: start == active.openedAt + 1))
                 }
                 continue
             }
             if let candidate = fenceMarker(line),
                candidate.marker != "`" || !candidate.tail.contains("`") {
-                fence = Cache.Fence(marker: candidate.marker, count: candidate.count)
+                fence = Cache.Fence(marker: candidate.marker, count: candidate.count, openedAt: start)
                 continue
             }
             if let table = pipeTable(at: start, in: lines) {
@@ -273,14 +276,41 @@ internal enum ChatMarkdown {
         return (marker, count, String(content.dropFirst(count)))
     }
 
-    private static func literal(_ text: String, code: Bool = false) -> NSAttributedString {
+    /// Indented code has no fence to give it an identity or a first line, so it shares one.
+    private static let indentedCodeBlock = -1
+
+    private static func literal(_ text: String, codeBlock: Int? = nil, first: Bool = false) -> NSAttributedString {
         var attributes: [NSAttributedString.Key: Any] = [
-            .font: code ? NSFont.monospacedSystemFont(ofSize: codeFontSize, weight: .regular)
-                        : NSFont.systemFont(ofSize: bodyFontSize),
+            .font: codeBlock != nil ? NSFont.monospacedSystemFont(ofSize: codeFontSize, weight: .regular)
+                                    : NSFont.systemFont(ofSize: bodyFontSize),
             .foregroundColor: NSColor.labelColor,
         ]
-        if code { attributes[.backgroundColor] = NSColor.quaternaryLabelColor }
+        if let codeBlock {
+            // The panel is drawn by TranscriptLayoutManager behind the whole block. The insets keep
+            // the text off its edges, and the spacing above the first line is its top padding.
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.firstLineHeadIndent = TranscriptLayoutManager.codeInset
+            paragraph.headIndent = TranscriptLayoutManager.codeInset
+            paragraph.tailIndent = -TranscriptLayoutManager.codeInset
+            if first { paragraph.paragraphSpacingBefore = TranscriptLayoutManager.codePadding }
+            attributes[.paragraphStyle] = paragraph
+            attributes[.latchCodeBlock] = codeBlock
+        }
         return NSAttributedString(string: text, attributes: attributes)
+    }
+
+    /// Bottom padding can only be given once the closing fence arrives, so it goes onto the block's
+    /// last paragraph then. An unclosed, still-streaming block simply has none yet. This rewrites
+    /// output one line back, which the cache allows: it never resumes within two lines of a change.
+    private static func closeCodeBlock(_ block: Int, in output: NSMutableAttributedString) {
+        guard output.length > 0,
+              output.attribute(.latchCodeBlock, at: output.length - 1, effectiveRange: nil) as? Int == block else { return }
+        let last = (output.string as NSString).paragraphRange(for: NSRange(location: output.length - 1, length: 0))
+        guard let style = (output.attribute(.paragraphStyle, at: last.location, effectiveRange: nil) as? NSParagraphStyle)?
+            .mutableCopy() as? NSMutableParagraphStyle else { return }
+        style.paragraphSpacing = TranscriptLayoutManager.codePadding
+        output.addAttribute(.paragraphStyle, value: style, range: last)
     }
 
     private static func prose(_ line: String, ending: String) -> NSAttributedString {
@@ -308,7 +338,7 @@ internal enum ChatMarkdown {
             content.removeSubrange(range)
             list = true
         } else if content.hasPrefix("    ") || content.hasPrefix("\t") {
-            return literal(line + ending, code: true)
+            return literal(line + ending, codeBlock: indentedCodeBlock)
         }
 
         let size = heading == 0 ? bodyFontSize : bodyFontSize + CGFloat(7 - heading)
@@ -320,10 +350,13 @@ internal enum ChatMarkdown {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         if quoted {
-            paragraph.firstLineHeadIndent = 12
-            paragraph.headIndent = 12
+            // The bar beside a quote is drawn by TranscriptLayoutManager; indentation alone read as a glitch.
+            paragraph.firstLineHeadIndent = TranscriptLayoutManager.quoteIndent
+            paragraph.headIndent = TranscriptLayoutManager.quoteIndent
+            result.addAttribute(.latchQuote, value: true, range: NSRange(location: 0, length: result.length))
         } else if list {
             paragraph.headIndent = (prefix as NSString).size(withAttributes: [.font: baseFont]).width
+            paragraph.paragraphSpacing = 3
         }
         result.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: result.length))
         return result

@@ -421,7 +421,16 @@ private final class TranscriptDocumentView: NSView {
 @MainActor
 private final class TranscriptMessageView: NSView {
     let role: ChatMessage.Role
-    let textView = TranscriptTextView(frame: .zero)
+    /// Built by hand so the layout manager and container are ours from the start. A text view made
+    /// this way does not own its storage, so the row does.
+    private let storage = NSTextStorage()
+    private let container = TranscriptTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+    private(set) lazy var textView: TranscriptTextView = {
+        let manager = TranscriptLayoutManager()
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        return TranscriptTextView(frame: .zero, textContainer: container)
+    }()
     var onDisclosure: (() -> Void)?
     private let label = NSTextField(labelWithString: "")
     private let copy = TranscriptCopyButton(title: "Copy", target: nil, action: nil)
@@ -489,8 +498,9 @@ private final class TranscriptMessageView: NSView {
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = false
         textView.textContainerInset = .zero
-        // Code panels and quote bars are drawn behind the text; see TranscriptLayoutManager.
-        textView.textContainer?.replaceLayoutManager(TranscriptLayoutManager())
+        // Code panels and quote bars are drawn behind the text, and prose keeps a readable measure;
+        // see TranscriptLayoutManager and TranscriptTextContainer.
+        container.limitsProse = role == .assistant
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.heightTracksTextView = false

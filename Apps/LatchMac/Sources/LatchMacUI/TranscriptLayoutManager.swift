@@ -60,3 +60,34 @@ final class TranscriptLayoutManager: NSLayoutManager {
         }
     }
 }
+
+/// Keeps prose to a readable measure while the row itself fills the pane.
+///
+/// The transcript is as wide as the window so that diffs, tables and code get the room, but a
+/// paragraph 190 characters wide is not readable. Narrowing the row would narrow everything, and
+/// putting the measure into the rendered paragraph styles would make rendering depend on the
+/// width, which the streaming cache is built not to. The container is asked for every line
+/// fragment anyway, so it answers with a shorter one for prose and the full width for a code
+/// block or a table cell. Nothing in the storage changes, and a resize needs no re-render.
+final class TranscriptTextContainer: NSTextContainer {
+    static let proseMeasure: CGFloat = 720
+    /// Off for user bubbles, which size to their text, and for tool output, which is all code.
+    var limitsProse = false
+
+    override var isSimpleRectangularTextContainer: Bool { !limitsProse }
+
+    override func lineFragmentRect(forProposedRect proposedRect: NSRect, at characterIndex: Int,
+                                   writingDirection baseWritingDirection: NSWritingDirection,
+                                   remaining remainingRect: UnsafeMutablePointer<NSRect>?) -> NSRect {
+        var rect = super.lineFragmentRect(forProposedRect: proposedRect, at: characterIndex,
+                                          writingDirection: baseWritingDirection, remaining: remainingRect)
+        guard limitsProse, rect.maxX > Self.proseMeasure, let storage = layoutManager?.textStorage else { return rect }
+        if characterIndex < storage.length {
+            if storage.attribute(.latchCodeBlock, at: characterIndex, effectiveRange: nil) != nil { return rect }
+            let style = storage.attribute(.paragraphStyle, at: characterIndex, effectiveRange: nil) as? NSParagraphStyle
+            if style?.textBlocks.isEmpty == false { return rect }
+        }
+        rect.size.width = max(0, Self.proseMeasure - rect.minX)
+        return rect
+    }
+}

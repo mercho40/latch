@@ -81,5 +81,25 @@ final class TranscriptLayoutTests: XCTestCase {
         XCTAssertEqual(gaps, [ChatTranscriptView.rowSpacing, ChatTranscriptView.groupedRowSpacing,
                               ChatTranscriptView.groupedRowSpacing, ChatTranscriptView.rowSpacing])
     }
+
+    /// The row fills the pane so code and tables get the room; prose inside it keeps to a measure.
+    func testProseKeepsAMeasureWhileCodeAndTablesFillTheRow() throws {
+        func usedWidth(_ text: String) -> CGFloat {
+            let container = TranscriptTextContainer(size: NSSize(width: 1400, height: CGFloat.greatestFiniteMagnitude))
+            container.lineFragmentPadding = 0
+            container.limitsProse = true
+            let manager = TranscriptLayoutManager()
+            manager.addTextContainer(container)
+            let storage = NSTextStorage(attributedString: ChatMarkdown.render(text))
+            storage.addLayoutManager(manager)
+            manager.ensureLayout(for: container)
+            return manager.usedRect(for: container).width
+        }
+        let long = String(repeating: "word ", count: 120)
+        XCTAssertLessThanOrEqual(usedWidth(long), TranscriptTextContainer.proseMeasure)
+        XCTAssertGreaterThan(usedWidth(long), TranscriptTextContainer.proseMeasure - 60, "Prose should use the measure it has")
+        XCTAssertGreaterThan(usedWidth("```\n" + long + "\n```\n"), 1300, "A code line runs the width of the row")
+        XCTAssertGreaterThan(usedWidth("| a | b |\n| - | - |\n| 1 | 2 |\n"), 1300, "A table spans the row")
+    }
 }
 

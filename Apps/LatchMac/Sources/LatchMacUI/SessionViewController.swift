@@ -259,13 +259,20 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         for picker in [modelPicker, effortPicker, permissionModePicker] {
             // Three bezelled pop-ups in a row made the composer look like a form. Borderless, a
             // pop-up is its title and the system's own arrows, which is all the affordance it needs.
-            picker.controlSize = .regular
-            picker.font = .systemFont(ofSize: NSFont.systemFontSize)
             if #available(macOS 26.0, *) {
-                // Controls that float over content are what Liquid Glass is for; a capsule per picker.
-                picker.bezelStyle = .glass
-                picker.borderShape = .capsule
+                // The same control as the agent picker in the toolbar above it: large, glass, a
+                // capsule, one chevron. It stays a select-style pop-up underneath, because its menu
+                // belongs over the button down here, so the chevron is ours and the arrows are off.
+                // A pop-up's own glass bezel is a flat fill, not the clear, rimmed glass the toolbar
+                // control and Send get, so the capsule is a glass surface ComposerControlsView puts
+                // behind a borderless pop-up.
+                picker.controlSize = .large
+                picker.isBordered = false
+                (picker.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+                _ = PickerChevron(in: picker)
             } else {
+                picker.controlSize = .regular
+                picker.font = .systemFont(ofSize: NSFont.systemFontSize)
                 picker.isBordered = false
                 picker.contentTintColor = .secondaryLabelColor
             }
@@ -321,7 +328,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         cancel.image = NSImage(systemSymbolName: "stop.fill", accessibilityDescription: "Stop response")
         for button in [send, cancel] {
             button.imagePosition = .imageOnly
-            button.controlSize = .regular
+            button.controlSize = .large
         }
         send.setAccessibilityLabel("Send message")
         send.toolTip = "Send message (Return or ⌘ Return)"
@@ -1224,7 +1231,6 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         for picker in [modelPicker, effortPicker, permissionModePicker] {
             let bounds = picker.convert(picker.bounds, to: view)
             guard bounds.minX >= 0, bounds.maxX <= view.bounds.width,
-                  picker.font?.pointSize == NSFont.systemFontSize,
                   picker.frame.height >= picker.intrinsicContentSize.height,
                   picker.frame.height >= ComposerControlsView.controlHeight else {
                 throw SmokeError.failed("Configuration picker is clipped")
@@ -1291,3 +1297,26 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 }
 
 enum SmokeError: Error { case failed(String) }
+
+/// The single down chevron a pull-down shows, for a pop-up that has had its own arrows turned off.
+/// It never takes a click: the button underneath is the control.
+@MainActor
+private final class PickerChevron: NSImageView {
+    init(in button: NSPopUpButton) {
+        super.init(frame: .zero)
+        image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .bold))
+        contentTintColor = .labelColor
+        translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(false)
+        button.addSubview(self)
+        NSLayoutConstraint.activate([
+            trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+

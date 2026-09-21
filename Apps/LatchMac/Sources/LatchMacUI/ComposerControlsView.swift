@@ -18,15 +18,29 @@ final class ComposerControlsView: NSView {
         }
     }
 
-    static let controlHeight: CGFloat = 28
+    static let controlHeight: CGFloat = 36
     private let pickers: [Slot]
     private let actions: [NSButton]
     private let gap: CGFloat = 6
+    private var surfaces: [ObjectIdentifier: NSView] = [:]
+    /// The surface's padding around the pop-up it sits behind.
+    private static let surfaceLeading: CGFloat = 5
+    private static let surfaceTrailing: CGFloat = 12
 
     init(pickers: [Slot], actions: [NSButton]) {
         self.pickers = pickers
         self.actions = actions
         super.init(frame: .zero)
+        if #available(macOS 26.0, *) {
+            // Behind each picker, not around it: the pop-up stays a direct subview with a frame of
+            // its own, and the surface is decoration that a click passes through to it.
+            for slot in pickers {
+                let glass = NSGlassEffectView()
+                glass.cornerRadius = Self.controlHeight / 2
+                surfaces[ObjectIdentifier(slot.button)] = glass
+                addSubview(glass)
+            }
+        }
         for control in pickers.map(\.button) as [NSView] + actions { addSubview(control) }
         setContentCompressionResistancePriority(.required, for: .vertical)
         setContentHuggingPriority(.required, for: .vertical)
@@ -56,6 +70,30 @@ final class ComposerControlsView: NSView {
     override func layout() {
         super.layout()
         for (control, frame) in placements(width: bounds.width).items { control.frame = frame }
+        for slot in pickers {
+            guard let surface = surfaces[ObjectIdentifier(slot.button)] else { continue }
+            surface.isHidden = slot.button.isHidden
+            surface.frame = NSRect(x: slot.button.frame.minX - Self.surfaceLeading, y: slot.button.frame.minY,
+                                   width: slot.button.frame.width + Self.surfaceLeading + Self.surfaceTrailing,
+                                   height: slot.button.frame.height)
+        }
+    }
+
+    /// The capsule is the control as far as anyone clicking it is concerned, padding included.
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        for slot in pickers where !slot.button.isHidden && slot.button.isEnabled {
+            if surfaces[ObjectIdentifier(slot.button)]?.frame.contains(point) == true {
+                slot.button.performClick(nil)
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return surfaces.values.contains { $0 === hit } ? self : hit
     }
 
     /// A pop-up's intrinsic width is that of its longest item, which left "Opus 5" adrift in the
@@ -64,7 +102,9 @@ final class ComposerControlsView: NSView {
         let title = (button.titleOfSelectedItem ?? button.title) as NSString
         let font = button.font ?? .systemFont(ofSize: NSFont.systemFontSize)
         // Room for the arrows, and for a capsule's rounded ends where there is a bezel.
-        return ceil(title.size(withAttributes: [.font: font]).width) + (button.isBordered ? 44 : 30)
+        // The title, a gap, and either our one chevron or the system's pair of arrows.
+        let ownChevron = (button.cell as? NSPopUpButtonCell)?.arrowPosition == .noArrow
+        return ceil(title.size(withAttributes: [.font: font]).width) + (ownChevron ? 26 : 30)
     }
 
     private func placements(width: CGFloat) -> (items: [(NSView, NSRect)], height: CGFloat) {
@@ -74,9 +114,11 @@ final class ComposerControlsView: NSView {
         var x: CGFloat = 0
         var y: CGFloat = 0
         for slot in pickers where !slot.button.isHidden {
-            let size = min(width, max(slot.minimumWidth, min(slot.maximumWidth, Self.fittedWidth(of: slot.button))))
+            let padding = surfaces.isEmpty ? 0 : Self.surfaceLeading + Self.surfaceTrailing
+            let size = min(width, max(slot.minimumWidth, min(slot.maximumWidth, Self.fittedWidth(of: slot.button) + padding)))
             if x > 0 && x + size > width { x = 0; y += Self.controlHeight + gap }
-            items.append((slot.button, NSRect(x: x, y: y, width: size, height: Self.controlHeight)))
+            let leading = surfaces.isEmpty ? 0 : Self.surfaceLeading
+            items.append((slot.button, NSRect(x: x + leading, y: y, width: size - padding, height: Self.controlHeight)))
             x += size + gap
         }
         let visibleActions = actions.filter { !$0.isHidden }

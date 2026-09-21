@@ -121,3 +121,19 @@ swift test --package-path Packages/LatchServiceProtocol
 LATCH_LIVE_CODEX_TEST=1 swift test --package-path Packages/LatchAgentCore
 ```
 
+## Releasing
+
+Releases are built locally, because hosted CI runners cannot compile the app icon yet, and are ad-hoc signed: there is no Developer ID and no notarization.
+
+1. Set `MARKETING_VERSION` in both `Apps/LatchMac/Configuration/App.xcconfig` and `AgentService.xcconfig`, commit, and push `main`.
+2. Rehearse with `bash Scripts/release.sh --dry-run 0.1.0`. It runs the Release bundle verification and smoke test, archives the app with `ditto`, unpacks the archive again to check the signature survived, and leaves the zip, its `.sha256`, and the dSYMs in `.build/release/v0.1.0`.
+3. Publish with `bash Scripts/release.sh 0.1.0`. It refuses unless the tree is clean, `main` matches `origin/main`, the tag is new, and both xcconfigs carry the version; then it tags, pushes the tag, and creates the GitHub release with generated notes and the checksum.
+
+Do not mark a release as a pre-release: `Scripts/install.sh` follows GitHub's "latest release", which skips pre-releases. To test the installer without publishing, point it at a local copy of the release layout:
+
+```sh
+mkdir -p /tmp/apps /tmp/rel/download/v0.1.0 && cp .build/release/v0.1.0/Latch-0.1.0.zip* /tmp/rel/download/v0.1.0/
+LATCH_DOWNLOAD_BASE=file:///tmp/rel LATCH_VERSION=0.1.0 LATCH_INSTALL_DIR=/tmp/apps sh Scripts/install.sh
+```
+
+A copy installed that way shares the real session library in `~/Library/Application Support/Latch` if you launch it.

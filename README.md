@@ -7,7 +7,7 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
 <!-- TODO before going public: screenshot at docs/images/latch.png -->
 <!-- ![Latch](docs/images/latch.png) -->
 
-> **Early development.** Latch is pre-release: there are no signed builds yet, so today you build it from source. Expect bugs and breaking changes. Issues are welcome; please read [CONTRIBUTING.md](.github/CONTRIBUTING.md) before opening a pull request.
+> **Early development.** Latch is pre-release and there is no published release yet, so today you build it from source. Expect bugs and breaking changes. Issues are welcome; please read [CONTRIBUTING.md](.github/CONTRIBUTING.md) before opening a pull request.
 
 ## What works today
 
@@ -24,7 +24,7 @@ Latch's goal is a control surface that follows you: the agent keeps running on t
 
 Other known gaps:
 
-- No signed or notarized download, and no update mechanism.
+- Releases are ad-hoc signed, not notarized, and there is no update mechanism beyond running the installer again.
 - Agents stop when the app quits; the background service that would outlive it is not implemented.
 - If the app or its service is killed outright, running agent processes are not cleaned up.
 - Permission approval and model/effort/mode switching are covered by mock-agent tests and an opt-in live Codex test, but have not been validated across every provider.
@@ -37,7 +37,17 @@ Other known gaps:
 - Xcode 27. The packages and their tests also build with Xcode 26.6, which is what CI uses, but its `actool` fails on the app's Icon Composer icon, so the app bundle needs 27.
 - At least one ACP agent. For Codex, sign in with `codex login`; for Claude Code, set up your Claude login and Node.js 22+. First-time setup of either may download its ACP adapter through npm. OpenCode and fx use their installed commands and existing authentication.
 
-## Build and run
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mercho40/latch/main/Scripts/install.sh | sh
+```
+
+[The script](Scripts/install.sh) downloads the latest release, checks its SHA-256 and code signature, and puts `Latch.app` in `/Applications`; run it again to update. Until the first release is published it says so and exits.
+
+Latch is not notarized: it is signed ad hoc, without an Apple Developer ID, so macOS cannot tell you who built it. Installing with `curl` avoids the Gatekeeper prompt because `curl` does not quarantine what it downloads. If you download the zip from the [releases page](https://github.com/mercho40/latch/releases) in a browser instead, macOS will refuse to open it until you run `xattr -dr com.apple.quarantine /Applications/Latch.app` or allow it under System Settings → Privacy & Security. The checksum comes from the same release as the archive, so it detects a corrupted download, not a compromised one; if that is not enough assurance, build from source.
+
+## Build from source
 
 ```sh
 git clone https://github.com/mercho40/latch.git
@@ -73,7 +83,7 @@ swift test --package-path Apps/LatchMac
 | `Packages/LatchACP` | ACP client: JSON-RPC over stdio, process transport, sessions, and a command-line probe |
 | `Packages/LatchServiceProtocol` | Codable commands, events, and versioned envelopes between clients and the service |
 | `Packages/LatchAgentCore` | Runtime registry, the agent service, and its XPC adapter, host, client, and event hub |
-| `Scripts` | App bundle and cross-process XPC verification |
+| `Scripts` | Bundle and XPC verification, the release script, and the installer |
 | `docs` | [Using Latch](docs/using-latch.md) · [Architecture](docs/architecture.md) · [Building and testing](docs/building-and-testing.md) · [Roadmap](docs/roadmap.md) |
 
 There are no third-party dependencies.

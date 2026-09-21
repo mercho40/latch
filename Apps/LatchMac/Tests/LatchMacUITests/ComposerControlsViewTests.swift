@@ -10,7 +10,7 @@ final class ComposerControlsViewTests: XCTestCase {
             bar.setFrameSize(NSSize(width: width, height: bar.intrinsicContentSize.height))
             bar.layoutSubtreeIfNeeded()
             for control in controls {
-                XCTAssertGreaterThanOrEqual(control.frame.height, 36)
+                XCTAssertGreaterThanOrEqual(control.frame.height, ComposerControlsView.controlHeight)
                 XCTAssertGreaterThanOrEqual(control.frame.minX, 0)
                 XCTAssertLessThanOrEqual(control.frame.maxX, width)
                 XCTAssertLessThanOrEqual(control.frame.maxY, bar.bounds.height)
@@ -21,7 +21,7 @@ final class ComposerControlsViewTests: XCTestCase {
                 }
             }
             XCTAssertEqual(controls.last!.frame.maxX, width)
-            if width == 340 { XCTAssertGreaterThan(bar.bounds.height, 36) }
+            if width == 340 { XCTAssertGreaterThan(bar.bounds.height, ComposerControlsView.controlHeight) }
         }
     }
 
@@ -31,19 +31,21 @@ final class ComposerControlsViewTests: XCTestCase {
         bar.refreshLayout()
         bar.setFrameSize(NSSize(width: 440, height: bar.intrinsicContentSize.height))
         bar.layoutSubtreeIfNeeded()
-        XCTAssertEqual(bar.intrinsicContentSize.height, 36)
-        XCTAssertEqual(controls.last!.frame, NSRect(x: 404, y: 0, width: 36, height: 36))
+        XCTAssertEqual(bar.intrinsicContentSize.height, ComposerControlsView.controlHeight)
+        XCTAssertEqual(controls.last!.frame, NSRect(x: 440 - ComposerControlsView.controlHeight, y: 0, width: ComposerControlsView.controlHeight, height: ComposerControlsView.controlHeight))
     }
 
     @MainActor func testShortChoicesFitOneWideRowAndRetainNativeMenus() {
         let (bar, controls) = makeBar(longNames: false)
-        bar.setFrameSize(NSSize(width: 748, height: 36))
+        bar.setFrameSize(NSSize(width: 748, height: ComposerControlsView.controlHeight))
         bar.layoutSubtreeIfNeeded()
-        XCTAssertEqual(bar.intrinsicContentSize.height, 36)
+        XCTAssertEqual(bar.intrinsicContentSize.height, ComposerControlsView.controlHeight)
         for picker in controls.prefix(3).compactMap({ $0 as? NSPopUpButton }) {
             XCTAssertEqual(picker.numberOfItems, 2)
             XCTAssertEqual(picker.selectedItem?.title, "Default")
-            XCTAssertGreaterThanOrEqual(picker.frame.width, 96)
+            // As wide as the title it shows, not as wide as a form field.
+            XCTAssertGreaterThan(picker.frame.width, 50)
+            XCTAssertLessThan(picker.frame.width, 110)
         }
     }
 
@@ -59,7 +61,7 @@ final class ComposerControlsViewTests: XCTestCase {
         ]
         let send = NSButton(title: "Send", target: nil, action: nil)
         let bar = ComposerControlsView(pickers: pickers, actions: [send])
-        bar.setFrameSize(NSSize(width: 880, height: 36))
+        bar.setFrameSize(NSSize(width: 880, height: ComposerControlsView.controlHeight))
         bar.layoutSubtreeIfNeeded()
         XCTAssertEqual(bar.intrinsicContentSize.height, ComposerControlsView.controlHeight)
         XCTAssertEqual(send.frame.maxX, 880)

@@ -1,30 +1,18 @@
 import AppKit
 
-/// The Agents pane: every harness Latch can launch, what it needs, and whether the
-/// composer offers it. Install state, the custom command, and the executable browser all
-/// live here, so a session's chat surface carries none of that plumbing.
+/// The Agents pane: one row per harness Latch can launch, saying what state it is in, with a
+/// switch for whether the agent menu offers it. The custom agent's command is the only thing
+/// here that is typed. Everything a row does not need to say stays in its tooltip.
 @MainActor
-final class AgentsSettingsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class AgentsSettingsViewController: NSViewController, NSTextFieldDelegate {
     private let settings: AgentSettings
-    private let table = NSTableView()
-    private let scroll = NSScrollView()
-    private let listWell = NSBox()
     private var catalog: AgentCatalog
     /// Tests and smoke runs pin the environment; a real pane rescans the filesystem.
     private let injectedEnvironment: AgentLaunchEnvironment?
 
-    private let detailTitle = NSTextField(labelWithString: "")
-    private let detailBadge = NSTextField(labelWithString: "")
-    private let statusLabel = WrappingLabel(wrappingLabelWithString: "")
-    private let setupLabel = WrappingLabel(wrappingLabelWithString: "")
+    private var rows: [AgentPreset: AgentRowView] = [:]
     private let commandField = NSTextField(string: "")
-    private let browse = NSButton(title: "Choose Executable…", target: nil, action: nil)
-    private let copyCommand = NSButton(title: "Copy Command", target: nil, action: nil)
-    private let enableSwitch = NSSwitch()
-    private let enableLabel = NSTextField(labelWithString: "Offer in the agent menu")
-    private let commandCaption = NSTextField(labelWithString: "Command")
-    private let detail = NSStackView()
-
+    private let browse = NSButton(title: "Choose…", target: nil, action: nil)
     private var selected: AgentPreset = .fx
 
     /// Tests and smoke runs pass their own settings and a fixed environment so no check
@@ -41,23 +29,53 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
     required init?(coder: NSCoder) { fatalError("Not used") }
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 460))
-        buildList()
-        buildDetail()
+        let list = NSStackView()
+        list.orientation = .vertical
+        list.alignment = .leading
+        list.spacing = 0
+        for (index, preset) in AgentPreset.allCases.enumerated() {
+            if index > 0 { list.addArrangedSubview(Self.separator()) }
+            let row = AgentRowView { [weak self] enabled in self?.setEnabled(enabled, for: preset) }
+            rows[preset] = row
+            list.addArrangedSubview(row)
+        }
+        let group = Self.group(list)
+
+        commandField.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize(for: .regular), weight: .regular)
+        commandField.delegate = self
+        commandField.placeholderString = "agent acp"
+        commandField.setAccessibilityLabel("Custom ACP agent command")
+        commandField.toolTip = "Executable name or path and arguments. Quotes are supported; shell expansion is not."
+        browse.target = self
+        browse.action = #selector(chooseExecutable)
+        browse.bezelStyle = .rounded
+        browse.setContentHuggingPriority(.required, for: .horizontal)
+        let caption = NSTextField(labelWithString: "Custom agent command")
+        let commandRow = NSStackView(views: [commandField, browse])
+        commandRow.orientation = .horizontal
+        commandRow.spacing = 8
+
+        let content = NSStackView(views: [group, caption, commandRow])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 8
+        content.setCustomSpacing(20, after: group)
+        content.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        for view in list.arrangedSubviews { view.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true }
+        for view in [group, commandRow] { view.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -40).isActive = true }
+
+        view = NSView()
+        view.addSubview(content)
         NSLayoutConstraint.activate([
-            listWell.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            listWell.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
-            listWell.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
-            listWell.widthAnchor.constraint(equalToConstant: 232),
-            detail.leadingAnchor.constraint(equalTo: listWell.trailingAnchor, constant: 20),
-            detail.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            detail.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
-            detail.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -20),
+            content.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            content.topAnchor.constraint(equalTo: view.topAnchor),
+            content.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            view.widthAnchor.constraint(equalToConstant: 460),
         ])
         selected = settings.suggested(in: catalog)
-        table.reloadData()
-        selectRow(for: selected)
-        refreshDetail()
+        refresh()
     }
 
     /// Opening the pane rescans: installing a CLI and coming back here is the whole
@@ -67,96 +85,23 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
         rescan()
     }
 
-    private func buildList() {
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("agent"))
-        column.resizingMask = .autoresizingMask
-        table.addTableColumn(column)
-        table.headerView = nil
-        table.style = .inset
-        table.rowHeight = 48
-        table.usesAutomaticRowHeights = false
-        table.allowsEmptySelection = false
-        table.dataSource = self
-        table.delegate = self
-        table.setAccessibilityLabel("Agents")
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        // Inset rows have rounded selections; a square bezel around them fought that. The list sits
-        // in a rounded well instead, its radius the row's plus the inset between them.
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        table.backgroundColor = .clear
-        listWell.boxType = .custom
-        listWell.titlePosition = .noTitle
-        listWell.cornerRadius = 10
-        listWell.borderWidth = 1
-        listWell.borderColor = .separatorColor
-        listWell.fillColor = .quaternarySystemFill
-        listWell.contentViewMargins = NSSize(width: 0, height: 4)
-        listWell.contentView = scroll
-        listWell.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(listWell)
+    /// Opening Settings is not a request to flip the first switch, so nothing starts with the focus ring.
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(nil)
     }
 
-    private func buildDetail() {
-        detailTitle.font = .systemFont(ofSize: 17, weight: .semibold)
-        detailBadge.font = .systemFont(ofSize: 11, weight: .medium)
-        detailBadge.textColor = .secondaryLabelColor
-        for label in [statusLabel, setupLabel] {
-            label.font = .systemFont(ofSize: 11)
-            label.textColor = .secondaryLabelColor
-            label.maximumNumberOfLines = 0
-            label.setContentCompressionResistancePriority(.required, for: .vertical)
-            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        }
-        commandCaption.font = .systemFont(ofSize: 11, weight: .medium)
-        commandField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        commandField.delegate = self
-        commandField.placeholderString = "agent acp"
-        commandField.setAccessibilityLabel("ACP agent command")
-        commandField.toolTip = "Executable name or path and arguments. Quotes are supported; shell expansion is not."
-        browse.target = self
-        browse.action = #selector(chooseExecutable)
-        browse.bezelStyle = .rounded
-        browse.controlSize = .small
-        copyCommand.target = self
-        copyCommand.action = #selector(copyLaunchCommand)
-        copyCommand.bezelStyle = .rounded
-        copyCommand.controlSize = .small
-        enableSwitch.target = self
-        enableSwitch.action = #selector(toggleEnabled)
-        enableSwitch.setAccessibilityLabel("Offer in the agent menu")
-        enableLabel.font = .systemFont(ofSize: 12)
-
-        let heading = NSStackView(views: [detailTitle, detailBadge, NSView()])
-        heading.orientation = .horizontal
-        heading.alignment = .firstBaseline
-        heading.spacing = 8
-        let toggleRow = NSStackView(views: [enableSwitch, enableLabel, NSView()])
-        toggleRow.orientation = .horizontal
-        toggleRow.alignment = .centerY
-        toggleRow.spacing = 8
-        let buttonRow = NSStackView(views: [browse, copyCommand, NSView()])
-        buttonRow.orientation = .horizontal
-        buttonRow.alignment = .centerY
-        buttonRow.spacing = 8
-
-        detail.orientation = .vertical
-        detail.alignment = .leading
-        detail.spacing = 10
-        detail.translatesAutoresizingMaskIntoConstraints = false
-        for row in [heading, statusLabel, toggleRow, separator(), commandCaption, commandField, setupLabel, buttonRow] as [NSView] {
-            detail.addArrangedSubview(row)
-        }
-        view.addSubview(detail)
-        for row in detail.arrangedSubviews {
-            row.translatesAutoresizingMaskIntoConstraints = false
-            row.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true
-        }
+    /// The system's own grouped-box look, which follows the appearance and the OS release.
+    private static func group(_ content: NSView) -> NSBox {
+        let box = NSBox()
+        box.boxType = .primary
+        box.titlePosition = .noTitle
+        box.contentViewMargins = NSSize(width: 0, height: 0)
+        box.contentView = content
+        return box
     }
 
-    private func separator() -> NSBox {
+    private static func separator() -> NSBox {
         let box = NSBox()
         box.boxType = .separator
         return box
@@ -167,107 +112,36 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
     private func rescan() {
         catalog = AgentCatalog(environment: injectedEnvironment ?? AgentLaunchEnvironment(),
                                customCommand: settings.customCommand)
-        table.reloadData()
-        selectRow(for: selected)
-        refreshDetail()
+        refresh()
     }
 
-    private func selectRow(for preset: AgentPreset) {
-        guard let index = AgentPreset.allCases.firstIndex(of: preset) else { return }
-        table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-    }
-
-    func numberOfRows(in tableView: NSTableView) -> Int { AgentPreset.allCases.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let status = catalog.status(for: AgentPreset.allCases[row])
-        let identifier = NSUserInterfaceItemIdentifier("agentRow")
-        let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? AgentRowView ?? {
-            let cell = AgentRowView()
-            cell.identifier = identifier
-            return cell
-        }()
-        cell.configure(status: status, enabled: settings.isEnabled(status.preset))
-        return cell
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard table.selectedRow >= 0 else { return }
-        selected = AgentPreset.allCases[table.selectedRow]
-        refreshDetail()
-    }
-
-    private func refreshDetail() {
-        let status = catalog.status(for: selected)
-        detailTitle.stringValue = status.title
-        detailBadge.stringValue = status.readiness.badge
-        switch status.readiness {
-        case let .installed(path):
-            statusLabel.stringValue = path
-            statusLabel.textColor = .secondaryLabelColor
-        case .installsOnFirstUse:
-            statusLabel.stringValue = "Downloaded the first time a session connects. Node.js and npm are already in place."
-            statusLabel.textColor = .secondaryLabelColor
-        case let .unavailable(problem):
-            statusLabel.stringValue = problem
-            statusLabel.textColor = .systemRed
-        case let .unconfigured(detail):
-            // Nothing is broken here, so this is not an error colour.
-            statusLabel.stringValue = detail
-            statusLabel.textColor = .secondaryLabelColor
+    private func refresh() {
+        for (preset, row) in rows {
+            row.configure(status: catalog.status(for: preset), enabled: settings.isEnabled(preset))
         }
-        statusLabel.toolTip = statusLabel.stringValue
-        enableSwitch.state = settings.isEnabled(selected) ? .on : .off
-        let isCustom = selected == .custom
-        commandField.isEditable = isCustom
-        commandField.isSelectable = true
-        commandField.stringValue = isCustom ? settings.customCommand : status.command
-        commandField.textColor = isCustom ? .labelColor : .secondaryLabelColor
-        commandCaption.stringValue = isCustom ? "Command" : "Launch command"
-        browse.isHidden = !isCustom
-        copyCommand.isEnabled = !status.command.isEmpty
-        setupLabel.stringValue = status.guidance ?? ""
-        setupLabel.isHidden = status.guidance == nil
+        if commandField.currentEditor() == nil { commandField.stringValue = settings.customCommand }
     }
 
     // MARK: Actions
 
-    @objc private func toggleEnabled() {
-        settings.setEnabled(enableSwitch.state == .on, for: selected)
-        table.reloadData()
-        selectRow(for: selected)
+    private func setEnabled(_ enabled: Bool, for preset: AgentPreset) {
+        settings.setEnabled(enabled, for: preset)
+        refresh()
     }
 
-    /// Drives the real row selection so a test exercises the production path.
-    func smokeSelect(_ preset: AgentPreset) {
-        selectRow(for: preset)
-        // Selecting a row that is already selected posts no notification.
-        selected = preset
-        refreshDetail()
-    }
+    /// Names the row the next `smokeSetEnabled` acts on.
+    func smokeSelect(_ preset: AgentPreset) { selected = preset }
 
-    /// Clicks the real switch, which both flips it and fires its action, exactly as a
-    /// click does. Setting the state first would make the click flip it back.
-    func smokeSetEnabled(_ enabled: Bool) {
-        guard (enableSwitch.state == .on) != enabled else { return }
-        enableSwitch.performClick(nil)
-    }
-
-    @objc private func copyLaunchCommand() {
-        let command = catalog.status(for: selected).command
-        guard !command.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(command, forType: .string)
-    }
+    /// Clicks the real switch, which both flips it and fires its action, exactly as a click does.
+    func smokeSetEnabled(_ enabled: Bool) { rows[selected]?.smokeSetEnabled(enabled) }
 
     func controlTextDidEndEditing(_ obj: Notification) {
-        guard selected == .custom else { return }
         settings.setCustomCommand(commandField.stringValue)
         rescan()
     }
 
     @objc private func chooseExecutable() {
-        guard let window = view.window, selected == .custom else { return }
+        guard let window = view.window else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -278,41 +152,46 @@ final class AgentsSettingsViewController: NSViewController, NSTableViewDataSourc
             let arguments = (try? AgentCommand(self.settings.customCommand))?.arguments ?? []
             let command = ([url.path] + arguments).map(AgentCommand.quotedArgument).joined(separator: " ")
             self.settings.setCustomCommand(command)
+            self.commandField.abortEditing()
             self.rescan()
         }
     }
 }
 
-/// One agent in the list: name, what state it is in, and whether the composer offers it.
+/// One agent: its name, one line about its state, and whether the agent menu offers it.
 @MainActor
-private final class AgentRowView: NSTableCellView {
+private final class AgentRowView: NSView {
     private let name = NSTextField(labelWithString: "")
-    private let detail = NSTextField(labelWithString: "")
-    private let dot = NSImageView()
+    private let detail = WrappingLabel(wrappingLabelWithString: "")
+    private let toggle = NSSwitch()
+    private let onToggle: (Bool) -> Void
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        name.font = .systemFont(ofSize: 12, weight: .medium)
-        name.lineBreakMode = .byTruncatingTail
-        detail.font = .systemFont(ofSize: 10)
+    init(onToggle: @escaping (Bool) -> Void) {
+        self.onToggle = onToggle
+        super.init(frame: .zero)
+        detail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         detail.textColor = .secondaryLabelColor
-        detail.lineBreakMode = .byTruncatingTail
-        dot.symbolConfiguration = .init(pointSize: 7, weight: .regular)
-        dot.setContentHuggingPriority(.required, for: .horizontal)
-        for view in [dot, name, detail] as [NSView] {
+        detail.maximumNumberOfLines = 0
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        toggle.controlSize = .small
+        toggle.target = self
+        toggle.action = #selector(toggled)
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+        toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
+        for view in [name, detail, toggle] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        textField = name
         NSLayoutConstraint.activate([
-            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            dot.centerYAnchor.constraint(equalTo: name.centerYAnchor),
-            name.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 7),
-            name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
-            name.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            name.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            name.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -12),
             detail.leadingAnchor.constraint(equalTo: name.leadingAnchor),
-            detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
             detail.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 2),
+            detail.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -12),
+            detail.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
+            toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            toggle.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -320,16 +199,22 @@ private final class AgentRowView: NSTableCellView {
 
     func configure(status: AgentStatus, enabled: Bool) {
         name.stringValue = status.title
-        // A disabled agent still reports its real state; it is simply not offered.
-        detail.stringValue = enabled ? status.readiness.badge : "Not offered"
-        let tint: NSColor = switch status.readiness {
-        case .installed: .systemGreen
-        case .installsOnFirstUse: .systemTeal
-        case .unavailable, .unconfigured: .tertiaryLabelColor
-        }
-        dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)
-        dot.contentTintColor = enabled ? tint : .quaternaryLabelColor
-        name.textColor = enabled ? .labelColor : .secondaryLabelColor
+        // The line says what the reader can act on: what is missing, or that nothing is.
+        detail.stringValue = status.readiness.problem ?? status.readiness.badge
+        toggle.state = enabled ? .on : .off
+        toggle.setAccessibilityLabel("Offer \(status.title) in the agent menu")
+        // Where it was found and what is left to do are there for whoever looks, not for everyone.
+        var tip: [String] = []
+        if case let .installed(path) = status.readiness { tip.append(path) }
+        if let guidance = status.guidance { tip.append(guidance) }
+        toolTip = tip.isEmpty ? nil : tip.joined(separator: "\n")
         setAccessibilityLabel("\(status.title), \(detail.stringValue)")
+    }
+
+    @objc private func toggled() { onToggle(toggle.state == .on) }
+
+    func smokeSetEnabled(_ enabled: Bool) {
+        guard (toggle.state == .on) != enabled else { return }
+        toggle.performClick(nil)
     }
 }

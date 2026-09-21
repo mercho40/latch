@@ -25,6 +25,8 @@ final class SettingsWindowController: NSWindowController {
         // The tab controller titles the window when a tab is selected, but its first selection
         // happens before it has a window, which left the title bar blank.
         window.title = item.label
+        // A settings window is as large as its pane, not a fixed sheet with a pane floating in it.
+        window.setContentSize(tabs.view.fittingSize)
         window.center()
         window.setFrameAutosaveName("LatchSettingsWindow")
     }

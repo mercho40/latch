@@ -15,7 +15,7 @@ final class ChatTranscriptView: NSView {
 
     private let document = TranscriptDocumentView()
     private let status = NSTextField(wrappingLabelWithString: "")
-    private let jump = NSButton(title: "Jump to Latest", target: nil, action: nil)
+    private let jump = FloatingRoundButton(symbol: "arrow.down", label: "Jump to Latest")
     private var rows: [UUID: TranscriptMessageView] = [:]
     private var order: [UUID] = []
     private var working = false
@@ -41,7 +41,6 @@ final class ChatTranscriptView: NSView {
         status.font = .systemFont(ofSize: 13)
         status.textColor = .secondaryLabelColor
         document.addSubview(status)
-        jump.bezelStyle = .rounded
         jump.target = self
         jump.action = #selector(jumpToLatest)
         jump.isHidden = true
@@ -173,7 +172,7 @@ final class ChatTranscriptView: NSView {
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: followsBottom ? bottom : min(bottom, max(0, restored))))
         scrollView.reflectScrolledClipView(scrollView.contentView)
         jump.sizeToFit()
-        jump.frame.origin = NSPoint(x: max(0, (bounds.width - jump.frame.width) / 2), y: max(0, bounds.height - jump.frame.height - 8))
+        jump.frame.origin = NSPoint(x: max(0, (bounds.width - jump.frame.width) / 2), y: max(0, bounds.height - jump.frame.height - 12))
         jump.isHidden = followsBottom || bottom == 0
     }
 
@@ -831,5 +830,48 @@ private final class TranscriptTextView: NSTextView {
     @objc private func copySource() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(source?() ?? "", forType: .string)
+    }
+}
+
+/// A round button that floats over content, the way Messages returns to the newest message. The
+/// wide labelled button it replaces covered the text it was about to uncover. It draws its own
+/// disc because a system bezel has no surface of its own here, and an arrow with nothing behind
+/// it is lost against a transcript; the shadow, not a heavier border, is what lifts it.
+@MainActor
+final class FloatingRoundButton: NSButton {
+    static let diameter: CGFloat = 30
+
+    init(symbol: String, label: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.diameter, height: Self.diameter))
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
+        imagePosition = .imageOnly
+        isBordered = false
+        contentTintColor = .secondaryLabelColor
+        toolTip = label
+        setAccessibilityLabel(label)
+        wantsLayer = true
+        shadow = {
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.25)
+            shadow.shadowBlurRadius = 6
+            shadow.shadowOffset = NSSize(width: 0, height: -1)
+            return shadow
+        }()
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: Self.diameter, height: Self.diameter) }
+    override func sizeToFit() { setFrameSize(intrinsicContentSize) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let disc = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
+        NSColor.controlBackgroundColor.setFill()
+        disc.fill()
+        NSColor.separatorColor.setStroke()
+        disc.lineWidth = 1
+        disc.stroke()
+        super.draw(dirtyRect)
     }
 }

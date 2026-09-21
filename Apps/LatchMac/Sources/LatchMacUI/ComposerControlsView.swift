@@ -10,17 +10,18 @@ final class ComposerControlsView: NSView {
         let minimumWidth: CGFloat
         let maximumWidth: CGFloat
 
-        init(_ button: NSPopUpButton, minimumWidth: CGFloat = 140, maximumWidth: CGFloat = 220) {
+        /// A picker is as wide as its title by default; a minimum only made short titles look lost.
+        init(_ button: NSPopUpButton, minimumWidth: CGFloat = 0, maximumWidth: CGFloat = 220) {
             self.button = button
             self.minimumWidth = minimumWidth
             self.maximumWidth = maximumWidth
         }
     }
 
-    static let controlHeight: CGFloat = 36
+    static let controlHeight: CGFloat = 28
     private let pickers: [Slot]
     private let actions: [NSButton]
-    private let gap: CGFloat = 8
+    private let gap: CGFloat = 4
 
     init(pickers: [Slot], actions: [NSButton]) {
         self.pickers = pickers
@@ -57,6 +58,14 @@ final class ComposerControlsView: NSView {
         for (control, frame) in placements(width: bounds.width).items { control.frame = frame }
     }
 
+    /// A pop-up's intrinsic width is that of its longest item, which left "Opus 5" adrift in the
+    /// space "Claude Sonnet 4.5 (1M context)" would need. It takes the width of what it shows.
+    private static func fittedWidth(of button: NSPopUpButton) -> CGFloat {
+        let title = (button.titleOfSelectedItem ?? button.title) as NSString
+        let font = button.font ?? .systemFont(ofSize: NSFont.systemFontSize)
+        return ceil(title.size(withAttributes: [.font: font]).width) + 30
+    }
+
     private func placements(width: CGFloat) -> (items: [(NSView, NSRect)], height: CGFloat) {
         // Before Auto Layout assigns a width, report the wide, single-row size.
         let width = width > 0 ? width : 768
@@ -64,8 +73,7 @@ final class ComposerControlsView: NSView {
         var x: CGFloat = 0
         var y: CGFloat = 0
         for slot in pickers where !slot.button.isHidden {
-            let size = min(width, max(slot.minimumWidth,
-                                      min(slot.maximumWidth, slot.button.intrinsicContentSize.width + 8)))
+            let size = min(width, max(slot.minimumWidth, min(slot.maximumWidth, Self.fittedWidth(of: slot.button))))
             if x > 0 && x + size > width { x = 0; y += Self.controlHeight + gap }
             items.append((slot.button, NSRect(x: x, y: y, width: size, height: Self.controlHeight)))
             x += size + gap

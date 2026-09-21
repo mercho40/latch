@@ -156,7 +156,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// session and then locked, so it lives in the window's toolbar, not in the composer.
     private lazy var composerControls = ComposerControlsView(
         pickers: [.init(modelPicker, maximumWidth: 260),
-                  .init(effortPicker, minimumWidth: 96, maximumWidth: 150),
+                  .init(effortPicker, maximumWidth: 150),
                   .init(permissionModePicker)],
         actions: [cancel, send])
     private var renderedConfiguration: SessionConfiguration?
@@ -257,10 +257,12 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             composerContent.bottomAnchor.constraint(equalTo: composerBox.bottomAnchor, constant: -8),
         ])
         for picker in [modelPicker, effortPicker, permissionModePicker] {
-            picker.controlSize = .large
-            picker.bezelStyle = .rounded
-            picker.font = .systemFont(ofSize: 14)
-            picker.menu?.font = .systemFont(ofSize: 14)
+            // Three bezelled pop-ups in a row made the composer look like a form. Borderless, a
+            // pop-up is its title and the system's own arrows, which is all the affordance it needs.
+            picker.controlSize = .regular
+            picker.isBordered = false
+            picker.font = .systemFont(ofSize: NSFont.systemFontSize)
+            picker.contentTintColor = .secondaryLabelColor
             picker.target = self
             picker.cell?.lineBreakMode = .byTruncatingTail
             picker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -297,17 +299,17 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
         send.target = self
         send.action = #selector(sendPrompt)
-        send.bezelStyle = .rounded
+        send.bezelStyle = .circular
         send.keyEquivalent = "\r"
         send.keyEquivalentModifierMask = [.command]
         cancel.target = self
         cancel.action = #selector(cancelPrompt)
-        cancel.bezelStyle = .rounded
+        cancel.bezelStyle = .circular
         send.image = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "Send message")
         cancel.image = NSImage(systemSymbolName: "stop.fill", accessibilityDescription: "Stop response")
         for button in [send, cancel] {
             button.imagePosition = .imageOnly
-            button.controlSize = .large
+            button.controlSize = .regular
         }
         send.setAccessibilityLabel("Send message")
         send.toolTip = "Send message (Return or ⌘ Return)"
@@ -360,6 +362,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         refreshPickers()
         send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let preparing = operation != nil || model.phase == .connecting
+        // A forced bezel colour ignores the disabled state, so a button that could not send looked ready to.
+        send.bezelColor = send.isEnabled ? .controlAccentColor : nil
         cancel.isEnabled = canStop
         cancel.isHidden = !preparing && model.phase != .prompting
         composerControls.refreshLayout()
@@ -1208,7 +1212,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         for picker in [modelPicker, effortPicker, permissionModePicker] {
             let bounds = picker.convert(picker.bounds, to: view)
             guard bounds.minX >= 0, bounds.maxX <= view.bounds.width,
-                  picker.controlSize == .large, picker.font?.pointSize == 14,
+                  !picker.isBordered, picker.font?.pointSize == NSFont.systemFontSize,
                   picker.frame.height >= picker.intrinsicContentSize.height,
                   picker.frame.height >= ComposerControlsView.controlHeight else {
                 throw SmokeError.failed("Configuration picker is clipped")

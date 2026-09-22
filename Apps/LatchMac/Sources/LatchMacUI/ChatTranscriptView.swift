@@ -28,20 +28,31 @@ final class ChatTranscriptView: NSView {
 
     override var isFlipped: Bool { true }
 
-    /// An opacity ramp at each end of the scroll view, so rows fade into the toolbar above and, under
-    /// the floating composer, into the page below, where the composer's glass blurs what is left of
-    /// them. It is a layer mask on the scroll view, so the text and its layout never know.
     /// Rows dissolve into the toolbar: an opacity ramp over the top of the scroll view. The bottom is
-    /// not faded, because there the rows pass under the composer and are blurred, not removed.
+    /// not faded, because there the rows pass under the composer and are blurred, not removed. The
+    /// scroller's strip is masked fully opaque, so the scroll bar itself never fades.
     private func updateEdgeMask() {
         scrollView.wantsLayer = true
         guard let layer = scrollView.layer else { return }
-        if layer.mask !== edgeMask { layer.mask = edgeMask }
+        if layer.mask !== maskContainer {
+            maskContainer.addSublayer(edgeMask)
+            scrollerStrip.backgroundColor = NSColor.black.cgColor
+            maskContainer.addSublayer(scrollerStrip)
+            layer.mask = maskContainer
+        }
         let height = max(1, scrollView.bounds.height)
         let fadeTop = findBar.isHidden ? Self.topFade / height : 0
+        let strip = scrollerStripWidth
+        // The scroller stops above the composer instead of running under the glass.
+        // Only on a change: setting it retiles the scroll view, and this runs on every layout.
+        if abs(scrollView.scrollerInsets.bottom - bottomOverlay) > 0.5 {
+            scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomOverlay, right: 0)
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        edgeMask.frame = scrollView.bounds
+        maskContainer.frame = scrollView.bounds
+        edgeMask.frame = NSRect(x: 0, y: 0, width: max(0, scrollView.bounds.width - strip), height: scrollView.bounds.height)
+        scrollerStrip.frame = NSRect(x: scrollView.bounds.width - strip, y: 0, width: strip, height: scrollView.bounds.height)
         // The scroll view's layer sits in a flipped hierarchy, so which end of the gradient is the
         // top depends on the layer, not on intuition.
         if layer.contentsAreFlipped() {
@@ -154,9 +165,16 @@ final class ChatTranscriptView: NSView {
     /// Rows dissolve into the toolbar over this height, and into the page over the overlay.
     static let topFade: CGFloat = 20
     private let edgeMask = CAGradientLayer()
+    private let scrollerStrip = CALayer()
+    private let maskContainer = CALayer()
+    /// The vertical scroller's thickness, which the edge effects leave alone.
+    private var scrollerStripWidth: CGFloat {
+        guard let scroller = scrollView.verticalScroller else { return 0 }
+        return type(of: scroller).scrollerWidth(for: scroller.controlSize, scrollerStyle: scrollView.scrollerStyle)
+    }
     /// Behind the composer the rows are blurred, more so toward the window's edge, the way a
     /// messaging app lets a conversation run under its input bar.
-    private let bottomBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 72)
+    private let bottomBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 24)
     /// Under the toolbar the rows blur as well as fade, so they leave the view rather than being cut.
     private let topBlur = EdgeBlurView(opaqueEdge: .top, lead: 30)
 
@@ -219,10 +237,11 @@ final class ChatTranscriptView: NSView {
         updateEdgeMask()
         // From a little above the composer to the bottom edge, so the blur starts before the glass does.
         topBlur.isHidden = !findBar.isHidden
-        topBlur.frame = NSRect(x: 0, y: scrollView.frame.minY, width: bounds.width, height: 36)
+        let bandWidth = max(0, bounds.width - scrollerStripWidth)
+        topBlur.frame = NSRect(x: 0, y: scrollView.frame.minY, width: bandWidth, height: 36)
         let blurHeight = bottomOverlay > 0 ? bottomOverlay + bottomBlur.lead : 0
         bottomBlur.isHidden = blurHeight == 0
-        bottomBlur.frame = NSRect(x: 0, y: bounds.height - blurHeight, width: bounds.width, height: blurHeight)
+        bottomBlur.frame = NSRect(x: 0, y: bounds.height - blurHeight, width: bandWidth, height: blurHeight)
         jump.isHidden = followsBottom || bottom == 0
     }
 

@@ -814,6 +814,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             guard !Task.isCancelled, !shuttingDown, operation == token,
                   model.phase == .ready else { return }
             prompt.string = ""
+            // Its recorded edits point into the draft that just left; undoing one against
+            // the empty field corrupts the text system.
+            composerUndo.removeAllActions()
             if sessionTitle == "New Session" {
                 let firstLine = draft.split(whereSeparator: \.isNewline).first.map(String.init) ?? draft
                 sessionTitle = String(firstLine.trimmingCharacters(in: .whitespaces).prefix(60))

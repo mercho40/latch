@@ -1,4 +1,5 @@
 import AppKit
+import LatchACP
 
 /// One ACP session: agent selection, settings, transcript, and composer.
 /// The workspace is fixed at creation; the sidebar owns the list of sessions.
@@ -166,6 +167,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     let conversation = ChatTranscriptView(frame: .zero)
     /// A session with nothing in it yet opens on its workspace, not on an empty page.
     private let emptyHeading = NSTextField(labelWithString: "")
+    private let commandMenu = SlashCommandMenu()
+    /// Escape closes the menu for this draft only; typing on, or starting over, opens it again.
+    private var dismissedCommandDraft: String?
     private let prompt = ChatInputView(frame: .zero)
     private let composer = ChatComposerScrollView(frame: .zero)
     private let send = NSButton(title: "Send", target: nil, action: nil)
@@ -317,6 +321,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         composer.drawsBackground = false
         prompt.drawsBackground = false
         prompt.onSubmit = { [weak self] in self?.sendPrompt() }
+        prompt.onMenuKey = { [weak self] key in self?.handleCommandMenuKey(key) ?? false }
+        commandMenu.onAccept = { [weak self] command in self?.acceptCommand(command) }
         prompt.font = .systemFont(ofSize: 14)
         prompt.textContainerInset = NSSize(width: 8, height: 8)
         prompt.isRichText = false
@@ -407,6 +413,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             emptyHeading.centerXAnchor.constraint(equalTo: conversation.centerXAnchor),
             emptyHeading.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: ChatTranscriptView.horizontalInset),
         ])
+
+        // Over the transcript and the heading, attached to the composer it belongs to.
+        commandMenu.isHidden = true
+        commandMenu.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(commandMenu, positioned: .above, relativeTo: composerContainer)
+        NSLayoutConstraint.activate([
+            commandMenu.leadingAnchor.constraint(equalTo: composerBox.leadingAnchor, constant: 12),
+            commandMenu.trailingAnchor.constraint(equalTo: composerBox.trailingAnchor, constant: -12),
+            commandMenu.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -8),
+        ])
     }
 
     /// Tells the transcript how much of its end the composer covers, which changes as a draft grows.
@@ -450,8 +466,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         cancel.isHidden = !preparing && model.phase != .prompting
         composerControls.refreshLayout()
         prompt.placeholder = readOnlyArchive ? "This conversation is read-only" : "Message \(selectedAgent.title)…"
-        // A banner is the more important thing on an empty page, so the heading yields to it.
+        refreshCommandMenu()
+        // A banner is the more important thing on an empty page, so the heading yields to it,
+        // and to the command menu, whose glass it would otherwise show through.
         emptyHeading.isHidden = !model.messages.isEmpty || model.phase == .prompting || !bannerRow.isHidden
+            || !commandMenu.isHidden
         prompt.needsDisplay = true
         composer.refreshHeight()
         // State transitions must show their final text immediately, even when a
@@ -677,6 +696,53 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     func textDidChange(_ notification: Notification) { refresh(); onChange?() }
 
+    // MARK: Slash commands
+
+    /// The query while the draft is a bare `/query`: one token, nothing after it yet.
+    private var commandQuery: String? {
+        let draft = prompt.string
+        guard draft.hasPrefix("/"), !draft.contains(where: \.isWhitespace) else { return nil }
+        return String(draft.dropFirst())
+    }
+
+    private func refreshCommandMenu() {
+        let draft = prompt.string
+        if dismissedCommandDraft != nil, !draft.hasPrefix("/") { dismissedCommandDraft = nil }
+        let open = prompt.isEditable && !model.commands.isEmpty && dismissedCommandDraft != draft
+            && commandQuery.map { commandMenu.show(model.commands, query: $0) } == true
+        commandMenu.isHidden = !open
+        // Once a command is chosen, what it expects next shows after it until typing starts.
+        let chosen = draft.hasPrefix("/") && draft.hasSuffix(" ") && draft.dropFirst().dropLast().allSatisfy { !$0.isWhitespace }
+            ? model.commands.first { "/\($0.name) " == draft } : nil
+        prompt.inputHint = chosen?.inputHint
+    }
+
+    private func handleCommandMenuKey(_ key: ChatInputView.MenuKey) -> Bool {
+        guard !commandMenu.isHidden else { return false }
+        switch key {
+        case .up: commandMenu.moveSelection(by: -1)
+        case .down: commandMenu.moveSelection(by: 1)
+        case .accept:
+            guard let command = commandMenu.selectedCommand else { return false }
+            acceptCommand(command)
+        case .dismiss:
+            dismissedCommandDraft = prompt.string
+            refreshCommandMenu()
+        }
+        return true
+    }
+
+    /// Replaces the draft through the text system, so undo returns to the typed query.
+    private func acceptCommand(_ command: ACPAvailableCommand) {
+        let whole = NSRange(location: 0, length: (prompt.string as NSString).length)
+        let replacement = "/\(command.name) "
+        guard prompt.shouldChangeText(in: whole, replacementString: replacement) else { return }
+        prompt.replaceCharacters(in: whole, with: replacement)
+        prompt.didChangeText()
+        prompt.setSelectedRange(NSRange(location: (replacement as NSString).length, length: 0))
+        view.window?.makeFirstResponder(prompt)
+    }
+
     func undoManager(for view: NSTextView) -> UndoManager? { view === prompt ? composerUndo : nil }
 
     /// Settings changed the offered agents or the custom command. A connected session keeps
@@ -879,6 +945,68 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     /// Phase one. Exercises actual AppKit controls without a model provider, file picker, or
     /// UI scripting permissions. The caller creates this session with `fixtureHome` as its workspace.
+    /// The agent sends its commands just before its session reply, on the event stream, so
+    /// they may land either side of it; either way they must arrive. Keys go through the
+    /// field, the way typing does.
+    private func smokeTestCommandMenu() async throws {
+        func key(_ code: UInt16, _ characters: String) {
+            prompt.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: view.window!.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!)
+        }
+        func type(_ text: String) {
+            prompt.insertText(text, replacementRange: prompt.selectedRange())
+        }
+        try await wait { !self.model.commands.isEmpty }
+        guard model.commands.map(\.name) == ["review", "compact", "init"] else {
+            throw SmokeError.failed("Commands sent with the session reply were lost")
+        }
+        prompt.string = ""
+        refresh()
+        type("/")
+        guard !commandMenu.isHidden, commandMenu.matches.count == 3, commandMenu.selectedCommand?.name == "review" else {
+            throw SmokeError.failed("A bare slash must list every command")
+        }
+        type("c")
+        guard commandMenu.matches.first?.name == "compact", commandMenu.selectedCommand?.name == "compact" else {
+            throw SmokeError.failed("The command menu did not filter by name")
+        }
+        prompt.string = ""
+        type("/")
+        key(125, String(UnicodeScalar(NSDownArrowFunctionKey)!))
+        key(125, String(UnicodeScalar(NSDownArrowFunctionKey)!))
+        key(126, String(UnicodeScalar(NSUpArrowFunctionKey)!))
+        guard commandMenu.selectedCommand?.name == "compact" else { throw SmokeError.failed("Arrows did not move the command selection") }
+        key(53, "\u{1b}")
+        guard commandMenu.isHidden, prompt.string == "/" else { throw SmokeError.failed("Escape did not close the command menu") }
+        // Setting the string above recorded nothing, so start undo from here, and group the
+        // typing and the choice separately, as two key events would be.
+        composerUndo.removeAllActions()
+        composerUndo.groupsByEvent = false
+        composerUndo.beginUndoGrouping()
+        type("r")
+        composerUndo.endUndoGrouping()
+        guard !commandMenu.isHidden else { throw SmokeError.failed("Typing on did not reopen the command menu") }
+        composerUndo.beginUndoGrouping()
+        key(36, "\r")
+        composerUndo.endUndoGrouping()
+        guard prompt.string == "/review ", commandMenu.isHidden, prompt.inputHint == "what to focus on",
+              model.phase == .ready, model.messages.isEmpty else {
+            throw SmokeError.failed("Return must choose the command, not send the draft")
+        }
+        composerUndo.undo()
+        // Before any further edit: with grouping off, an edit outside a group raises.
+        composerUndo.groupsByEvent = true
+        guard prompt.string == "/r" else { throw SmokeError.failed("Undo did not return to the typed query") }
+        composerUndo.removeAllActions()
+        prompt.string = "/review "
+        type("a")
+        guard prompt.inputHint == nil else { throw SmokeError.failed("The input hint stayed after typing began") }
+        prompt.string = ""
+        composerUndo.removeAllActions()
+        refresh()
+    }
+
     func smokeTestConversation(fixtureHome: URL) async throws {
         let localBin = fixtureHome.appendingPathComponent(".local/bin")
         let nodeBin = fixtureHome.appendingPathComponent(".local/share/fnm/node-versions/v99.0.0/installation/bin")
@@ -947,6 +1075,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             windowNumber: view.window!.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
         prompt.keyDown(with: shiftReturn)
         guard prompt.string.contains("\n"), model.phase == .ready else { throw SmokeError.failed("Shift Return must insert a newline, not send") }
+        try await smokeTestCommandMenu()
         prompt.string = "Keep working"
         refresh()
         guard send.isEnabled else { throw SmokeError.failed("Send stayed disabled") }

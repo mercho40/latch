@@ -63,6 +63,38 @@ final class ACPSessionTests: XCTestCase {
         XCTAssertEqual(updatedTool.content, [])
     }
 
+    func testProjectsAvailableCommandsAndSkipsMalformedEntries() {
+        let notification = ACPSessionNotification(
+            sessionId: "session-1",
+            update: .object([
+                "sessionUpdate": .string("available_commands_update"),
+                "availableCommands": .array([
+                    .object([
+                        "name": .string("review"),
+                        "description": .string("Review the current changes"),
+                        "input": .object(["hint": .string("what to focus on")]),
+                    ]),
+                    .object(["name": .string("/compact"), "description": .string("Summarise the conversation")]),
+                    .object(["name": .string("init")]),
+                    .object(["description": .string("No name")]),
+                    .object(["name": .string("two words")]),
+                    .object(["name": .string("empty-hint"), "input": .object(["hint": .string("")])]),
+                    .string("not a command"),
+                ]),
+            ])
+        )
+
+        guard case let .availableCommands(commands) = notification.event else {
+            return XCTFail("Expected available commands")
+        }
+        XCTAssertEqual(commands, [
+            ACPAvailableCommand(name: "review", description: "Review the current changes", inputHint: "what to focus on"),
+            ACPAvailableCommand(name: "compact", description: "Summarise the conversation"),
+            ACPAvailableCommand(name: "init", description: ""),
+            ACPAvailableCommand(name: "empty-hint", description: ""),
+        ])
+    }
+
     func testPreservesUnknownSessionUpdate() {
         let update: ACPJSONValue = .object([
             "sessionUpdate": .string("future_update"),

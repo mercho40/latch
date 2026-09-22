@@ -2,11 +2,27 @@ import AppKit
 
 @MainActor
 final class ChatInputView: NSTextView {
+    /// The keys a menu open over the field gets before the field does.
+    enum MenuKey { case up, down, accept, dismiss }
+
     var onSubmit: (() -> Void)?
+    /// Returns whether an open menu used the key; if not, the field handles it as usual.
+    var onMenuKey: ((MenuKey) -> Bool)?
     var placeholder = "Message the agent…" { didSet { needsDisplay = true } }
+    /// Drawn after the text in the placeholder colour, for what a chosen command expects next.
+    var inputHint: String? { didSet { if inputHint != oldValue { needsDisplay = true } } }
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let plain = modifiers.intersection([.shift, .option, .control, .command]).isEmpty && !hasMarkedText()
+        let menuKey: MenuKey? = switch event.keyCode {
+        case 126 where plain: .up
+        case 125 where plain: .down
+        case 36, 76, 48 where plain: .accept
+        case 53 where plain: .dismiss
+        default: nil
+        }
+        if let menuKey, onMenuKey?(menuKey) == true { return }
         if [36, 76].contains(event.keyCode),
            modifiers.intersection([.shift, .option, .control]).isEmpty,
            !hasMarkedText() {
@@ -18,10 +34,23 @@ final class ChatInputView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard string.isEmpty else { return }
-        (placeholder as NSString).draw(
-            at: NSPoint(x: textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0), y: textContainerInset.height),
-            withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.placeholderTextColor]
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.placeholderTextColor,
+        ]
+        guard !string.isEmpty else {
+            (placeholder as NSString).draw(
+                at: NSPoint(x: textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0), y: textContainerInset.height),
+                withAttributes: attributes
+            )
+            return
+        }
+        guard let inputHint, let layout = layoutManager, let container = textContainer else { return }
+        let glyphs = layout.glyphRange(for: container)
+        guard glyphs.length > 0 else { return }
+        let last = layout.boundingRect(forGlyphRange: NSRange(location: NSMaxRange(glyphs) - 1, length: 1), in: container)
+        (inputHint as NSString).draw(
+            at: NSPoint(x: last.maxX + textContainerOrigin.x, y: last.minY + textContainerOrigin.y),
+            withAttributes: attributes
         )
     }
 }

@@ -151,6 +151,8 @@ struct LatchACPProbe {
             print("\n[plan updated]")
         case .usage:
             break
+        case let .availableCommands(commands):
+            print("\n[commands] " + commands.map { "/" + $0.name }.joined(separator: " "))
         case let .other(kind, _):
             print("\n[update \(kind ?? "unknown")]")
         }

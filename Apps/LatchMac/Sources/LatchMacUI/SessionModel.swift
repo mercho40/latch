@@ -53,7 +53,12 @@ final class SessionModel {
     private var configurationSequence: UInt64 = 0
     private var legacyModelSequence: UInt64 = 0
     private var legacyModeSequence: UInt64 = 0
-    private var pendingConfigurationUpdates: [ACPSessionNotification] = []
+    private var pendingStateUpdates: [ACPSessionNotification] = []
+    /// The agent's slash commands, replaced whole by each update. Empty until it sends some.
+    private(set) var commands: [ACPAvailableCommand] = []
+    /// Unlike the configuration's, this starts from zero rather than the session reply's
+    /// position: the reply carries no commands, so a list sent just before it is still the newest.
+    private var commandsSequence: UInt64 = 0
 
     init(makeClient: @escaping @MainActor () -> AgentServiceClient = AgentServiceClients.makeDefault) {
         self.makeClient = makeClient
@@ -176,10 +181,10 @@ final class SessionModel {
             configurationSequence = sequence ?? 0
             legacyModelSequence = sequence ?? 0
             legacyModeSequence = sequence ?? 0
-            for update in pendingConfigurationUpdates where update.sessionId == sessionID {
-                applyConfigurationUpdate(update)
+            for update in pendingStateUpdates where update.sessionId == sessionID {
+                applyStateUpdate(update)
             }
-            pendingConfigurationUpdates.removeAll()
+            pendingStateUpdates.removeAll()
             phase = .ready
             if case let .runtimeStarted(_, initialization) = result {
                 status = "Connected · \(initialization.agentInfo?.title ?? initialization.agentInfo?.name ?? "ACP agent")"
@@ -386,15 +391,15 @@ final class SessionModel {
     private func receive(_ event: LatchAgentEvent) {
         switch event {
         case let .sessionUpdate(id, notification) where id == runtimeID:
-            if phase == .connecting, isConfigurationUpdate(notification) {
+            if phase == .connecting, isStateUpdate(notification) {
                 // The event task may run before session/new's continuation. Keep a bounded
                 // buffer, then replay only this session's snapshots newer than its reply.
-                if pendingConfigurationUpdates.count == 32 { pendingConfigurationUpdates.removeFirst() }
-                pendingConfigurationUpdates.append(notification)
+                if pendingStateUpdates.count == 32 { pendingStateUpdates.removeFirst() }
+                pendingStateUpdates.append(notification)
                 return
             }
             guard notification.sessionId == sessionID else { return }
-            applyConfigurationUpdate(notification)
+            applyStateUpdate(notification)
             // session/load replays old content. Keep the saved, bounded transcript (and
             // stable message IDs), rather than appending a second copy. The reply's trusted
             // ingress sequence also excludes replay delivered after its continuation.
@@ -432,16 +437,26 @@ final class SessionModel {
         configurationSequence = 0
         legacyModelSequence = 0
         legacyModeSequence = 0
-        pendingConfigurationUpdates.removeAll()
+        pendingStateUpdates.removeAll()
         isChangingConfiguration = false
+        commands = []
+        commandsSequence = 0
     }
 
-    private func isConfigurationUpdate(_ notification: ACPSessionNotification) -> Bool {
+    private func isStateUpdate(_ notification: ACPSessionNotification) -> Bool {
         guard case let .object(update) = notification.update else { return false }
         return update["sessionUpdate"] == .string("config_option_update") || update["sessionUpdate"] == .string("current_model_update") || update["sessionUpdate"] == .string("current_mode_update")
+            || update["sessionUpdate"] == .string("available_commands_update")
     }
 
-    private func applyConfigurationUpdate(_ notification: ACPSessionNotification) {
+    private func applyStateUpdate(_ notification: ACPSessionNotification) {
+        if case let .availableCommands(list) = notification.event {
+            guard notification.localSequence.map({ $0 > commandsSequence }) ?? true else { return }
+            commandsSequence = notification.localSequence ?? commandsSequence
+            commands = list
+            onChange?()
+            return
+        }
         guard case let .object(update) = notification.update else { return }
         let legacy = update["sessionUpdate"] == .string("current_model_update")
         let mode = update["sessionUpdate"] == .string("current_mode_update")

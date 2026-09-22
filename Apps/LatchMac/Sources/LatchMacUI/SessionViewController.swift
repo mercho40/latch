@@ -164,6 +164,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private let bannerRow = NSView()
     private let composerContainer = NSView()
     let conversation = ChatTranscriptView(frame: .zero)
+    /// A session with nothing in it yet opens on its workspace, not on an empty page.
+    private let emptyHeading = NSTextField(labelWithString: "")
     private let prompt = ChatInputView(frame: .zero)
     private let composer = ChatComposerScrollView(frame: .zero)
     private let send = NSButton(title: "Send", target: nil, action: nil)
@@ -341,6 +343,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                 button.bezelStyle = .glass
                 button.borderShape = .circle
             }
+            // The system's own accent treatment: a white arrow on the fill, and the plain rim
+            // while disabled. A forced bezel colour drew the arrow black.
+            send.tintProminence = .primary
         }
         send.keyEquivalent = "\r"
         send.keyEquivalentModifierMask = [.command]
@@ -384,6 +389,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             composerContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
             composerContainer.topAnchor.constraint(greaterThanOrEqualTo: bannerRow.bottomAnchor, constant: 12),
         ])
+
+        emptyHeading.stringValue = "What should we build in \(workspace.lastPathComponent)?"
+        emptyHeading.font = .systemFont(ofSize: 26)
+        emptyHeading.alignment = .center
+        emptyHeading.lineBreakMode = .byTruncatingMiddle
+        emptyHeading.setAccessibilityRole(.staticText)
+        emptyHeading.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(emptyHeading, positioned: .above, relativeTo: root)
+        // Centred in the part of the transcript the composer leaves visible.
+        let open = NSLayoutGuide()
+        view.addLayoutGuide(open)
+        NSLayoutConstraint.activate([
+            open.topAnchor.constraint(equalTo: conversation.topAnchor),
+            open.bottomAnchor.constraint(equalTo: composerContainer.topAnchor),
+            emptyHeading.centerYAnchor.constraint(equalTo: open.centerYAnchor),
+            emptyHeading.centerXAnchor.constraint(equalTo: conversation.centerXAnchor),
+            emptyHeading.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: ChatTranscriptView.horizontalInset),
+        ])
     }
 
     /// Tells the transcript how much of its end the composer covers, which changes as a draft grows.
@@ -419,11 +442,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let preparing = operation != nil || model.phase == .connecting
         // A forced bezel colour ignores the disabled state, so a button that could not send looked ready to.
-        send.bezelColor = send.isEnabled ? .controlAccentColor : nil
+        if #unavailable(macOS 26.0) {
+            // A forced bezel colour ignores the disabled state, so a button that could not send looked ready to.
+            send.bezelColor = send.isEnabled ? .controlAccentColor : nil
+        }
         cancel.isEnabled = canStop
         cancel.isHidden = !preparing && model.phase != .prompting
         composerControls.refreshLayout()
         prompt.placeholder = readOnlyArchive ? "This conversation is read-only" : "Message \(selectedAgent.title)…"
+        // A banner is the more important thing on an empty page, so the heading yields to it.
+        emptyHeading.isHidden = !model.messages.isEmpty || model.phase == .prompting || !bannerRow.isHidden
         prompt.needsDisplay = true
         composer.refreshHeight()
         // State transitions must show their final text immediately, even when a
@@ -556,7 +584,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             lastGroup = choice.group
             let item = NSMenuItem(title: choice.name, action: nil, keyEquivalent: "")
             item.representedObject = choice.value
-            item.toolTip = choice.description
+            // Read in the menu, as a second line, rather than only after hovering an item.
+            item.subtitle = choice.description
             item.indentationLevel = choice.group == nil ? 0 : 1
             button.menu?.addItem(item)
             if choice.value == picker.currentValue { selected = item }
@@ -568,7 +597,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             selected = unavailable
         }
         button.select(selected)
-        button.toolTip = picker.description ?? selected?.toolTip ?? selected?.title
+        button.toolTip = picker.description ?? selected?.subtitle ?? selected?.title
     }
 
     @objc private func selectModel() { select(.model, from: modelPicker) }

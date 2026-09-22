@@ -217,6 +217,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     @objc func stopSession(_ sender: Any?) { sidebar.selectedSession?.stopActivity() }
 
+    @objc func attachFiles(_ sender: Any?) { sidebar.selectedSession?.chooseAttachments(sender) }
+
     @objc func disconnectSession(_ sender: Any?) { sidebar.selectedSession?.disconnectSession() }
 
     @objc func forkSelectedSession(_ sender: Any?) { sidebar.selectedSession?.forkSession() }
@@ -278,6 +280,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             return restoreFinished && !shuttingDown
         case #selector(stopSession(_:)):
             return session?.canStop ?? false
+        case #selector(attachFiles(_:)):
+            return (session?.canAttachFiles ?? false) && window?.attachedSheet == nil
         case #selector(disconnectSession(_:)):
             return session?.canDisconnect ?? false
         case #selector(forkSelectedSession(_:)):

@@ -198,6 +198,9 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         menu.addItem(viewItem)
         let sessionItem = NSMenuItem()
         let session = NSMenu(title: "Session")
+        session.addItem(withTitle: "Attach Files…", action: #selector(SessionWindowController.attachFiles(_:)), keyEquivalent: "a")
+            .keyEquivalentModifierMask = [.command, .shift]
+        session.addItem(.separator())
         session.addItem(withTitle: "Stop", action: #selector(SessionWindowController.stopSession(_:)), keyEquivalent: ".")
         session.addItem(withTitle: "Fork Session", action: #selector(SessionWindowController.forkSelectedSession(_:)), keyEquivalent: "n")
             .keyEquivalentModifierMask = [.command, .shift]

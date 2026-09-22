@@ -178,6 +178,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private let composer = ChatComposerScrollView(frame: .zero)
     private let send = NSButton(title: "Send", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
+    private let attach = NSButton(title: "", target: nil, action: nil)
     private let modelPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let effortPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let permissionModePicker = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -187,7 +188,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         pickers: [.init(modelPicker, maximumWidth: 260),
                   .init(effortPicker, maximumWidth: 150),
                   .init(permissionModePicker)],
-        actions: [cancel, send])
+        actions: [attach, cancel, send])
     private var renderedConfiguration: SessionConfiguration?
     private var renderedPickerPlaceholder: String?
     private lazy var transcriptUpdates = TranscriptRenderScheduler { [weak self] in
@@ -372,6 +373,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             button.imagePosition = .imageOnly
             button.controlSize = .large
         }
+        // Plain, not glass: beside Send it is a quiet way in, as the paperclip is elsewhere.
+        attach.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach files")
+        attach.symbolConfiguration = .init(pointSize: 15, weight: .regular)
+        attach.isBordered = false
+        attach.imagePosition = .imageOnly
+        attach.contentTintColor = .secondaryLabelColor
+        attach.target = self
+        attach.action = #selector(chooseAttachments(_:))
+        attach.toolTip = "Attach Files… (⇧⌘A)"
+        attach.setAccessibilityLabel("Attach files")
         send.setAccessibilityLabel("Send message")
         send.toolTip = "Send message (Return or ⌘ Return)"
         cancel.setAccessibilityLabel("Stop response")
@@ -475,6 +486,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         composerControls.refreshLayout()
         prompt.placeholder = readOnlyArchive ? "This conversation is read-only" : "Message \(selectedAgent.title)…"
         attachmentStrip.show(attachments)
+        attach.isEnabled = canAttachFiles
         refreshCommandMenu()
         // A banner is the more important thing on an empty page, so the heading yields to it,
         // and to the command menu, whose glass it would otherwise show through.
@@ -885,7 +897,32 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// the field pastes it as text.
     private func attach(from pasteboard: NSPasteboard) -> Bool {
         guard prompt.isEditable else { return false }
-        let added = ComposerAttachment.attachments(from: pasteboard)
+        return add(ComposerAttachment.attachments(from: pasteboard))
+    }
+
+    var canAttachFiles: Bool { prompt.isEditable && attachments.count < ComposerAttachment.maximumCount }
+
+    /// The paperclip and Session ▸ Attach Files…: a panel over the window, starting in the
+    /// workspace, for files and folders alike.
+    @objc func chooseAttachments(_ sender: Any?) {
+        guard let window = view.window, canAttachFiles, window.attachedSheet == nil else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = workspace
+        panel.prompt = "Attach"
+        panel.message = "Choose files or folders to send with your message."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK else { return }
+            self.add(panel.urls.map(ComposerAttachment.fromFile))
+            window.makeFirstResponder(self.prompt)
+        }
+    }
+
+    /// Up to the limit; anything past it is refused with a beep rather than silently dropped.
+    @discardableResult
+    private func add(_ added: [ComposerAttachment]) -> Bool {
         guard !added.isEmpty else { return false }
         let room = ComposerAttachment.maximumCount - attachments.count
         guard room > 0 else {
@@ -1063,6 +1100,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         board.setData(png, forType: .png)
         prompt.string = ""
         refresh()
+        view.window?.contentView?.layoutSubtreeIfNeeded()
+        let paperclip = attach.convert(attach.bounds, to: composerBox)
+        let sendFrame = send.convert(send.bounds, to: composerBox)
+        guard !attach.isHidden, attach.isEnabled, canAttachFiles, composerBox.bounds.contains(paperclip),
+              paperclip.maxX <= sendFrame.minX, abs(paperclip.midY - sendFrame.midY) < 1 else {
+            throw SmokeError.failed("The attach button must sit before Send, inside the composer, and be enabled")
+        }
         guard attach(from: board), attachments.count == 1, prompt.string.isEmpty else {
             throw SmokeError.failed("A pasted image did not become an attachment")
         }
@@ -1075,8 +1119,15 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         guard !attach(from: board), attachments.count == 1 else {
             throw SmokeError.failed("Pasted text was taken as an attachment")
         }
+        board.clearContents()
+        board.setData(png, forType: .png)
+        for _ in 1..<ComposerAttachment.maximumCount { _ = attach(from: board) }
+        guard attachments.count == ComposerAttachment.maximumCount, !attach.isEnabled, !canAttachFiles else {
+            throw SmokeError.failed("The attach button stayed enabled at the attachment limit")
+        }
+        for extra in attachments.dropFirst() { removeAttachment(extra.id) }
         removeAttachment(attachments[0].id)
-        guard attachments.isEmpty, attachmentStrip.isHidden, !send.isEnabled else {
+        guard attachments.isEmpty, attachmentStrip.isHidden, !send.isEnabled, attach.isEnabled else {
             throw SmokeError.failed("Removing the attachment did not clear the composer")
         }
     }

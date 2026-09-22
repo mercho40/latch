@@ -103,6 +103,24 @@ final class WorkspaceCommandTests: XCTestCase {
         }
     }
 
+    func testHoveringARowOffersItsCloseButton() async throws {
+        try await WindowFixture.run { fixture in
+            let (_, sidebar) = try await fixture.restored(fixture.session(1), fixture.session(2))
+            let session = try XCTUnwrap(sidebar.allSessions.last)
+            let cell = try XCTUnwrap(sidebar.outline.view(atColumn: 0, row: sidebar.outline.row(forItem: session),
+                                                          makeIfNecessary: true) as? SessionCellView)
+            let close: NSButton = try fixture.control(in: cell, label: "Close Session")
+            XCTAssertTrue(close.isHidden, "At rest the slot belongs to the status")
+
+            cell.mouseEntered(with: NSEvent())
+            XCTAssertFalse(close.isHidden)
+            close.performClick(nil)
+
+            XCTAssertFalse(sidebar.allSessions.contains { $0 === session })
+            XCTAssertEqual(sidebar.allSessions.map(\.id), [fixture.id(1)])
+        }
+    }
+
     func testSessionCommandsAreDisabledWhenTheyCannotRun() async throws {
         try await WindowFixture.run { fixture in
             let (window, sidebar) = try await fixture.restored(fixture.session(1))

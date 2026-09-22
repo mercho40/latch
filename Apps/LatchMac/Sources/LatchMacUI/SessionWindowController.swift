@@ -15,6 +15,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     private var saveTask: Task<Void, Never>?
     /// Closed sessions still draining their agent, awaited before the app quits.
     private var closing: [UUID: Task<Void, Never>] = [:]
+    /// Sessions mid-turn at the last change, so a finished turn can be told apart.
+    private var promptingSessions: Set<UUID> = []
     /// Session closes are undoable; text editing keeps its own manager in the composer.
     private let sessionUndo = UndoManager()
     private let attention: AttentionCenter?
@@ -299,6 +301,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     private func show(_ session: SessionViewController?) {
+        if let session, session.hasUnseenReply {
+            session.hasUnseenReply = false
+            sidebar.refreshRows()
+        }
         detail.show(session)
         refreshHarness()
         updateTitle()
@@ -307,11 +313,24 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     private func sessionChanged() {
+        markUnseenReplies()
         sidebar.refreshRows()
         refreshHarness()
         updateTitle()
         publishAttention()
         scheduleSave()
+    }
+
+    /// A turn that ends in a session other than the selected one leaves an unread mark on its
+    /// row. A failed turn does not, because the row already shows the failure.
+    private func markUnseenReplies() {
+        let sessions = sidebar.allSessions
+        for session in sessions where promptingSessions.contains(session.id)
+            && session.model.phase != .prompting && session.model.errorMessage == nil
+            && session !== sidebar.selectedSession {
+            session.hasUnseenReply = true
+        }
+        promptingSessions = Set(sessions.filter { $0.model.phase == .prompting }.map(\.id))
     }
 
     /// The Dock badge, notifications, and the menu bar extra all read the same snapshot.

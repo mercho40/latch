@@ -182,7 +182,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        item is Workspace ? 28 : 44
+        item is Workspace ? 28 : 40
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool { item is Workspace }
@@ -203,7 +203,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 cell.addSubview(label)
                 cell.textField = label
                 NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                    label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: SessionCellView.textInset),
                     label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
                     label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
                 ])
@@ -217,7 +217,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let identifier = NSUserInterfaceItemIdentifier("session")
         let cell = outlineView.makeView(withIdentifier: identifier, owner: nil) as? SessionCellView ?? SessionCellView(identifier: identifier)
         cell.onRename = { [weak session] name in session?.rename(to: name) }
-        cell.configure(title: session.sessionTitle, phase: session.model.phase, status: session.displayStatus)
+        cell.onClose = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.onCloseSession?(session)
+        }
+        let row = session.sidebarRow
+        cell.configure(title: session.sessionTitle, status: row.status, detail: row.detail)
         return cell
     }
 
@@ -327,13 +332,27 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 }
 
-/// Title, a phase indicator, and the model's status line.
+/// Title over a detail line, with one trailing slot for whatever needs the reader.
 final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
+    /// Colour is reserved for a decision, work in motion, a failure, and an unread reply.
+    enum Status: Equatable { case resting, unseen, working, waiting, failed }
+
+    /// Title and subtitle start where the workspace header does.
+    static let textInset: CGFloat = 6
+
     var onRename: ((String) -> Void)?
+    var onClose: (() -> Void)?
     private var committedTitle = ""
+    private var status = Status.resting
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
-    private let indicator = NSImageView()
+    private let glyph = NSImageView()
+    private let spinner = NSProgressIndicator()
+    private let closeButton = NSButton()
+    private var titleClearsAccessory: NSLayoutConstraint!
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { updateAccessory() } }
+    }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -350,32 +369,84 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
         subtitle.textColor = .secondaryLabelColor
         subtitle.lineBreakMode = .byTruncatingTail
         subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        indicator.symbolConfiguration = .init(pointSize: 8, weight: .regular)
-        indicator.setContentHuggingPriority(.required, for: .horizontal)
-        for view in [title, subtitle, indicator] {
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Session")
+        closeButton.symbolConfiguration = .init(pointSize: 10, weight: .medium)
+        closeButton.isBordered = false
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.toolTip = "Close Session"
+        closeButton.setAccessibilityLabel("Close Session")
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+        let slot = NSLayoutGuide()
+        addLayoutGuide(slot)
+        for view in [title, subtitle, glyph, spinner, closeButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         textField = title
+        titleClearsAccessory = title.trailingAnchor.constraint(equalTo: slot.leadingAnchor, constant: -4)
         NSLayoutConstraint.activate([
-            indicator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            indicator.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-            indicator.widthAnchor.constraint(equalToConstant: 10),
-            title.leadingAnchor.constraint(equalTo: indicator.trailingAnchor, constant: 6),
-            title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            slot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            slot.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            slot.widthAnchor.constraint(equalToConstant: 16),
+            slot.heightAnchor.constraint(equalToConstant: 16),
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.textInset),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 3),
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            subtitle.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 1),
-            subtitle.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            subtitle.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+        ])
+        for view in [glyph, spinner, closeButton] {
+            NSLayoutConstraint.activate([
+                view.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
+                view.centerYAnchor.constraint(equalTo: slot.centerYAnchor),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            spinner.widthAnchor.constraint(equalToConstant: 12),
+            spinner.heightAnchor.constraint(equalToConstant: 12),
+            // A bigger target than the glyph, still inside the row.
+            closeButton.widthAnchor.constraint(equalToConstant: 20),
+            closeButton.heightAnchor.constraint(equalToConstant: 20),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("Not used") }
 
+    // MARK: Hover
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+        // A row scrolled or reused under a still pointer gets no entered or exited event.
+        if let window {
+            isHovered = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        isHovered = false
+    }
+
+    @objc private func closeClicked() { onClose?() }
+
+    // MARK: Rename
+
     func beginRename() {
         committedTitle = title.stringValue
         title.isEditable = true
+        updateAccessory()
         window?.makeFirstResponder(title)
         title.currentEditor()?.selectAll(nil)
     }
@@ -384,6 +455,7 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
         guard selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
         title.stringValue = committedTitle
         title.isEditable = false
+        updateAccessory()
         window?.makeFirstResponder(nil)
         return true
     }
@@ -391,24 +463,50 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) {
         guard title.isEditable else { return }
         title.isEditable = false
+        updateAccessory()
         let entered = title.stringValue
         title.stringValue = committedTitle
         onRename?(entered)
     }
 
-    func configure(title text: String, phase: SessionModel.Phase, status: String) {
+    // MARK: Content
+
+    func configure(title text: String, status: Status, detail: String) {
         guard !title.isEditable else { return }
         committedTitle = text
         title.stringValue = text
-        subtitle.stringValue = status
-        let (symbol, color): (String, NSColor) = switch phase {
-        case .disconnected: ("circle", .tertiaryLabelColor)
-        case .connecting, .stopping: ("circle.dotted", .secondaryLabelColor)
-        case .ready: ("circle.fill", .systemGreen)
-        case .prompting: ("circle.fill", .systemOrange)
+        subtitle.stringValue = detail
+        self.status = status
+        // An unread reply is the one row state worth reading from across the list.
+        title.font = .systemFont(ofSize: 13, weight: status == .unseen ? .semibold : .regular)
+        updateAccessory()
+        let unread = status == .unseen ? ", unread reply" : ""
+        setAccessibilityLabel("\(text), \(detail)\(unread)")
+    }
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { updateAccessory() }
+    }
+
+    /// The close button takes the slot while the pointer is over the row, as a tab's does.
+    private func updateAccessory() {
+        let closing = isHovered && !title.isEditable
+        let emphasized = backgroundStyle == .emphasized
+        closeButton.isHidden = !closing
+        closeButton.contentTintColor = emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
+        if !closing, status == .working { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        let mark: (symbol: String, size: CGFloat, color: NSColor)? = switch status {
+        case .resting, .working: nil
+        case .unseen: ("circle.fill", 8, .controlAccentColor)
+        case .waiting: ("exclamationmark.circle.fill", 13, .systemOrange)
+        case .failed: ("exclamationmark.triangle.fill", 12, .systemRed)
         }
-        indicator.image = NSImage(systemSymbolName: symbol, accessibilityDescription: status)
-        indicator.contentTintColor = color
-        setAccessibilityLabel("\(text), \(status)")
+        glyph.isHidden = closing || mark == nil
+        if let mark {
+            glyph.image = NSImage(systemSymbolName: mark.symbol, accessibilityDescription: nil)
+            glyph.symbolConfiguration = .init(pointSize: mark.size, weight: .regular)
+            glyph.contentTintColor = emphasized ? .alternateSelectedControlTextColor : mark.color
+        }
+        titleClearsAccessory.isActive = closing || status != .resting
     }
 }

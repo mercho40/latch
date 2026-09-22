@@ -48,6 +48,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         return model.status
     }
 
+    /// A reply finished while another session was on screen. Selecting this one clears it.
+    var hasUnseenReply = false
+
+    /// The sidebar row. Only working, a pending decision, a failure and an unread reply get a
+    /// mark; a session at rest says which agent it belongs to and nothing else, so "Ready ·
+    /// end_turn" and "Connected ·" never reach the list.
+    var sidebarRow: (status: SessionCellView.Status, detail: String) {
+        if model.permissions.current != nil { return (.waiting, "Waiting for a decision") }
+        if model.errorMessage != nil {
+            return (.failed, model.status == "Not connected" ? "Couldn’t connect" : model.status)
+        }
+        return switch model.phase {
+        case .connecting, .stopping, .prompting: (.working, model.status)
+        case .ready: (hasUnseenReply ? .unseen : .resting, selectedAgent.title)
+        case .disconnected: (.resting, displayStatus)
+        }
+    }
+
     /// What this session wants the user to know about, whether or not it is on screen.
     var attention: AttentionCenter.State {
         let pending = model.permissions.current

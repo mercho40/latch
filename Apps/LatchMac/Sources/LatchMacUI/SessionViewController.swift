@@ -217,8 +217,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         root.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(root)
         NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            root.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            // Edge to edge: the transcript's own inset is the only side margin, and its scroll bar
+            // sits at the window's edge where a Mac scroll bar belongs.
+            root.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            root.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             // The transcript runs from the toolbar to the window's bottom edge; the composer floats
             // over its end rather than sitting below it.
             root.topAnchor.constraint(equalTo: view.topAnchor),
@@ -1108,7 +1110,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             let transcript = conversation.convert(conversation.bounds, to: view)
             let expected = transcript.width - ChatTranscriptView.horizontalInset * 2
             guard abs(box.width - expected) < 2, abs(box.midX - transcript.midX) < 2,
-                  box.minX >= transcript.minX + 15, box.maxX <= transcript.maxX - 15,
+                  box.minX >= transcript.minX + ChatTranscriptView.horizontalInset - 1,
+                  box.maxX <= transcript.maxX - ChatTranscriptView.horizontalInset + 1,
                   box.height > 88, box.minY >= 0, box.maxY <= view.bounds.height else {
                 throw SmokeError.failed("Composer column is clipped or misaligned at \(size): \(box)")
             }

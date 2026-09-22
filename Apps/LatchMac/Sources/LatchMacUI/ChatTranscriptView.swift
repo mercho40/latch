@@ -3,7 +3,9 @@ import AppKit
 /// A session-local, selectable transcript. The composer and connection status belong to the parent.
 @MainActor
 final class ChatTranscriptView: NSView {
-    static let horizontalInset: CGFloat = 16
+    /// The one side margin: text, the banner and the composer all sit this far from the sidebar
+    /// and from the window's edge.
+    static let horizontalInset: CGFloat = 20
     static let rowSpacing: CGFloat = 12
     static let groupedRowSpacing: CGFloat = 2
 
@@ -373,7 +375,7 @@ final class ChatTranscriptView: NSView {
         try require(shortRow.frame.width == geometry.scrollView.contentSize.width - Self.horizontalInset * 2,
                     "Transcript does not fill the available pane width")
         try require(abs(shortRow.frame.midX - geometry.scrollView.contentSize.width / 2) < 1, "Wide column is not centered in scroll content")
-        try require(shortRow.frame.minX >= 16, "Missing side inset")
+        try require(shortRow.frame.minX >= Self.horizontalInset - 1, "Missing side inset")
         try require(shortRow.bubble.width < longRow.bubble.width && longRow.bubble.width <= longRow.frame.width * 0.8, "User bubbles are not content-sized/capped")
         try require(shortRow.bubble.maxX == shortRow.bounds.maxX && shortRow.textView.string == short.text, "User text is not literal/right aligned")
         try require(plainRow.bubble == .zero && plainRow.textView.frame.minX == 0 && plainRow.textView.frame.width == plainRow.bounds.width && plainRow.textView.frame.minY == 0, "Assistant is boxed or has a role header")

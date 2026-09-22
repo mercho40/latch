@@ -28,6 +28,32 @@ final class ChatTranscriptView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// An opacity ramp at each end of the scroll view, so rows fade into the toolbar above and, under
+    /// the floating composer, into the page below, where the composer's glass blurs what is left of
+    /// them. It is a layer mask on the scroll view, so the text and its layout never know.
+    /// Rows dissolve into the toolbar: an opacity ramp over the top of the scroll view. The bottom is
+    /// not faded, because there the rows pass under the composer and are blurred, not removed.
+    private func updateEdgeMask() {
+        scrollView.wantsLayer = true
+        guard let layer = scrollView.layer else { return }
+        if layer.mask !== edgeMask { layer.mask = edgeMask }
+        let height = max(1, scrollView.bounds.height)
+        let fadeTop = findBar.isHidden ? Self.topFade / height : 0
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        edgeMask.frame = scrollView.bounds
+        // The scroll view's layer sits in a flipped hierarchy, so which end of the gradient is the
+        // top depends on the layer, not on intuition.
+        if layer.contentsAreFlipped() {
+            edgeMask.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor]
+            edgeMask.locations = [0, NSNumber(value: fadeTop), 1]
+        } else {
+            edgeMask.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+            edgeMask.locations = [0, NSNumber(value: max(0, 1 - fadeTop)), 1]
+        }
+        CATransaction.commit()
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         scrollView.hasVerticalScroller = true
@@ -44,6 +70,8 @@ final class ChatTranscriptView: NSView {
         jump.target = self
         jump.action = #selector(jumpToLatest)
         jump.isHidden = true
+        addSubview(bottomBlur, positioned: .above, relativeTo: scrollView)
+        addSubview(topBlur, positioned: .above, relativeTo: scrollView)
         addSubview(jump)
         findBar.isHidden = true
         findBar.onSearch = { [weak self] term in self?.search(term) }
@@ -118,6 +146,19 @@ final class ChatTranscriptView: NSView {
     ///
     /// Internal because no unit test can enter a real AppKit resize loop.
     var limitsMeasurementToViewport = false
+    /// How much of the bottom of this view something floats over, the composer. The rows scroll
+    /// under it, and the conversation's end stops this far up so the last message stays in view.
+    var bottomOverlay: CGFloat = 0 {
+        didSet { if abs(bottomOverlay - oldValue) > 0.5 { needsLayout = true } }
+    }
+    /// Rows dissolve into the toolbar over this height, and into the page over the overlay.
+    static let topFade: CGFloat = 20
+    private let edgeMask = CAGradientLayer()
+    /// Behind the composer the rows are blurred, more so toward the window's edge, the way a
+    /// messaging app lets a conversation run under its input bar.
+    private let bottomBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 72)
+    /// Under the toolbar the rows blur as well as fade, so they leave the view rather than being cut.
+    private let topBlur = EdgeBlurView(opaqueEdge: .top, lead: 30)
 
     override func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
@@ -143,7 +184,8 @@ final class ChatTranscriptView: NSView {
         let sideInset = min(Self.horizontalInset, width / 12)
         let columnWidth = max(1, width - sideInset * 2)
         let inset = (width - columnWidth) / 2
-        var y: CGFloat = 16
+        // Clear of the fade into the toolbar, so the first row is never dimmed at rest.
+        var y: CGFloat = Self.topFade + 6
         // A screen either side of the viewport, so a row that scrolls in mid-drag is
         // already exact. Rows are deferred against their previous height, so this window
         // drifts as it goes — that is what the margin is for.
@@ -166,14 +208,21 @@ final class ChatTranscriptView: NSView {
             y = status.frame.maxY + 16
         }
         // Reserve space for the floating jump control, never over the last message.
-        document.frame = NSRect(x: 0, y: 0, width: width, height: max(scrollView.contentSize.height, y + 40))
+        document.frame = NSRect(x: 0, y: 0, width: width, height: max(scrollView.contentSize.height, y + 40 + bottomOverlay))
         let bottom = max(0, document.frame.height - scrollView.contentView.bounds.height)
         let restored = saved.id.flatMap { rows[$0] }.map { $0.frame.minY + saved.offset } ?? saved.origin
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: followsBottom ? bottom : min(bottom, max(0, restored))))
         scrollView.reflectScrolledClipView(scrollView.contentView)
         // A glass button's fitted size is its glyph's, which made a disc too small to hit or see.
         jump.setFrameSize(NSSize(width: FloatingRoundButton.diameter, height: FloatingRoundButton.diameter))
-        jump.frame.origin = NSPoint(x: max(0, (bounds.width - jump.frame.width) / 2), y: max(0, bounds.height - jump.frame.height - 12))
+        jump.frame.origin = NSPoint(x: max(0, (bounds.width - jump.frame.width) / 2), y: max(0, bounds.height - bottomOverlay - jump.frame.height - 12))
+        updateEdgeMask()
+        // From a little above the composer to the bottom edge, so the blur starts before the glass does.
+        topBlur.isHidden = !findBar.isHidden
+        topBlur.frame = NSRect(x: 0, y: scrollView.frame.minY, width: bounds.width, height: 36)
+        let blurHeight = bottomOverlay > 0 ? bottomOverlay + bottomBlur.lead : 0
+        bottomBlur.isHidden = blurHeight == 0
+        bottomBlur.frame = NSRect(x: 0, y: bounds.height - blurHeight, width: bounds.width, height: blurHeight)
         jump.isHidden = followsBottom || bottom == 0
     }
 
@@ -184,7 +233,7 @@ final class ChatTranscriptView: NSView {
         jump.isHidden = followsBottom
     }
 
-    @objc private func jumpToLatest() {
+    @objc func jumpToLatest() {
         followsBottom = true
         arrange(restoring: anchor())
     }
@@ -890,5 +939,72 @@ final class FloatingRoundButton: NSButton {
         disc.lineWidth = 1
         disc.stroke()
         super.draw(dirtyRect)
+    }
+}
+
+/// A band that blurs and dims whatever scrolls behind it, both ramping from nothing at one edge to
+/// full at the other, so rows sink out of focus rather than stopping at a line. It is a plain
+/// Gaussian blur of the backdrop, not a vibrancy material: materials are tinted close to opaque in
+/// dark mode, and the point is that the rows stay faintly legible as they pass under the composer.
+/// It is decoration: clicks, scrolling and selection pass straight through to the rows behind it.
+@MainActor
+final class EdgeBlurView: NSView {
+    enum Edge { case top, bottom }
+
+    /// The distance from the band's clear edge over which rows go from sharp to nearly fully
+    /// blurred; they are fully blurred at its far edge.
+    let lead: CGFloat
+    private let edge: Edge
+    private let dim = CAGradientLayer()
+    private let ramp = CAGradientLayer()
+
+    init(opaqueEdge: Edge, lead: CGFloat) {
+        edge = opaqueEdge
+        self.lead = lead
+        super.init(frame: .zero)
+        wantsLayer = true
+        layerUsesCoreImageFilters = true
+        let blur = CIFilter(name: "CIGaussianBlur")!
+        blur.setValue(10, forKey: kCIInputRadiusKey)
+        backgroundFilters = [blur]
+        layer?.addSublayer(dim)
+        // The same ramp masks the blur and the dimming, so both fade in together.
+        ramp.colors = [NSColor.clear.cgColor, NSColor.black.withAlphaComponent(0.9).cgColor, NSColor.black.cgColor]
+        layer?.mask = ramp
+        updateColors()
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        dim.frame = bounds
+        ramp.frame = bounds
+        // Start at the clear edge. Which way up that is depends on whether the layer is flipped.
+        let clearAtTop = (edge == .bottom) != (layer?.contentsAreFlipped() ?? false)
+        let (start, end) = clearAtTop ? (CGPoint(x: 0.5, y: 1), CGPoint(x: 0.5, y: 0)) : (CGPoint(x: 0.5, y: 0), CGPoint(x: 0.5, y: 1))
+        ramp.startPoint = start; ramp.endPoint = end
+        dim.startPoint = start; dim.endPoint = end
+        let lead = NSNumber(value: min(1, self.lead / max(1, bounds.height)))
+        ramp.locations = [0, lead, 1]
+        dim.locations = [0, lead, 1]
+        CATransaction.commit()
+    }
+
+    private func updateColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let page = NSColor.windowBackgroundColor
+            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            dim.colors = [page.withAlphaComponent(0).cgColor, page.withAlphaComponent(dark ? 0.35 : 0.3).cgColor,
+                          page.withAlphaComponent(dark ? 0.7 : 0.6).cgColor]
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
     }
 }

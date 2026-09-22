@@ -101,5 +101,19 @@ final class TranscriptLayoutTests: XCTestCase {
         XCTAssertGreaterThan(usedWidth("```\n" + long + "\n```\n"), 1300, "A code line runs the width of the row")
         XCTAssertGreaterThan(usedWidth("| a | b |\n| - | - |\n| 1 | 2 |\n"), 1300, "A table spans the row")
     }
+
+    /// The composer floats over the end of the transcript. Scrolled to the end, the last message
+    /// stops above it instead of disappearing under it.
+    func testTheEndOfTheConversationStaysClearOfWhatFloatsOverIt() throws {
+        let view = transcript(conversation(30))
+        view.bottomOverlay = 140
+        view.layoutSubtreeIfNeeded()
+        view.jumpToLatest()
+        view.layoutSubtreeIfNeeded()
+        let last = try XCTUnwrap(view.rowFrames.last)
+        let scroll = try XCTUnwrap(view.subviews.compactMap { $0 as? NSScrollView }.first)
+        let visibleBottom = scroll.contentView.bounds.maxY
+        XCTAssertLessThanOrEqual(last.maxY, visibleBottom - 140, "The last message ends under the composer")
+    }
 }
 

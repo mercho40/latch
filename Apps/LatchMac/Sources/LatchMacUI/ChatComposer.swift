@@ -65,9 +65,52 @@ final class ChatComposerScrollView: NSScrollView {
 
 @MainActor
 final class ChatComposerBox: NSView {
+    /// Concentric with the 36-point capsules inside it, which sit 8 points in: 18 + 8.
+    static let cornerRadius: CGFloat = 26
+    private var glass: NSView?
+
+    /// The composer floats over the end of the transcript. On macOS 26 it is a pane of glass, so the
+    /// conversation shows through it softened, and a shadow lifts it off the page; before that, a
+    /// drawn panel.
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = Self.cornerRadius
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(glass, positioned: .below, relativeTo: nil)
+            NSLayoutConstraint.activate([
+                glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+                glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+                glass.topAnchor.constraint(equalTo: topAnchor),
+                glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+            self.glass = glass
+        }
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOffset = NSSize(width: 0, height: -10)
+        layer?.shadowRadius = 24
+        updateShadow()
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+
+    override func layout() {
+        super.layout()
+        // A path, so the shadow is not recomputed from the alpha of everything inside on each frame.
+        layer?.shadowPath = CGPath(roundedRect: bounds, cornerWidth: Self.cornerRadius, cornerHeight: Self.cornerRadius, transform: nil)
+    }
+
+    private func updateShadow() {
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        layer?.shadowOpacity = dark ? 0.55 : 0.16
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14)
+        guard glass == nil else { return }
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
         NSColor.controlBackgroundColor.setFill()
         path.fill()
         NSColor.separatorColor.setStroke()
@@ -77,6 +120,7 @@ final class ChatComposerBox: NSView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        updateShadow()
         needsDisplay = true
     }
 }

@@ -144,6 +144,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Collapses out of the stack with the banner, so a session with nothing wrong gives
     /// the whole column to the transcript.
     private let bannerRow = NSView()
+    private let composerContainer = NSView()
     let conversation = ChatTranscriptView(frame: .zero)
     private let prompt = ChatInputView(frame: .zero)
     private let composer = ChatComposerScrollView(frame: .zero)
@@ -218,8 +219,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         NSLayoutConstraint.activate([
             root.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             root.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            root.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            root.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            // The transcript runs from the toolbar to the window's bottom edge; the composer floats
+            // over its end rather than sitting below it.
+            root.topAnchor.constraint(equalTo: view.topAnchor),
+            root.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
         // The banner keeps the transcript's column so a failure reads as part of the
@@ -229,7 +232,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         NSLayoutConstraint.activate([
             banner.leadingAnchor.constraint(equalTo: bannerRow.leadingAnchor, constant: ChatTranscriptView.horizontalInset),
             banner.trailingAnchor.constraint(equalTo: bannerRow.trailingAnchor, constant: -ChatTranscriptView.horizontalInset),
-            banner.topAnchor.constraint(equalTo: bannerRow.topAnchor),
+            banner.topAnchor.constraint(equalTo: bannerRow.topAnchor, constant: 12),
             banner.bottomAnchor.constraint(equalTo: bannerRow.bottomAnchor),
         ])
         banner.isHidden = true
@@ -339,7 +342,6 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             item.translatesAutoresizingMaskIntoConstraints = false
             item.widthAnchor.constraint(equalTo: composerContent.widthAnchor).isActive = true
         }
-        let composerContainer = NSView()
         composerBox.translatesAutoresizingMaskIntoConstraints = false
         composerContainer.addSubview(composerBox)
         NSLayoutConstraint.activate([
@@ -348,13 +350,28 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             composerBox.topAnchor.constraint(equalTo: composerContainer.topAnchor),
             composerBox.bottomAnchor.constraint(equalTo: composerContainer.bottomAnchor),
         ])
-        // No keyboard caption under the composer: the shortcuts stay in the field's
-        // accessibility help, where they cost no chrome.
-        root.addArrangedSubview(composerContainer)
         for view in root.arrangedSubviews {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         }
+        // No keyboard caption under the composer: the shortcuts stay in the field's
+        // accessibility help, where they cost no chrome.
+        composerContainer.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(composerContainer, positioned: .above, relativeTo: root)
+        NSLayoutConstraint.activate([
+            composerContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            composerContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            composerContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            composerContainer.topAnchor.constraint(greaterThanOrEqualTo: bannerRow.bottomAnchor, constant: 12),
+        ])
+    }
+
+    /// Tells the transcript how much of its end the composer covers, which changes as a draft grows.
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let composerTop = composerContainer.frame.maxY
+        let transcriptBottom = conversation.convert(conversation.bounds, to: view).minY
+        conversation.bottomOverlay = max(0, composerTop - transcriptBottom + 12)
     }
 
     private func configureTextView(_ text: NSTextView, in scroll: NSScrollView) {
@@ -1041,6 +1058,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             guard !bannerRow.isHidden, !banner.isHidden else {
                 throw SmokeError.failed("A launch problem did not raise the banner at \(size)")
             }
+            // The composer floats over the transcript by design; the transcript keeps its end clear of it.
+            let composer = composerBox.convert(composerBox.bounds, to: view)
+            let transcriptFrame = conversation.convert(conversation.bounds, to: view)
+            guard transcriptFrame.insetBy(dx: -1, dy: -1).contains(composer),
+                  conversation.bottomOverlay >= composer.maxY - transcriptFrame.minY else {
+                throw SmokeError.failed("The composer does not float within the transcript at \(size)")
+            }
             let controls: [NSView] = [banner, conversation, composerBox]
             let visible = controls.filter { !$0.isHiddenOrHasHiddenAncestor }
             for (index, control) in visible.enumerated() {
@@ -1049,7 +1073,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                       view.bounds.insetBy(dx: -1, dy: -1).contains(frame) else {
                     throw SmokeError.failed("Session content clipped at \(size): \(frame)")
                 }
-                for other in visible.dropFirst(index + 1) {
+                for other in visible.dropFirst(index + 1) where !(control === conversation && other === composerBox) {
                     let otherFrame = other.convert(other.alignmentRect(forFrame: other.bounds), to: view)
                     guard !frame.intersects(otherFrame) else {
                         throw SmokeError.failed("Session content overlaps at \(size): \(frame), \(otherFrame)")

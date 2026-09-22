@@ -58,6 +58,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         split.addSplitViewItem(sidebarItem)
         let detailItem = NSSplitViewItem(contentListWithViewController: detail)
         detailItem.minimumThickness = 560
+        // The transcript fades into the toolbar instead of stopping at a line.
+        detailItem.titlebarSeparatorStyle = .none
         split.addSplitViewItem(detailItem)
         split.splitView.autosaveName = "LatchSessionSplit"
         window.contentViewController = split

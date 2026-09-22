@@ -788,45 +788,41 @@ final class DetailHostViewController: NSViewController {
     var onOpenWorkspace: ((URL) -> Void)? {
         didSet { (view as? WorkspaceDropView)?.onDrop = onOpenWorkspace }
     }
-    private let placeholder = NSStackView()
+    private(set) lazy var start = StartView()
 
     override func loadView() {
         let drop = WorkspaceDropView()
         drop.onDrop = onOpenWorkspace
         view = drop
-        let title = NSTextField(labelWithString: "No session selected")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString: "Choose a workspace folder to get started, or drag one here from the Finder.")
-        body.textColor = .secondaryLabelColor
-        body.alignment = .center
-        body.preferredMaxLayoutWidth = 360
-        let button = NSButton(title: "New Session…", target: self, action: #selector(createSession))
-        button.bezelStyle = .rounded
-        button.keyEquivalent = "\r"
-        placeholder.orientation = .vertical
-        placeholder.alignment = .centerX
-        placeholder.spacing = 8
-        placeholder.addArrangedSubview(title)
-        placeholder.addArrangedSubview(body)
-        placeholder.setCustomSpacing(18, after: body)
-        placeholder.addArrangedSubview(button)
-        placeholder.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(placeholder)
+        start.onOpenWorkspace = { [weak self] url in self?.onOpenWorkspace?(url) }
+        start.onChooseFolder = { [weak self] in self?.onNewSession?() }
+        start.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(start)
         NSLayoutConstraint.activate([
-            placeholder.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            placeholder.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            placeholder.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -80),
+            start.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            start.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            start.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            start.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+        start.reload()
+        // A workspace opened from elsewhere, or deleted in the Finder, shows the next time
+        // Latch comes forward.
+        NotificationCenter.default.addObserver(self, selector: #selector(reloadRecents),
+                                               name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 
-    @objc private func createSession() { onNewSession?() }
+    @objc private func reloadRecents() {
+        guard !start.isHidden else { return }
+        start.reload()
+    }
 
     func show(_ session: SessionViewController?) {
         for child in children where child !== session {
             child.view.removeFromSuperview()
             child.removeFromParent()
         }
-        placeholder.isHidden = session != nil
+        start.isHidden = session != nil
+        if session == nil { start.reload() }
         guard let session, session.parent !== self else { return }
         addChild(session)
         session.view.translatesAutoresizingMaskIntoConstraints = false

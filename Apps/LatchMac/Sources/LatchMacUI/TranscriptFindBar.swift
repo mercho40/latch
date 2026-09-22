@@ -63,7 +63,7 @@ final class TranscriptFindBar: NSView, NSSearchFieldDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NSColor.windowBackgroundColor.setFill()
+        LatchPalette.page.setFill()
         bounds.fill()
         NSColor.separatorColor.setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()

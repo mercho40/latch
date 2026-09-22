@@ -50,6 +50,9 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         window.contentMinSize = NSSize(width: 820, height: 600)
         window.isReleasedWhenClosed = false
         window.toolbarStyle = .unified
+        // The conversation's page runs up under the toolbar rather than stopping at a band of
+        // the system's titlebar colour.
+        window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .automatic
         super.init(window: window)
 
@@ -874,8 +877,11 @@ final class WorkspaceDropView: NSView {
         return true
     }
 
+    /// The page, under the toolbar too since the detail pane runs beneath it, and a tint over
+    /// it while a folder is held above.
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+        LatchPalette.page.setFill()
+        dirtyRect.fill()
         guard highlighted else { return }
         NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).setFill()
         bounds.fill()

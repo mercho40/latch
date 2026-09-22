@@ -1058,7 +1058,7 @@ final class EdgeBlurView: NSView {
 
     private func updateColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let page = NSColor.windowBackgroundColor
+            let page = LatchPalette.page
             let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             dim.colors = [page.withAlphaComponent(0).cgColor, page.withAlphaComponent(dark ? 0.1 : 0.08).cgColor,
                           page.withAlphaComponent(dark ? 0.3 : 0.25).cgColor]

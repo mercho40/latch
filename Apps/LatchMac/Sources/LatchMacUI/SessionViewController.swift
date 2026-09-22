@@ -168,6 +168,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// A session with nothing in it yet opens on its workspace, not on an empty page.
     private let emptyHeading = NSTextField(labelWithString: "")
     private let commandMenu = SlashCommandMenu()
+    /// Pasted or dropped into the composer, sent with the next prompt, then cleared with it.
+    /// Not saved with the draft: an image's bytes would bloat the session library.
+    private(set) var attachments: [ComposerAttachment] = []
+    private let attachmentStrip = ComposerAttachmentStrip()
     /// Escape closes the menu for this draft only; typing on, or starting over, opens it again.
     private var dismissedCommandDraft: String?
     private let prompt = ChatInputView(frame: .zero)
@@ -323,6 +327,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         prompt.onSubmit = { [weak self] in self?.sendPrompt() }
         prompt.onMenuKey = { [weak self] key in self?.handleCommandMenuKey(key) ?? false }
         commandMenu.onAccept = { [weak self] command in self?.acceptCommand(command) }
+        prompt.onAttach = { [weak self] pasteboard in self?.attach(from: pasteboard) ?? false }
+        attachmentStrip.onRemove = { [weak self] id in self?.removeAttachment(id) }
+        attachmentStrip.isHidden = true
         prompt.font = .systemFont(ofSize: 14)
         prompt.textContainerInset = NSSize(width: 8, height: 8)
         prompt.isRichText = false
@@ -339,6 +346,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         prompt.setAccessibilityLabel("Message to agent")
         prompt.setAccessibilityHelp("Return to send. Shift Return to insert a new line.")
         configureTextView(prompt, in: composer)
+        composerContent.addArrangedSubview(attachmentStrip)
         composerContent.addArrangedSubview(composer)
 
         send.target = self
@@ -455,7 +463,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let readOnlyArchive = model.archivedWithoutContext && model.phase == .disconnected
         prompt.isEditable = !shuttingDown && !readOnlyArchive && (operation == nil || model.phase != .ready)
         refreshPickers()
-        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && hasSomethingToSend
         let preparing = operation != nil || model.phase == .connecting
         // A forced bezel colour ignores the disabled state, so a button that could not send looked ready to.
         if #unavailable(macOS 26.0) {
@@ -466,6 +474,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         cancel.isHidden = !preparing && model.phase != .prompting
         composerControls.refreshLayout()
         prompt.placeholder = readOnlyArchive ? "This conversation is read-only" : "Message \(selectedAgent.title)…"
+        attachmentStrip.show(attachments)
         refreshCommandMenu()
         // A banner is the more important thing on an empty page, so the heading yields to it,
         // and to the command menu, whose glass it would otherwise show through.
@@ -866,6 +875,35 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     /// Send never initializes or retries a connection, nor commits an in-progress command edit.
+    private var hasSomethingToSend: Bool {
+        !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    // MARK: Attachments
+
+    /// Takes a paste or drop that holds files or an image. Returns false for anything else, so
+    /// the field pastes it as text.
+    private func attach(from pasteboard: NSPasteboard) -> Bool {
+        guard prompt.isEditable else { return false }
+        let added = ComposerAttachment.attachments(from: pasteboard)
+        guard !added.isEmpty else { return false }
+        let room = ComposerAttachment.maximumCount - attachments.count
+        guard room > 0 else {
+            NSSound.beep()
+            return true
+        }
+        attachments += added.prefix(room)
+        if added.count > room { NSSound.beep() }
+        refresh()
+        return true
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        attachments.removeAll { $0.id == id }
+        refresh()
+        view.window?.makeFirstResponder(prompt)
+    }
+
     private func beginOperation(draft: String) {
         guard !shuttingDown, operation == nil, !changingConfiguration,
               !model.isChangingConfiguration,
@@ -883,21 +921,23 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             // Its recorded edits point into the draft that just left; undoing one against
             // the empty field corrupts the text system.
             composerUndo.removeAllActions()
+            let sent = attachments
+            attachments = []
             if sessionTitle == "New Session" {
                 let firstLine = draft.split(whereSeparator: \.isNewline).first.map(String.init) ?? draft
-                sessionTitle = String(firstLine.trimmingCharacters(in: .whitespaces).prefix(60))
+                let title = firstLine.trimmingCharacters(in: .whitespaces)
+                sessionTitle = String((title.isEmpty ? sent.first?.name ?? title : title).prefix(60))
                 onChange?()
             }
             operation = nil
             operationTask = nil
-            await model.send(draft)
+            await model.send(draft, attachments: sent)
         }
     }
 
     @objc private func sendPrompt() {
-        let text = prompt.string
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        beginOperation(draft: text)
+        guard hasSomethingToSend else { return }
+        beginOperation(draft: prompt.string)
     }
 
     @objc private func cancelPrompt() {
@@ -1007,6 +1047,40 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         refresh()
     }
 
+    /// A pasted image joins the composer without touching the draft, can be sent on its own,
+    /// keeps the composer inside the window at the smallest size, and can be taken out again.
+    /// Uses a private pasteboard, never the user's clipboard.
+    private func smokeTestAttachments() throws {
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 40, bitsPerSample: 8,
+                                            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                            bytesPerRow: 0, bitsPerPixel: 0),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw SmokeError.failed("Could not make a smoke image")
+        }
+        let board = NSPasteboard(name: NSPasteboard.Name("dev.latchapp.smoke.\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.setData(png, forType: .png)
+        prompt.string = ""
+        refresh()
+        guard attach(from: board), attachments.count == 1, prompt.string.isEmpty else {
+            throw SmokeError.failed("A pasted image did not become an attachment")
+        }
+        guard !attachmentStrip.isHidden, send.isEnabled else {
+            throw SmokeError.failed("An attachment must show in the composer and be sendable without text")
+        }
+        try smokeTestComposerBounds()
+        board.clearContents()
+        board.setString("Just text", forType: .string)
+        guard !attach(from: board), attachments.count == 1 else {
+            throw SmokeError.failed("Pasted text was taken as an attachment")
+        }
+        removeAttachment(attachments[0].id)
+        guard attachments.isEmpty, attachmentStrip.isHidden, !send.isEnabled else {
+            throw SmokeError.failed("Removing the attachment did not clear the composer")
+        }
+    }
+
     func smokeTestConversation(fixtureHome: URL) async throws {
         let localBin = fixtureHome.appendingPathComponent(".local/bin")
         let nodeBin = fixtureHome.appendingPathComponent(".local/share/fnm/node-versions/v99.0.0/installation/bin")
@@ -1076,6 +1150,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         prompt.keyDown(with: shiftReturn)
         guard prompt.string.contains("\n"), model.phase == .ready else { throw SmokeError.failed("Shift Return must insert a newline, not send") }
         try await smokeTestCommandMenu()
+        try smokeTestAttachments()
         prompt.string = "Keep working"
         refresh()
         guard send.isEnabled else { throw SmokeError.failed("Send stayed disabled") }

@@ -184,11 +184,15 @@ public actor ACPAgentRuntime {
     }
 
     public func prompt(_ text: String) async throws -> ACPPromptResponse {
+        try await prompt([.text(text)])
+    }
+
+    public func prompt(_ blocks: [ACPPromptBlock]) async throws -> ACPPromptResponse {
         try requireReady()
         guard let client else {
             throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState)
         }
-        return try await client.prompt(text)
+        return try await client.prompt(blocks)
     }
 
     public func cancelPrompt() async throws {

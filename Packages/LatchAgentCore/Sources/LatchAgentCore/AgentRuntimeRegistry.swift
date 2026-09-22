@@ -154,10 +154,17 @@ public actor AgentRuntimeRegistry {
         runtimeID: AgentRuntimeID,
         text: String
     ) async throws -> ACPPromptResponse {
+        try await prompt(runtimeID: runtimeID, blocks: [.text(text)])
+    }
+
+    public func prompt(
+        runtimeID: AgentRuntimeID,
+        blocks: [ACPPromptBlock]
+    ) async throws -> ACPPromptResponse {
         let runtime = try runtime(for: runtimeID)
         // A decision cannot outlive its prompt; release anything the agent left waiting.
         defer { cancelPendingPermissions(runtimeID: runtimeID) }
-        return try await runtime.prompt(text)
+        return try await runtime.prompt(blocks)
     }
 
     public func cancelPrompt(runtimeID: AgentRuntimeID) async throws {

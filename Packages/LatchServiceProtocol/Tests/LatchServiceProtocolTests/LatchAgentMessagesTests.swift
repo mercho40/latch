@@ -18,6 +18,11 @@ final class LatchAgentMessagesTests: XCTestCase {
             .stopRuntime(id: id),
             .newSession(runtimeID: id, cwd: "/tmp/project"),
             .prompt(runtimeID: id, text: "Hello"),
+            .prompt(runtimeID: id, blocks: [
+                .image(data: Data(repeating: 7, count: 64), mimeType: "image/png"),
+                .resourceLink(uri: "file:///tmp/project/notes.txt", name: "notes.txt", mimeType: "text/plain"),
+                .text("What is in these?"),
+            ]),
             .cancelPrompt(runtimeID: id),
             .setSessionConfigOption(runtimeID: id, configID: "effort", value: "high"),
             .setSessionModel(runtimeID: id, modelID: "model-b"),
@@ -29,6 +34,15 @@ final class LatchAgentMessagesTests: XCTestCase {
         for command in commands {
             try assertJSONRoundTrip(command)
         }
+    }
+
+    /// A resized screenshot is up to about a megabyte, and base64 grows it by a third; several
+    /// of them in one prompt must still cross the service boundary.
+    func testAPromptWithSeveralImagesFitsTheCodec() throws {
+        let image = ACPPromptBlock.image(data: Data(repeating: 1, count: 1_000_000), mimeType: "image/png")
+        let command = LatchAgentCommand.prompt(runtimeID: AgentRuntimeID("runtime-1"), blocks: Array(repeating: image, count: 4))
+        let codec = LatchServiceCodec()
+        XCTAssertEqual(try codec.decode(LatchAgentCommand.self, from: try codec.encode(command)), command)
     }
 
     func testResponsesRoundTripThroughJSON() throws {

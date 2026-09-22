@@ -514,6 +514,8 @@ private final class TranscriptMessageView: NSView {
     private let copy = TranscriptCopyButton(title: "Copy", target: nil, action: nil)
     private let disclosure = NSButton(title: "", target: nil, action: nil)
     private(set) var rawText: String?
+    /// A sent message's files and images, listed above its text. Set once: a user message never changes.
+    private var attachments: [ChatAttachment] = []
     /// Resumable Markdown state for this row, so a streaming answer re-parses from its
     /// first changed line instead of from the top on every frame. Unused by other roles.
     private let markdown = ChatMarkdown.Cache()
@@ -534,6 +536,7 @@ private final class TranscriptMessageView: NSView {
 
     init(message: ChatMessage) {
         role = message.role
+        attachments = message.attachments
         super.init(frame: .zero)
         label.stringValue = switch role {
         case .user: "You"
@@ -608,9 +611,12 @@ private final class TranscriptMessageView: NSView {
             paragraph.lineBreakMode = .byWordWrapping
             paragraph.lineSpacing = 3
             let font = NSFont.systemFont(ofSize: ChatMarkdown.bodyFontSize)
-            content = NSAttributedString(string: text, attributes: [
+            let body = NSMutableAttributedString(attributedString: Self.attachmentLine(attachments, paragraph: paragraph))
+            if body.length > 0, !text.isEmpty { body.append(NSAttributedString(string: "\n")) }
+            body.append(NSAttributedString(string: text, attributes: [
                 .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
-            ])
+            ]))
+            content = body
         }
         let next = content.string as NSString
         let shared = Self.sharedPrefix(previous, next)
@@ -634,6 +640,33 @@ private final class TranscriptMessageView: NSView {
             label.toolTip = firstLine
             updateDisclosureAccessibility()
         }
+    }
+
+    /// Each attachment as a symbol and its name, in the secondary colour, on the line above the text.
+    static func attachmentLine(_ attachments: [ChatAttachment], paragraph: NSParagraphStyle) -> NSAttributedString {
+        let font = NSFont.systemFont(ofSize: ChatMarkdown.bodyFontSize - 1)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph,
+        ]
+        let line = NSMutableAttributedString()
+        for (index, attachment) in attachments.enumerated() {
+            if index > 0 { line.append(NSAttributedString(string: "    ", attributes: attributes)) }
+            let symbol = attachment.kind == .image ? "photo" : "doc"
+            let configuration = NSImage.SymbolConfiguration(pointSize: font.pointSize, weight: .regular)
+                .applying(.init(hierarchicalColor: .secondaryLabelColor))
+            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: attachment.kind == .image ? "Image" : "File")?
+                .withSymbolConfiguration(configuration) {
+                let glyph = NSTextAttachment()
+                glyph.image = image
+                // Sit the symbol on the text's baseline rather than above it.
+                glyph.bounds = NSRect(x: 0, y: font.descender / 2, width: image.size.width, height: image.size.height)
+                let piece = NSMutableAttributedString(attachment: glyph)
+                piece.addAttributes(attributes, range: NSRange(location: 0, length: piece.length))
+                line.append(piece)
+            }
+            line.append(NSAttributedString(string: " " + attachment.name, attributes: attributes))
+        }
+        return line
     }
 
     /// "Title · status", with the status coloured when it is one a reader should not skim past.

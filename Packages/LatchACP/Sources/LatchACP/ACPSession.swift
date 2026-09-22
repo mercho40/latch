@@ -1,5 +1,28 @@
 import Foundation
 
+/// One block of a prompt. Text and resource links are baseline ACP; an image block is only
+/// for an agent whose prompt capabilities include `image`.
+public enum ACPPromptBlock: Codable, Equatable, Sendable {
+    case text(String)
+    case image(data: Data, mimeType: String)
+    /// A file or folder the agent reads for itself, by `file://` URI.
+    case resourceLink(uri: String, name: String, mimeType: String?)
+
+    public var content: ACPJSONValue {
+        switch self {
+        case let .text(text):
+            return .object(["type": .string("text"), "text": .string(text)])
+        case let .image(data, mimeType):
+            return .object(["type": .string("image"), "data": .string(data.base64EncodedString()),
+                            "mimeType": .string(mimeType)])
+        case let .resourceLink(uri, name, mimeType):
+            var block: [String: ACPJSONValue] = ["type": .string("resource_link"), "uri": .string(uri), "name": .string(name)]
+            if let mimeType { block["mimeType"] = .string(mimeType) }
+            return .object(block)
+        }
+    }
+}
+
 public struct ACPTextContent: Codable, Equatable, Sendable {
     public let type: String
     public let text: String

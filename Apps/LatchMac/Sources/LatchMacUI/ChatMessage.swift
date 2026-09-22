@@ -1,6 +1,15 @@
 import Foundation
 import LatchACP
 
+/// What a sent message carried besides its text. Only the name and, for a file, its path are
+/// kept: an image's bytes went to the agent and are not saved with the transcript.
+struct ChatAttachment: Codable, Equatable, Sendable {
+    enum Kind: String, Codable, Equatable, Sendable { case image, file }
+    let kind: Kind
+    let name: String
+    let path: String?
+}
+
 struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     enum Role: String, Codable, Equatable, Sendable {
         case user, assistant, tool
@@ -9,11 +18,33 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     let role: Role
     var text: String
+    var attachments: [ChatAttachment]
 
-    init(id: UUID = UUID(), role: Role, text: String) {
+    init(id: UUID = UUID(), role: Role, text: String, attachments: [ChatAttachment] = []) {
         self.id = id
         self.role = role
         self.text = text
+        self.attachments = attachments
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, role, text, attachments }
+
+    // Sessions saved before attachments existed have no key; most messages still have none,
+    // so an empty list is left out rather than written into every saved message.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        role = try container.decode(Role.self, forKey: .role)
+        text = try container.decode(String.self, forKey: .text)
+        attachments = try container.decodeIfPresent([ChatAttachment].self, forKey: .attachments) ?? []
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(role, forKey: .role)
+        try container.encode(text, forKey: .text)
+        if !attachments.isEmpty { try container.encode(attachments, forKey: .attachments) }
     }
 }
 
@@ -91,15 +122,25 @@ struct ChatHistory: Sendable {
         // The old implementation applies bounds BEFORE dropping restored empty
         // rows, which can affect which nonempty rows survive.
         for index in self.messages.indices.reversed() {
-            if self.messages[index].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if self.messages[index].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               self.messages[index].attachments.isEmpty {
                 visibleTextCount -= textCounts.remove(at: index)
                 self.messages.remove(at: index)
             }
         }
     }
 
-    mutating func appendUser(_ text: String) {
-        append(text, role: .user, newMessage: true)
+    mutating func appendUser(_ text: String, attachments: [ChatAttachment] = []) {
+        guard !attachments.isEmpty else {
+            append(text, role: .user, newMessage: true)
+            return
+        }
+        // The text may be empty: the attachments alone make it a message.
+        clearPendingWhitespace()
+        adjacentMessageID = nil
+        adjacentRole = .user
+        addMessage(ChatMessage(role: .user, text: text, attachments: attachments))
+        enforceBounds()
     }
 
     mutating func appendAssistant(_ text: String) {
@@ -191,7 +232,7 @@ struct ChatHistory: Sendable {
             textCounts[0] = messages[0].text.count
             visibleTextCount = textCounts[0]
             // Only truncation can turn an existing nonempty row into whitespace.
-            if messages[0].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if messages[0].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, messages[0].attachments.isEmpty {
                 messages.removeAll()
                 textCounts.removeAll()
                 visibleTextCount = 0

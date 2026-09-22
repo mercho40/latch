@@ -11,6 +11,53 @@ final class ChatInputView: NSTextView {
     var placeholder = "Message the agent…" { didSet { needsDisplay = true } }
     /// Drawn after the text in the placeholder colour, for what a chosen command expects next.
     var inputHint: String? { didSet { if inputHint != oldValue { needsDisplay = true } } }
+    /// Offered a paste or a drop first; returns whether it took the content as attachments.
+    /// Anything it declines is pasted or dropped as text, as before.
+    var onAttach: ((NSPasteboard) -> Bool)?
+    /// Where Paste reads from. Tests substitute a private pasteboard for the user's clipboard.
+    var pasteSource = NSPasteboard.general
+
+    override func paste(_ sender: Any?) {
+        if onAttach?(pasteSource) == true { return }
+        super.paste(sender)
+    }
+
+    /// Whether Paste would bring in attachments. A plain-text field enables Paste only when
+    /// the clipboard holds text, so without this a screenshot left Paste, and ⌘V, disabled.
+    var canPasteAttachments: Bool {
+        onAttach != nil && isEditable && ComposerAttachment.canAttach(from: pasteSource)
+    }
+
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(paste(_:)), canPasteAttachments { return true }
+        return super.validateMenuItem(item)
+    }
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), canPasteAttachments { return true }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] {
+        super.acceptableDragTypes + [.fileURL, .png, .tiff]
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        attaches(sender) ? .copy : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        attaches(sender) ? .copy : super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        if attaches(sender), onAttach?(sender.draggingPasteboard) == true { return true }
+        return super.performDragOperation(sender)
+    }
+
+    private func attaches(_ drag: any NSDraggingInfo) -> Bool {
+        onAttach != nil && isEditable && ComposerAttachment.canAttach(from: drag.draggingPasteboard)
+    }
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

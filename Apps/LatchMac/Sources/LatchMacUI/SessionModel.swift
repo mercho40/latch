@@ -59,6 +59,8 @@ final class SessionModel {
     /// Unlike the configuration's, this starts from zero rather than the session reply's
     /// position: the reply carries no commands, so a list sent just before it is still the newest.
     private var commandsSequence: UInt64 = 0
+    /// From the agent's prompt capabilities at connection; without it, images go as file links.
+    private(set) var acceptsImages = false
 
     init(makeClient: @escaping @MainActor () -> AgentServiceClient = AgentServiceClients.makeDefault) {
         self.makeClient = makeClient
@@ -188,6 +190,7 @@ final class SessionModel {
             phase = .ready
             if case let .runtimeStarted(_, initialization) = result {
                 status = "Connected · \(initialization.agentInfo?.title ?? initialization.agentInfo?.name ?? "ACP agent")"
+                acceptsImages = initialization.agentCapabilities.acceptsImages
             } else { status = "Connected" }
         } catch {
             _ = try? await client.execute(.stopRuntime(id: id))
@@ -259,9 +262,19 @@ final class SessionModel {
         onChange?()
     }
 
-    func send(_ text: String) async {
-        guard phase == .ready, !isChangingConfiguration, let id = runtimeID,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    func send(_ text: String, attachments: [ComposerAttachment] = []) async {
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard phase == .ready, !isChangingConfiguration, let id = runtimeID, hasText || !attachments.isEmpty else { return }
+        // Attachments first, then what the user wrote about them. A pasted image an agent cannot
+        // take is written to a file here, before anything is recorded as sent.
+        let blocks: [ACPPromptBlock]
+        do {
+            blocks = try attachments.map { try $0.block(acceptsImages: acceptsImages) } + (hasText ? [.text(text)] : [])
+        } catch {
+            errorMessage = "An attachment could not be prepared: \(error.localizedDescription)"
+            onChange?()
+            return
+        }
         let token = generation
         // A prompt is user-initiated work that must keep streaming while Latch is in the
         // background; App Nap would otherwise throttle the app that renders it. The Mac is
@@ -274,11 +287,11 @@ final class SessionModel {
         promptGeneration = UUID()
         cancellationRequested = false
         status = "Working…"
-        history.appendUser(text)
+        history.appendUser(text, attachments: attachments.map(\.record))
         publishHistory()
         onChange?()
         do {
-            let result = try await client.execute(.prompt(runtimeID: id, text: text))
+            let result = try await client.execute(.prompt(runtimeID: id, blocks: blocks))
             guard generation == token else { return }
             if case let .promptCompleted(_, response) = result {
                 status = response.stopReason == "cancelled" ? "Cancelled" : "Ready · \(response.stopReason)"
@@ -441,6 +454,7 @@ final class SessionModel {
         isChangingConfiguration = false
         commands = []
         commandsSequence = 0
+        acceptsImages = false
     }
 
     private func isStateUpdate(_ notification: ACPSessionNotification) -> Bool {

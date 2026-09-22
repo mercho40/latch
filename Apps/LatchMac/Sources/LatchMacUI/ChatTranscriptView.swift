@@ -84,6 +84,7 @@ final class ChatTranscriptView: NSView {
         jump.action = #selector(jumpToLatest)
         jump.isHidden = true
         addSubview(bottomBlur, positioned: .above, relativeTo: scrollView)
+        addSubview(deepBlur, positioned: .above, relativeTo: bottomBlur)
         addSubview(topBlur, positioned: .above, relativeTo: scrollView)
         addSubview(jump)
         findBar.isHidden = true
@@ -176,9 +177,12 @@ final class ChatTranscriptView: NSView {
     }
     /// Behind the composer the rows are blurred, more so toward the window's edge, the way a
     /// messaging app lets a conversation run under its input bar.
-    private let bottomBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 24)
+    private let bottomBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 24, radius: 4)
+    /// Behind the composer itself the blur deepens, so what shows in the margins around it is a
+    /// wash rather than readable text. Stacked on the band above, it makes the blur progressive.
+    private let deepBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 16, radius: 12)
     /// Under the toolbar the rows blur as well as fade, so they leave the view rather than being cut.
-    private let topBlur = EdgeBlurView(opaqueEdge: .top, lead: 30)
+    private let topBlur = EdgeBlurView(opaqueEdge: .top, lead: 30, radius: 4)
 
     override func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
@@ -244,6 +248,10 @@ final class ChatTranscriptView: NSView {
         let blurHeight = bottomOverlay > 0 ? bottomOverlay + bottomBlur.lead : 0
         bottomBlur.isHidden = blurHeight == 0
         bottomBlur.frame = NSRect(x: 0, y: bounds.height - blurHeight, width: bandWidth, height: blurHeight)
+        // From the composer's top edge down; the 12-point gap above it is the band above's alone.
+        let deepHeight = max(0, bottomOverlay - 12)
+        deepBlur.isHidden = deepHeight == 0
+        deepBlur.frame = NSRect(x: 0, y: bounds.height - deepHeight, width: bandWidth, height: deepHeight)
         jump.isHidden = followsBottom || bottom == 0
     }
 
@@ -979,18 +987,18 @@ final class EdgeBlurView: NSView {
     private let dim = CAGradientLayer()
     private let ramp = CAGradientLayer()
 
-    init(opaqueEdge: Edge, lead: CGFloat) {
+    init(opaqueEdge: Edge, lead: CGFloat, radius: CGFloat) {
         edge = opaqueEdge
         self.lead = lead
         super.init(frame: .zero)
         wantsLayer = true
         layerUsesCoreImageFilters = true
         let blur = CIFilter(name: "CIGaussianBlur")!
-        blur.setValue(10, forKey: kCIInputRadiusKey)
+        blur.setValue(radius, forKey: kCIInputRadiusKey)
         backgroundFilters = [blur]
         layer?.addSublayer(dim)
         // The same ramp masks the blur and the dimming, so both fade in together.
-        ramp.colors = [NSColor.clear.cgColor, NSColor.black.withAlphaComponent(0.9).cgColor, NSColor.black.cgColor]
+        ramp.colors = [NSColor.clear.cgColor, NSColor.black.withAlphaComponent(0.5).cgColor, NSColor.black.cgColor]
         layer?.mask = ramp
         updateColors()
     }
@@ -1019,8 +1027,8 @@ final class EdgeBlurView: NSView {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let page = NSColor.windowBackgroundColor
             let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            dim.colors = [page.withAlphaComponent(0).cgColor, page.withAlphaComponent(dark ? 0.35 : 0.3).cgColor,
-                          page.withAlphaComponent(dark ? 0.7 : 0.6).cgColor]
+            dim.colors = [page.withAlphaComponent(0).cgColor, page.withAlphaComponent(dark ? 0.1 : 0.08).cgColor,
+                          page.withAlphaComponent(dark ? 0.3 : 0.25).cgColor]
         }
     }
 

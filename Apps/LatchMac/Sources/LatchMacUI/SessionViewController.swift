@@ -19,7 +19,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                      customCommand: customCommand,
                      draft: prompt.string,
                      messages: pendingNewContext ? [] : model.messages,
-                     agentSessionID: pendingNewContext ? nil : model.savedAgentSessionID)
+                     agentSessionID: pendingNewContext ? nil : model.savedAgentSessionID,
+                     lastActiveAt: model.lastActiveAt)
     }
 
     /// Asks the window for a sibling session in this workspace on the given harness.
@@ -55,17 +56,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// The sidebar row. Only working, a pending decision, a failure and an unread reply get a
     /// mark; a session at rest says which agent it belongs to and nothing else, so "Ready ·
     /// end_turn" and "Connected ·" never reach the list.
-    var sidebarRow: (status: SessionCellView.Status, detail: String) {
+    func sidebarRow(now: Date) -> (status: SessionCellView.Status, detail: String) {
         if model.permissions.current != nil { return (.waiting, "Waiting for a decision") }
         if model.errorMessage != nil {
             return (.failed, model.status == "Not connected" ? "Couldn’t connect" : model.status)
         }
-        return switch model.phase {
-        case .connecting, .stopping, .prompting: (.working, model.status)
-        case .ready: (hasUnseenReply ? .unseen : .resting, selectedAgent.title)
-        case .disconnected: (.resting, displayStatus)
+        switch model.phase {
+        case .prompting where model.status == "Working…":
+            // How long this turn has run, so a long one looks long.
+            let elapsed = model.promptStartedAt.map { RelativeTime.duration(now.timeIntervalSince($0)) }
+            return (.working, elapsed.map { "Working · \($0)" } ?? model.status)
+        case .connecting, .stopping, .prompting: return (.working, model.status)
+        case .ready: return (hasUnseenReply ? .unseen : .resting, selectedAgent.title)
+        case .disconnected: return (.resting, displayStatus)
         }
     }
+
+    /// Whether the sidebar should tick every second for this session.
+    var isWorkingTurn: Bool { model.phase == .prompting }
 
     /// What this session wants the user to know about, whether or not it is on screen.
     var attention: AttentionCenter.State {
@@ -215,7 +223,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         if let savedSession {
             sessionTitle = savedSession.title
             prompt.string = savedSession.draft
-            model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID)
+            model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID,
+                          lastActiveAt: savedSession.lastActiveAt)
+        } else {
+            // A new session was last active when it was made, so it sorts and reads as "now".
+            model.restore(messages: [], agentSessionID: nil, lastActiveAt: model.now())
         }
         model.onChange = { [weak self] in
             self?.refresh()

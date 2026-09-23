@@ -12,6 +12,9 @@ struct SavedSession: Codable, Equatable, Sendable {
     var draft: String
     var messages: [ChatMessage]
     var agentSessionID: String?
+    /// When the conversation last moved: a prompt sent or a turn finished. Absent in sessions
+    /// saved before it was kept, which then show no time.
+    var lastActiveAt: Date? = nil
 }
 
 struct SavedSessionLibrary: Codable, Equatable, Sendable {

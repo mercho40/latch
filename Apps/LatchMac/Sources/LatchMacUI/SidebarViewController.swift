@@ -24,6 +24,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     let outline = NSOutlineView()
     private let scroll = NSScrollView()
+    /// Keeps "5m" from going stale; minutes are the finest the times show.
+    private var clock: Timer?
+    /// Counts a working turn's seconds, and runs only while one is working.
+    private var ticker: Timer?
+
+    isolated deinit {
+        clock?.invalidate()
+        ticker?.invalidate()
+    }
 
     var selectedSession: SessionViewController? {
         outline.item(atRow: outline.selectedRow) as? SessionViewController
@@ -57,6 +66,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scroll.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
 
+        clock = Self.repeating(every: 30) { [weak self] in self?.refreshRows() }
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -159,6 +169,33 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func refreshRows() {
         let rows = IndexSet(integersIn: 0..<outline.numberOfRows)
         outline.reloadData(forRowIndexes: rows, columnIndexes: [0])
+        updateTicker()
+    }
+
+    private func updateTicker() {
+        let working = allSessions.contains(where: \.isWorkingTurn)
+        if working, ticker == nil {
+            ticker = Self.repeating(every: 1) { [weak self] in self?.refreshWorkingRows() }
+        } else if !working {
+            ticker?.invalidate()
+            ticker = nil
+        }
+    }
+
+    /// Only the rows whose timers are counting, not the whole list, once a second.
+    private func refreshWorkingRows() {
+        let rows = IndexSet(allSessions.filter(\.isWorkingTurn).map { outline.row(forItem: $0) }.filter { $0 >= 0 })
+        guard !rows.isEmpty else { return updateTicker() }
+        outline.reloadData(forRowIndexes: rows, columnIndexes: [0])
+    }
+
+    /// On the main run loop in its common modes, so times keep moving while a menu is open or
+    /// the list is scrolling. A little tolerance lets the system batch the wakeups.
+    private static func repeating(every interval: TimeInterval, _ body: @escaping @MainActor () -> Void) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in MainActor.assumeIsolated { body() } }
+        timer.tolerance = interval / 10
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
     }
 
     var allSessions: [SessionViewController] { workspaces.flatMap(\.sessions) }
@@ -221,8 +258,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             guard let self, let session else { return }
             self.onCloseSession?(session)
         }
-        let row = session.sidebarRow
-        cell.configure(title: session.sessionTitle, status: row.status, detail: row.detail)
+        let now = Date()
+        let row = session.sidebarRow(now: now)
+        let active = session.model.lastActiveAt
+        cell.configure(title: session.sessionTitle, status: row.status, detail: row.detail,
+                       time: active.map { RelativeTime.since($0, now: now) },
+                       spokenTime: active.map { RelativeTime.spoken($0, now: now) })
         return cell
     }
 
@@ -346,10 +387,14 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
     private var status = Status.resting
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
+    /// How long ago the session was active, where a resting row has nothing else to say.
+    private let time = NSTextField(labelWithString: "")
+    private var spokenTime: String?
     private let glyph = NSImageView()
     private let spinner = NSProgressIndicator()
     private let closeButton = NSButton()
     private var titleClearsAccessory: NSLayoutConstraint!
+    private var titleClearsTime: NSLayoutConstraint!
     private var isHovered = false {
         didSet { if isHovered != oldValue { updateAccessory() } }
     }
@@ -365,10 +410,16 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
         title.drawsBackground = false
         title.delegate = self
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        subtitle.font = .systemFont(ofSize: 11)
+        // Tabular digits, so a ticking "Working · 1m 12s" does not shuffle as it counts.
+        subtitle.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         subtitle.textColor = .secondaryLabelColor
         subtitle.lineBreakMode = .byTruncatingTail
         subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        time.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        time.textColor = .secondaryLabelColor
+        time.alignment = .right
+        time.setContentHuggingPriority(.required, for: .horizontal)
+        time.setContentCompressionResistancePriority(.required, for: .horizontal)
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
@@ -382,17 +433,20 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
         closeButton.action = #selector(closeClicked)
         let slot = NSLayoutGuide()
         addLayoutGuide(slot)
-        for view in [title, subtitle, glyph, spinner, closeButton] {
+        for view in [title, subtitle, time, glyph, spinner, closeButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         textField = title
         titleClearsAccessory = title.trailingAnchor.constraint(equalTo: slot.leadingAnchor, constant: -4)
+        titleClearsTime = title.trailingAnchor.constraint(lessThanOrEqualTo: time.leadingAnchor, constant: -6)
         NSLayoutConstraint.activate([
             slot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
             slot.centerYAnchor.constraint(equalTo: title.centerYAnchor),
             slot.widthAnchor.constraint(equalToConstant: 16),
             slot.heightAnchor.constraint(equalToConstant: 16),
+            time.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            time.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
             title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.textInset),
             title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             title.topAnchor.constraint(equalTo: topAnchor, constant: 3),
@@ -471,17 +525,20 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
 
     // MARK: Content
 
-    func configure(title text: String, status: Status, detail: String) {
+    func configure(title text: String, status: Status, detail: String, time shortTime: String? = nil, spokenTime: String? = nil) {
         guard !title.isEditable else { return }
         committedTitle = text
         title.stringValue = text
         subtitle.stringValue = detail
+        time.stringValue = shortTime ?? ""
+        self.spokenTime = spokenTime
         self.status = status
         // An unread reply is the one row state worth reading from across the list.
         title.font = .systemFont(ofSize: 13, weight: status == .unseen ? .semibold : .regular)
         updateAccessory()
         let unread = status == .unseen ? ", unread reply" : ""
-        setAccessibilityLabel("\(text), \(detail)\(unread)")
+        let active = spokenTime.map { ", active \($0)" } ?? ""
+        setAccessibilityLabel("\(text), \(detail)\(unread)\(active)")
     }
 
     override var backgroundStyle: NSView.BackgroundStyle {
@@ -507,6 +564,10 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
             glyph.symbolConfiguration = .init(pointSize: mark.size, weight: .regular)
             glyph.contentTintColor = emphasized ? .alternateSelectedControlTextColor : mark.color
         }
+        // The time takes the slot only at rest: a mark, or the close button, means more.
+        let showsTime = !closing && status == .resting && !time.stringValue.isEmpty
+        time.isHidden = !showsTime
+        titleClearsTime.isActive = showsTime
         titleClearsAccessory.isActive = closing || status != .resting
     }
 }

@@ -38,8 +38,9 @@ final class SessionModel {
     private(set) var archivedWithoutContext = false
     private var loadedThroughSequence: UInt64?
 
-    func restore(messages: [ChatMessage], agentSessionID: String?) {
+    func restore(messages: [ChatMessage], agentSessionID: String?, lastActiveAt: Date? = nil) {
         guard phase == .disconnected else { return }
+        self.lastActiveAt = lastActiveAt
         history.restore(messages)
         savedAgentSessionID = agentSessionID
         archivedWithoutContext = agentSessionID == nil && !messages.isEmpty
@@ -66,6 +67,12 @@ final class SessionModel {
     private var commandsSequence: UInt64 = 0
     /// From the agent's prompt capabilities at connection; without it, images go as file links.
     private(set) var acceptsImages = false
+    /// When the conversation last moved: a prompt sent, or a turn that finished.
+    private(set) var lastActiveAt: Date?
+    /// When the turn now running began. Only meaningful while `phase` is `.prompting`.
+    private(set) var promptStartedAt: Date?
+    /// The clock for both; tests substitute their own.
+    var now: () -> Date = Date.init
 
     init(makeClient: @escaping @MainActor () -> AgentServiceClient = AgentServiceClients.makeDefault) {
         self.makeClient = makeClient
@@ -290,6 +297,8 @@ final class SessionModel {
         defer { ProcessInfo.processInfo.endActivity(activity) }
         errorMessage = nil
         phase = .prompting
+        promptStartedAt = now()
+        lastActiveAt = promptStartedAt
         promptGeneration = UUID()
         cancellationRequested = false
         status = "Working…"
@@ -309,6 +318,7 @@ final class SessionModel {
             status = "Prompt failed"
         }
         phase = .ready
+        lastActiveAt = now()
         cancellationRequested = false
         permissions.cancelAll()
         onChange?()

@@ -79,7 +79,7 @@ final class SessionPersistenceTests: XCTestCase {
             XCTAssertEqual(selected.model.messages, second.messages)
             XCTAssertTrue(selected.view.window === window.window)
             XCTAssertFalse(selected.banner.isHidden, "A failed session must say so in its banner")
-            XCTAssertEqual(selected.banner.displayedMessage, selected.model.errorMessage)
+            XCTAssertEqual(selected.banner.displayedDetail, selected.model.errorMessage, "The error itself, on its own line")
             let unopened = try XCTUnwrap(sidebar.allSessions.first)
             XCTAssertFalse(unopened.isViewLoaded)
             XCTAssertNil(unopened.model.errorMessage)

@@ -26,9 +26,14 @@ final class TranscriptLayoutManager: NSLayoutManager {
         guard let container = textContainers.first else { return }
         let width = container.size.width
         eachBlock(.latchCodeBlock, in: glyphsToShow) { rect in
-            NSColor.quaternaryLabelColor.setFill()
             let panel = NSRect(x: origin.x, y: origin.y + rect.minY, width: width, height: rect.height)
+            LatchPalette.codeBlock.setFill()
             NSBezierPath(roundedRect: panel, xRadius: Self.codeRadius, yRadius: Self.codeRadius).fill()
+            LatchPalette.codeBlockEdge.setStroke()
+            let edge = NSBezierPath(roundedRect: panel.insetBy(dx: 0.5, dy: 0.5),
+                                    xRadius: Self.codeRadius - 0.5, yRadius: Self.codeRadius - 0.5)
+            edge.lineWidth = 1
+            edge.stroke()
         }
         eachBlock(.latchQuote, in: glyphsToShow) { rect in
             NSColor.tertiaryLabelColor.setFill()

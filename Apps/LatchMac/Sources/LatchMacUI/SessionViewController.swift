@@ -542,18 +542,23 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             bannerRow.isHidden = banner.isHidden
             return
         }
-        let failure = model.errorMessage.map { message in
-            selectedAgent != .custom && disconnected ? startupError(message) : message
-        } ?? launchProblem
+        // The agent's words go on their own line, then one line of advice: Latch's own for this
+        // failure when it has some, otherwise the agent's setup hint for one that cannot start.
+        let failure: (detail: String, advice: String)? = model.errorMessage.map { message in
+            let builtIn = selectedAgent != .custom && disconnected
+            let advice = model.errorAdvice ?? (builtIn ? selectedRecipe?.setup : nil) ?? ""
+            return (Self.agentWords(builtIn ? withoutLaunchInternals(message) : message), advice)
+        } ?? launchProblem.map { ("", $0) }
         guard let failure, !shuttingDown else {
             banner.update(key: nil, title: "", message: "", severity: .error, actions: [])
             bannerRow.isHidden = true
             return
         }
         banner.update(
-            key: "\(model.phase)\u{0}\(selectedAgent.rawValue)\u{0}\(failure)",
+            key: "\(model.phase)\u{0}\(selectedAgent.rawValue)\u{0}\(failure.detail)\u{0}\(failure.advice)",
             title: disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem",
-            message: failure,
+            message: failure.advice,
+            detail: failure.detail,
             severity: disconnected ? .error : .warning,
             actions: [
                 SessionBannerView.Action(title: "Retry") { [weak self] in self?.retryConnection() },
@@ -562,6 +567,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                 },
             ])
         bannerRow.isHidden = banner.isHidden
+    }
+
+    /// The banner's title already names the agent, so the service's "Agent reported:" prefix
+    /// would only repeat it.
+    static func agentWords(_ message: String) -> String {
+        let prefix = "Agent reported: "
+        return message.hasPrefix(prefix) ? String(message.dropFirst(prefix.count)) : message
     }
 
     /// The recovery path for everything the banner reports: rescan the filesystem, rebuild
@@ -575,7 +587,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         initializeSelection()
     }
 
-    private func startupError(_ message: String) -> String {
+    private func withoutLaunchInternals(_ message: String) -> String {
         // Preserve the actual failure, but keep launch implementation details out of built-in UI.
         var detail = message
         if let recipe = selectedRecipe, let parsed = try? AgentCommand(recipe.command) {
@@ -585,7 +597,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                 detail = detail.replacingOccurrences(of: value, with: selectedAgent.title)
             }
         }
-        return "\(detail) \(selectedRecipe?.setup ?? "")"
+        return detail
     }
 
     private func refreshPickers() {

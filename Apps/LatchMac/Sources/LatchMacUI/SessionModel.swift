@@ -13,7 +13,12 @@ final class SessionModel {
     var messages: [ChatMessage] { history.messages }
     var transcript: String { history.transcript }
     private var history = ChatHistory()
-    private(set) var errorMessage: String?
+    /// What went wrong, in the words it arrived in. Setting it clears `errorAdvice`, so
+    /// advice never outlives the failure it was written for.
+    private(set) var errorMessage: String? { didSet { errorAdvice = nil } }
+    /// What to do about `errorMessage`, in Latch's words; kept apart so the banner can set
+    /// the agent's text off from the advice instead of running them into one sentence.
+    private(set) var errorAdvice: String?
     static let idleSavedStatus = "Saved · Not connected"
     private(set) var cancellationRequested = false
     private(set) var configuration = SessionConfiguration()
@@ -200,8 +205,8 @@ final class SessionModel {
             clearConfiguration()
             phase = .disconnected
             status = resumingID == nil ? "Not connected" : "Saved · Resume failed"
-            errorMessage = resumingID == nil ? error.localizedDescription
-                : "\(error.localizedDescription) Saved history is unchanged. Retry, or create a new session."
+            errorMessage = error.localizedDescription
+            if resumingID != nil { errorAdvice = "Your saved history is unchanged. Retry, or start a new session." }
         }
         onChange?()
     }
@@ -271,7 +276,8 @@ final class SessionModel {
         do {
             blocks = try attachments.map { try $0.block(acceptsImages: acceptsImages) } + (hasText ? [.text(text)] : [])
         } catch {
-            errorMessage = "An attachment could not be prepared: \(error.localizedDescription)"
+            errorMessage = error.localizedDescription
+            errorAdvice = "An attachment could not be prepared. Remove it and send again."
             onChange?()
             return
         }
@@ -326,7 +332,8 @@ final class SessionModel {
         cancellationRequested = false
         phase = .stopping
         status = "Sign-in required"
-        errorMessage = "\(error.localizedDescription) Sign in with the agent, then try again."
+        errorMessage = error.localizedDescription
+        errorAdvice = "Sign in with the agent, then try again."
         onChange?()
         let stoppingClient = client
         let stop = Task {

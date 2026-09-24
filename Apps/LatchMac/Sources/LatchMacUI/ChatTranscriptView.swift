@@ -466,6 +466,17 @@ final class ChatTranscriptView: NSView {
         }
         probe.jumpToLatest()
         try require(abs(probe.document.frame.height - probe.scrollView.contentView.bounds.maxY) < 2, "Jump did not reach bottom")
+        let longCommand = "echo \"=== tree ===\" && " + String(repeating: "find . -name '*.swift' -not -path './.build/*' | wc -l && ", count: 12)
+        let longTool = ChatMessage(role: .tool, text: longCommand + "true · completed\nOutput")
+        probe.update(messages: [longTool], isWorking: false)
+        probe.layoutSubtreeIfNeeded()
+        if let header = probe.rows[longTool.id]?.subviews.compactMap({ $0 as? NSTextField }).first(where: { !$0.isHidden }), let cell = header.cell {
+            let oneLine = ceil(header.font?.boundingRectForFont.height ?? 18)
+            let needed = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: header.bounds.width, height: .greatestFiniteMagnitude)).height
+            try require(needed <= oneLine + 1, "A long tool title wraps instead of truncating, and its status is lost")
+        } else {
+            try require(false, "Missing tool header")
+        }
         var tool = ChatMessage(role: .tool, text: "Read Sources · running\nFull tool details")
         probe.update(messages: [tool], isWorking: false)
         let toolRow = probe.rows[tool.id]!
@@ -672,7 +683,13 @@ private final class TranscriptMessageView: NSView {
     /// "Title · status", with the status coloured when it is one a reader should not skim past.
     /// Colour backs up the word, never replaces it, so nothing depends on seeing red.
     static func toolHeader(_ line: String, font: NSFont?) -> NSAttributedString {
-        let base: [NSAttributedString.Key: Any] = [.font: font ?? .systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]
+        // An attributed title brings its own paragraph style, and without one it wraps by word:
+        // a long shell command lost its tail and its status to the clipped second line. Cutting
+        // the middle keeps what ran and how it went; the tooltip has the whole line.
+        let oneLine = NSMutableParagraphStyle()
+        oneLine.lineBreakMode = .byTruncatingMiddle
+        let base: [NSAttributedString.Key: Any] = [.font: font ?? .systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor,
+                                                   .paragraphStyle: oneLine]
         let result = NSMutableAttributedString(string: line, attributes: base)
         guard let separator = line.range(of: " · ", options: .backwards) else { return result }
         let status = line[separator.upperBound...].lowercased()

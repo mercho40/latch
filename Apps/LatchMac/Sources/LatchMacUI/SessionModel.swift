@@ -13,7 +13,12 @@ final class SessionModel {
     var messages: [ChatMessage] { history.messages }
     var transcript: String { history.transcript }
     private var history = ChatHistory()
-    private(set) var errorMessage: String?
+    /// What went wrong, in the words it arrived in. Setting it clears `errorAdvice`, so
+    /// advice never outlives the failure it was written for.
+    private(set) var errorMessage: String? { didSet { errorAdvice = nil } }
+    /// What to do about `errorMessage`, in Latch's words; kept apart so the banner can set
+    /// the agent's text off from the advice instead of running them into one sentence.
+    private(set) var errorAdvice: String?
     static let idleSavedStatus = "Saved · Not connected"
     private(set) var cancellationRequested = false
     private(set) var configuration = SessionConfiguration()
@@ -33,8 +38,9 @@ final class SessionModel {
     private(set) var archivedWithoutContext = false
     private var loadedThroughSequence: UInt64?
 
-    func restore(messages: [ChatMessage], agentSessionID: String?) {
+    func restore(messages: [ChatMessage], agentSessionID: String?, lastActiveAt: Date? = nil) {
         guard phase == .disconnected else { return }
+        self.lastActiveAt = lastActiveAt
         history.restore(messages)
         savedAgentSessionID = agentSessionID
         archivedWithoutContext = agentSessionID == nil && !messages.isEmpty
@@ -53,7 +59,20 @@ final class SessionModel {
     private var configurationSequence: UInt64 = 0
     private var legacyModelSequence: UInt64 = 0
     private var legacyModeSequence: UInt64 = 0
-    private var pendingConfigurationUpdates: [ACPSessionNotification] = []
+    private var pendingStateUpdates: [ACPSessionNotification] = []
+    /// The agent's slash commands, replaced whole by each update. Empty until it sends some.
+    private(set) var commands: [ACPAvailableCommand] = []
+    /// Unlike the configuration's, this starts from zero rather than the session reply's
+    /// position: the reply carries no commands, so a list sent just before it is still the newest.
+    private var commandsSequence: UInt64 = 0
+    /// From the agent's prompt capabilities at connection; without it, images go as file links.
+    private(set) var acceptsImages = false
+    /// When the conversation last moved: a prompt sent, or a turn that finished.
+    private(set) var lastActiveAt: Date?
+    /// When the turn now running began. Only meaningful while `phase` is `.prompting`.
+    private(set) var promptStartedAt: Date?
+    /// The clock for both; tests substitute their own.
+    var now: () -> Date = Date.init
 
     init(makeClient: @escaping @MainActor () -> AgentServiceClient = AgentServiceClients.makeDefault) {
         self.makeClient = makeClient
@@ -176,13 +195,14 @@ final class SessionModel {
             configurationSequence = sequence ?? 0
             legacyModelSequence = sequence ?? 0
             legacyModeSequence = sequence ?? 0
-            for update in pendingConfigurationUpdates where update.sessionId == sessionID {
-                applyConfigurationUpdate(update)
+            for update in pendingStateUpdates where update.sessionId == sessionID {
+                applyStateUpdate(update)
             }
-            pendingConfigurationUpdates.removeAll()
+            pendingStateUpdates.removeAll()
             phase = .ready
             if case let .runtimeStarted(_, initialization) = result {
                 status = "Connected · \(initialization.agentInfo?.title ?? initialization.agentInfo?.name ?? "ACP agent")"
+                acceptsImages = initialization.agentCapabilities.acceptsImages
             } else { status = "Connected" }
         } catch {
             _ = try? await client.execute(.stopRuntime(id: id))
@@ -192,8 +212,8 @@ final class SessionModel {
             clearConfiguration()
             phase = .disconnected
             status = resumingID == nil ? "Not connected" : "Saved · Resume failed"
-            errorMessage = resumingID == nil ? error.localizedDescription
-                : "\(error.localizedDescription) Saved history is unchanged. Retry, or create a new session."
+            errorMessage = error.localizedDescription
+            if resumingID != nil { errorAdvice = "Your saved history is unchanged. Retry, or start a new session." }
         }
         onChange?()
     }
@@ -254,9 +274,20 @@ final class SessionModel {
         onChange?()
     }
 
-    func send(_ text: String) async {
-        guard phase == .ready, !isChangingConfiguration, let id = runtimeID,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    func send(_ text: String, attachments: [ComposerAttachment] = []) async {
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard phase == .ready, !isChangingConfiguration, let id = runtimeID, hasText || !attachments.isEmpty else { return }
+        // Attachments first, then what the user wrote about them. A pasted image an agent cannot
+        // take is written to a file here, before anything is recorded as sent.
+        let blocks: [ACPPromptBlock]
+        do {
+            blocks = try attachments.map { try $0.block(acceptsImages: acceptsImages) } + (hasText ? [.text(text)] : [])
+        } catch {
+            errorMessage = error.localizedDescription
+            errorAdvice = "An attachment could not be prepared. Remove it and send again."
+            onChange?()
+            return
+        }
         let token = generation
         // A prompt is user-initiated work that must keep streaming while Latch is in the
         // background; App Nap would otherwise throttle the app that renders it. The Mac is
@@ -266,14 +297,16 @@ final class SessionModel {
         defer { ProcessInfo.processInfo.endActivity(activity) }
         errorMessage = nil
         phase = .prompting
+        promptStartedAt = now()
+        lastActiveAt = promptStartedAt
         promptGeneration = UUID()
         cancellationRequested = false
         status = "Working…"
-        history.appendUser(text)
+        history.appendUser(text, attachments: attachments.map(\.record))
         publishHistory()
         onChange?()
         do {
-            let result = try await client.execute(.prompt(runtimeID: id, text: text))
+            let result = try await client.execute(.prompt(runtimeID: id, blocks: blocks))
             guard generation == token else { return }
             if case let .promptCompleted(_, response) = result {
                 status = response.stopReason == "cancelled" ? "Cancelled" : "Ready · \(response.stopReason)"
@@ -285,6 +318,7 @@ final class SessionModel {
             status = "Prompt failed"
         }
         phase = .ready
+        lastActiveAt = now()
         cancellationRequested = false
         permissions.cancelAll()
         onChange?()
@@ -308,7 +342,8 @@ final class SessionModel {
         cancellationRequested = false
         phase = .stopping
         status = "Sign-in required"
-        errorMessage = "\(error.localizedDescription) Sign in with the agent, then try again."
+        errorMessage = error.localizedDescription
+        errorAdvice = "Sign in with the agent, then try again."
         onChange?()
         let stoppingClient = client
         let stop = Task {
@@ -386,15 +421,15 @@ final class SessionModel {
     private func receive(_ event: LatchAgentEvent) {
         switch event {
         case let .sessionUpdate(id, notification) where id == runtimeID:
-            if phase == .connecting, isConfigurationUpdate(notification) {
+            if phase == .connecting, isStateUpdate(notification) {
                 // The event task may run before session/new's continuation. Keep a bounded
                 // buffer, then replay only this session's snapshots newer than its reply.
-                if pendingConfigurationUpdates.count == 32 { pendingConfigurationUpdates.removeFirst() }
-                pendingConfigurationUpdates.append(notification)
+                if pendingStateUpdates.count == 32 { pendingStateUpdates.removeFirst() }
+                pendingStateUpdates.append(notification)
                 return
             }
             guard notification.sessionId == sessionID else { return }
-            applyConfigurationUpdate(notification)
+            applyStateUpdate(notification)
             // session/load replays old content. Keep the saved, bounded transcript (and
             // stable message IDs), rather than appending a second copy. The reply's trusted
             // ingress sequence also excludes replay delivered after its continuation.
@@ -432,16 +467,27 @@ final class SessionModel {
         configurationSequence = 0
         legacyModelSequence = 0
         legacyModeSequence = 0
-        pendingConfigurationUpdates.removeAll()
+        pendingStateUpdates.removeAll()
         isChangingConfiguration = false
+        commands = []
+        commandsSequence = 0
+        acceptsImages = false
     }
 
-    private func isConfigurationUpdate(_ notification: ACPSessionNotification) -> Bool {
+    private func isStateUpdate(_ notification: ACPSessionNotification) -> Bool {
         guard case let .object(update) = notification.update else { return false }
         return update["sessionUpdate"] == .string("config_option_update") || update["sessionUpdate"] == .string("current_model_update") || update["sessionUpdate"] == .string("current_mode_update")
+            || update["sessionUpdate"] == .string("available_commands_update")
     }
 
-    private func applyConfigurationUpdate(_ notification: ACPSessionNotification) {
+    private func applyStateUpdate(_ notification: ACPSessionNotification) {
+        if case let .availableCommands(list) = notification.event {
+            guard notification.localSequence.map({ $0 > commandsSequence }) ?? true else { return }
+            commandsSequence = notification.localSequence ?? commandsSequence
+            commands = list
+            onChange?()
+            return
+        }
         guard case let .object(update) = notification.update else { return }
         let legacy = update["sessionUpdate"] == .string("current_model_update")
         let mode = update["sessionUpdate"] == .string("current_mode_update")

@@ -15,6 +15,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     private var saveTask: Task<Void, Never>?
     /// Closed sessions still draining their agent, awaited before the app quits.
     private var closing: [UUID: Task<Void, Never>] = [:]
+    /// Sessions mid-turn at the last change, so a finished turn can be told apart.
+    private var promptingSessions: Set<UUID> = []
     /// Session closes are undoable; text editing keeps its own manager in the composer.
     private let sessionUndo = UndoManager()
     private let attention: AttentionCenter?
@@ -48,6 +50,9 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         window.contentMinSize = NSSize(width: 820, height: 600)
         window.isReleasedWhenClosed = false
         window.toolbarStyle = .unified
+        // The conversation's page runs up under the toolbar rather than stopping at a band of
+        // the system's titlebar colour.
+        window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .automatic
         super.init(window: window)
 
@@ -58,6 +63,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         split.addSplitViewItem(sidebarItem)
         let detailItem = NSSplitViewItem(contentListWithViewController: detail)
         detailItem.minimumThickness = 560
+        // The transcript fades into the toolbar instead of stopping at a line.
+        detailItem.titlebarSeparatorStyle = .none
         split.addSplitViewItem(detailItem)
         split.splitView.autosaveName = "LatchSessionSplit"
         window.contentViewController = split
@@ -213,6 +220,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     @objc func stopSession(_ sender: Any?) { sidebar.selectedSession?.stopActivity() }
 
+    @objc func attachFiles(_ sender: Any?) { sidebar.selectedSession?.chooseAttachments(sender) }
+
     @objc func disconnectSession(_ sender: Any?) { sidebar.selectedSession?.disconnectSession() }
 
     @objc func forkSelectedSession(_ sender: Any?) { sidebar.selectedSession?.forkSession() }
@@ -274,6 +283,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             return restoreFinished && !shuttingDown
         case #selector(stopSession(_:)):
             return session?.canStop ?? false
+        case #selector(attachFiles(_:)):
+            return (session?.canAttachFiles ?? false) && window?.attachedSheet == nil
         case #selector(disconnectSession(_:)):
             return session?.canDisconnect ?? false
         case #selector(forkSelectedSession(_:)):
@@ -297,6 +308,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     private func show(_ session: SessionViewController?) {
+        if let session, session.hasUnseenReply {
+            session.hasUnseenReply = false
+            sidebar.refreshRows()
+        }
         detail.show(session)
         refreshHarness()
         updateTitle()
@@ -305,11 +320,24 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     private func sessionChanged() {
+        markUnseenReplies()
         sidebar.refreshRows()
         refreshHarness()
         updateTitle()
         publishAttention()
         scheduleSave()
+    }
+
+    /// A turn that ends in a session other than the selected one leaves an unread mark on its
+    /// row. A failed turn does not, because the row already shows the failure.
+    private func markUnseenReplies() {
+        let sessions = sidebar.allSessions
+        for session in sessions where promptingSessions.contains(session.id)
+            && session.model.phase != .prompting && session.model.errorMessage == nil
+            && session !== sidebar.selectedSession {
+            session.hasUnseenReply = true
+        }
+        promptingSessions = Set(sessions.filter { $0.model.phase == .prompting }.map(\.id))
     }
 
     /// The Dock badge, notifications, and the menu bar extra all read the same snapshot.
@@ -767,45 +795,41 @@ final class DetailHostViewController: NSViewController {
     var onOpenWorkspace: ((URL) -> Void)? {
         didSet { (view as? WorkspaceDropView)?.onDrop = onOpenWorkspace }
     }
-    private let placeholder = NSStackView()
+    private(set) lazy var start = StartView()
 
     override func loadView() {
         let drop = WorkspaceDropView()
         drop.onDrop = onOpenWorkspace
         view = drop
-        let title = NSTextField(labelWithString: "No session selected")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString: "Choose a workspace folder to get started, or drag one here from the Finder.")
-        body.textColor = .secondaryLabelColor
-        body.alignment = .center
-        body.preferredMaxLayoutWidth = 360
-        let button = NSButton(title: "New Session…", target: self, action: #selector(createSession))
-        button.bezelStyle = .rounded
-        button.keyEquivalent = "\r"
-        placeholder.orientation = .vertical
-        placeholder.alignment = .centerX
-        placeholder.spacing = 8
-        placeholder.addArrangedSubview(title)
-        placeholder.addArrangedSubview(body)
-        placeholder.setCustomSpacing(18, after: body)
-        placeholder.addArrangedSubview(button)
-        placeholder.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(placeholder)
+        start.onOpenWorkspace = { [weak self] url in self?.onOpenWorkspace?(url) }
+        start.onChooseFolder = { [weak self] in self?.onNewSession?() }
+        start.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(start)
         NSLayoutConstraint.activate([
-            placeholder.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            placeholder.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            placeholder.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -80),
+            start.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            start.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            start.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            start.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+        start.reload()
+        // A workspace opened from elsewhere, or deleted in the Finder, shows the next time
+        // Latch comes forward.
+        NotificationCenter.default.addObserver(self, selector: #selector(reloadRecents),
+                                               name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 
-    @objc private func createSession() { onNewSession?() }
+    @objc private func reloadRecents() {
+        guard !start.isHidden else { return }
+        start.reload()
+    }
 
     func show(_ session: SessionViewController?) {
         for child in children where child !== session {
             child.view.removeFromSuperview()
             child.removeFromParent()
         }
-        placeholder.isHidden = session != nil
+        start.isHidden = session != nil
+        if session == nil { start.reload() }
         guard let session, session.parent !== self else { return }
         addChild(session)
         session.view.translatesAutoresizingMaskIntoConstraints = false
@@ -853,8 +877,11 @@ final class WorkspaceDropView: NSView {
         return true
     }
 
+    /// The page, under the toolbar too since the detail pane runs beneath it, and a tint over
+    /// it while a folder is held above.
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+        LatchPalette.page.setFill()
+        dirtyRect.fill()
         guard highlighted else { return }
         NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).setFill()
         bounds.fill()

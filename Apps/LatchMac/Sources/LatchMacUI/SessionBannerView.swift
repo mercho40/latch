@@ -60,6 +60,8 @@ final class SessionBannerView: NSView {
     private let icon = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let messageLabel = WrappingLabel(wrappingLabelWithString: "")
+    /// The agent's own words, set off in monospace so they read as its report, not Latch's prose.
+    private let detailLabel = WrappingLabel(wrappingLabelWithString: "")
     private let actionRow = NSStackView()
     private let dismiss = NSButton()
     private let content = NSStackView()
@@ -82,6 +84,12 @@ final class SessionBannerView: NSView {
         messageLabel.maximumNumberOfLines = 0
         messageLabel.setContentCompressionResistancePriority(.required, for: .vertical)
         messageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detailLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.maximumNumberOfLines = 3
+        detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        detailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         actionRow.orientation = .horizontal
         actionRow.alignment = .centerY
         actionRow.spacing = 12
@@ -99,6 +107,7 @@ final class SessionBannerView: NSView {
         content.alignment = .leading
         content.spacing = 4
         content.addArrangedSubview(titleLabel)
+        content.addArrangedSubview(detailLabel)
         content.addArrangedSubview(messageLabel)
         content.addArrangedSubview(actionRow)
 
@@ -119,12 +128,14 @@ final class SessionBannerView: NSView {
             dismiss.heightAnchor.constraint(equalToConstant: 18),
         ])
         messageLabel.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        detailLabel.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         setContentCompressionResistancePriority(.required, for: .vertical)
     }
 
     /// Show `problem`, or hide when it is nil. Returns without touching the view when the
-    /// same problem is already on screen or has been dismissed.
-    func update(key: String?, title: String, message: String, severity: Severity, actions: [Action]) {
+    /// same problem is already on screen or has been dismissed. `detail` is what the agent
+    /// itself said, shown between the title and Latch's `message`.
+    func update(key: String?, title: String, message: String, detail: String = "", severity: Severity, actions: [Action]) {
         guard let key else {
             self.key = nil
             isHidden = true
@@ -143,10 +154,13 @@ final class SessionBannerView: NSView {
         messageLabel.stringValue = message
         messageLabel.isHidden = message.isEmpty
         messageLabel.toolTip = message
+        detailLabel.stringValue = detail
+        detailLabel.isHidden = detail.isEmpty
+        detailLabel.toolTip = detail
         actionRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for action in actions { actionRow.addArrangedSubview(button(for: action)) }
         actionRow.isHidden = actions.isEmpty
-        setAccessibilityLabel("\(title). \(message)")
+        setAccessibilityLabel([title, detail, message].filter { !$0.isEmpty }.joined(separator: ". "))
         needsDisplay = true
         guard isHidden else { return }
         isHidden = false
@@ -195,6 +209,7 @@ final class SessionBannerView: NSView {
     /// What the banner is currently telling the user, for tests and accessibility checks.
     var displayedTitle: String { titleLabel.stringValue }
     var displayedMessage: String { messageLabel.stringValue }
+    var displayedDetail: String { detailLabel.stringValue }
     var displayedSeverity: Severity { severity }
     var displayedActions: [String] { actionRow.arrangedSubviews.compactMap { ($0 as? NSButton)?.title } }
 

@@ -61,10 +61,16 @@ public enum LatchAgentCommand: Codable, Equatable, Sendable {
     case setSessionConfigOption(runtimeID: AgentRuntimeID, configID: String, value: String)
     case setSessionModel(runtimeID: AgentRuntimeID, modelID: String)
     case setSessionMode(runtimeID: AgentRuntimeID, modeID: String)
-    case prompt(runtimeID: AgentRuntimeID, text: String)
+    /// Text, and any images or file links the user attached.
+    case prompt(runtimeID: AgentRuntimeID, blocks: [ACPPromptBlock])
     case cancelPrompt(runtimeID: AgentRuntimeID)
     /// Answers a `permissionRequested` event. Unknown or already-closed requests fail.
     case resolvePermission(runtimeID: AgentRuntimeID, requestID: UUID, outcome: ACPPermissionOutcome)
+
+    /// A prompt that is only text.
+    public static func prompt(runtimeID: AgentRuntimeID, text: String) -> LatchAgentCommand {
+        .prompt(runtimeID: runtimeID, blocks: [.text(text)])
+    }
 }
 
 public enum LatchAgentResponse: Codable, Equatable, Sendable {

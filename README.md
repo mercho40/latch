@@ -17,6 +17,7 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
 - **Sessions per workspace.** Open a folder from the toolbar, the Finder, or by dropping it on the window or Dock icon. Sessions, transcripts, and unsent drafts are saved locally and survive a relaunch; fork, rename, close, and undo-close are all there.
 - **Approvals you have to read.** Permission requests appear as native sheets with the agent's full request details. Approval has no default key — Return and Escape both cancel.
 - **Attention comes to you.** Sessions keep running in the background. A permission request or finished turn posts a notification, badges the Dock icon, and shows in the menu bar extra. Notification text names the workspace folder and nothing else.
+- **Attachments and commands.** Paste, drop, or attach files, folders, and screenshots; images go to agents that accept them, file links to any. Typing `/` lists the commands the agent offers.
 - **A fast native transcript.** Incremental Markdown rendering keeps a streamed frame cheap however long the answer gets, with ⌘F find, per-message copy, and system fonts and colors throughout.
 - **Process isolation.** Agents run under an XPC service embedded in the app, not in the UI process. The service admits only the app's own code signature.
 

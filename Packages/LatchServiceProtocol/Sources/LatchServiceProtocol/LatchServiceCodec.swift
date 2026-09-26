@@ -11,7 +11,9 @@ public enum LatchServiceCodecError: Error, Equatable, Sendable {
 /// Decoding checks size before parsing; encoding checks after JSON allocation.
 /// This codec does not provide socket framing or validate protocol versions.
 public struct LatchServiceCodec: Sendable {
-    public static let defaultMaximumPayloadSize = 1_048_576
+    /// Matches the largest frame the ACP connection accepts, so a prompt carrying images can
+    /// cross the service boundary whole. The app resizes images before they get this far.
+    public static let defaultMaximumPayloadSize = 8 * 1024 * 1024
 
     public let maximumPayloadSize: Int
 

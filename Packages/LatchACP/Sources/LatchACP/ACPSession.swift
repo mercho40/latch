@@ -1,5 +1,28 @@
 import Foundation
 
+/// One block of a prompt. Text and resource links are baseline ACP; an image block is only
+/// for an agent whose prompt capabilities include `image`.
+public enum ACPPromptBlock: Codable, Equatable, Sendable {
+    case text(String)
+    case image(data: Data, mimeType: String)
+    /// A file or folder the agent reads for itself, by `file://` URI.
+    case resourceLink(uri: String, name: String, mimeType: String?)
+
+    public var content: ACPJSONValue {
+        switch self {
+        case let .text(text):
+            return .object(["type": .string("text"), "text": .string(text)])
+        case let .image(data, mimeType):
+            return .object(["type": .string("image"), "data": .string(data.base64EncodedString()),
+                            "mimeType": .string(mimeType)])
+        case let .resourceLink(uri, name, mimeType):
+            var block: [String: ACPJSONValue] = ["type": .string("resource_link"), "uri": .string(uri), "name": .string(name)]
+            if let mimeType { block["mimeType"] = .string(mimeType) }
+            return .object(block)
+        }
+    }
+}
+
 public struct ACPTextContent: Codable, Equatable, Sendable {
     public let type: String
     public let text: String
@@ -86,12 +109,29 @@ public struct ACPToolCallEvent: Equatable, Sendable {
     public let rawOutput: ACPJSONValue?
 }
 
+/// A slash command the agent accepts, invoked by starting a prompt with `/name`.
+public struct ACPAvailableCommand: Equatable, Sendable {
+    /// Without the leading slash.
+    public let name: String
+    public let description: String
+    /// What to type after the name, when the command takes input.
+    public let inputHint: String?
+
+    public init(name: String, description: String, inputHint: String? = nil) {
+        self.name = name
+        self.description = description
+        self.inputHint = inputHint
+    }
+}
+
 /// A typed projection of stable ACP v1 update variants. Unknown variants retain their raw payload.
 public enum ACPSessionEvent: Equatable, Sendable {
     case messageChunk(ACPMessageChunk)
     case toolCall(ACPToolCallEvent, initial: Bool)
     case plan(ACPJSONValue)
     case usage(ACPJSONValue)
+    /// The whole current list; each update replaces the last.
+    case availableCommands([ACPAvailableCommand])
     case other(kind: String?, payload: ACPJSONValue)
 }
 
@@ -145,6 +185,21 @@ extension ACPSessionNotification {
             return .plan(update)
         case "usage_update":
             return .usage(update)
+        case "available_commands_update":
+            guard let entries = object.array(forKey: "availableCommands") else {
+                return .other(kind: kind, payload: update)
+            }
+            // One malformed entry drops only itself, not the agent's whole list.
+            return .availableCommands(entries.compactMap { entry in
+                guard case let .object(command) = entry,
+                      var name = command.string(forKey: "name") else { return nil }
+                if name.hasPrefix("/") { name.removeFirst() }
+                guard !name.isEmpty, !name.contains(where: \.isWhitespace) else { return nil }
+                var hint: String?
+                if case let .object(input)? = command["input"] { hint = input.string(forKey: "hint") }
+                return ACPAvailableCommand(name: name, description: command.string(forKey: "description") ?? "",
+                                           inputHint: hint?.isEmpty == true ? nil : hint)
+            })
         default:
             return .other(kind: kind, payload: update)
         }

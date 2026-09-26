@@ -3,7 +3,9 @@ import AppKit
 /// A session-local, selectable transcript. The composer and connection status belong to the parent.
 @MainActor
 final class ChatTranscriptView: NSView {
-    static let horizontalInset: CGFloat = 16
+    /// The one side margin: text, the banner and the composer all sit this far from the sidebar
+    /// and from the window's edge.
+    static let horizontalInset: CGFloat = 20
     static let rowSpacing: CGFloat = 12
     static let groupedRowSpacing: CGFloat = 2
 
@@ -28,6 +30,43 @@ final class ChatTranscriptView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// Rows dissolve into the toolbar: an opacity ramp over the top of the scroll view. The bottom is
+    /// not faded, because there the rows pass under the composer and are blurred, not removed. The
+    /// scroller's strip is masked fully opaque, so the scroll bar itself never fades.
+    private func updateEdgeMask() {
+        scrollView.wantsLayer = true
+        guard let layer = scrollView.layer else { return }
+        if layer.mask !== maskContainer {
+            maskContainer.addSublayer(edgeMask)
+            scrollerStrip.backgroundColor = NSColor.black.cgColor
+            maskContainer.addSublayer(scrollerStrip)
+            layer.mask = maskContainer
+        }
+        let height = max(1, scrollView.bounds.height)
+        let fadeTop = findBar.isHidden ? Self.topFade / height : 0
+        let strip = scrollerStripWidth
+        // The scroller stops above the composer instead of running under the glass.
+        // Only on a change: setting it retiles the scroll view, and this runs on every layout.
+        if abs(scrollView.scrollerInsets.bottom - bottomOverlay) > 0.5 {
+            scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomOverlay, right: 0)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        maskContainer.frame = scrollView.bounds
+        edgeMask.frame = NSRect(x: 0, y: 0, width: max(0, scrollView.bounds.width - strip), height: scrollView.bounds.height)
+        scrollerStrip.frame = NSRect(x: scrollView.bounds.width - strip, y: 0, width: strip, height: scrollView.bounds.height)
+        // The scroll view's layer sits in a flipped hierarchy, so which end of the gradient is the
+        // top depends on the layer, not on intuition.
+        if layer.contentsAreFlipped() {
+            edgeMask.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor]
+            edgeMask.locations = [0, NSNumber(value: fadeTop), 1]
+        } else {
+            edgeMask.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+            edgeMask.locations = [0, NSNumber(value: max(0, 1 - fadeTop)), 1]
+        }
+        CATransaction.commit()
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         scrollView.hasVerticalScroller = true
@@ -44,6 +83,9 @@ final class ChatTranscriptView: NSView {
         jump.target = self
         jump.action = #selector(jumpToLatest)
         jump.isHidden = true
+        addSubview(bottomBlur, positioned: .above, relativeTo: scrollView)
+        addSubview(deepBlur, positioned: .above, relativeTo: bottomBlur)
+        addSubview(topBlur, positioned: .above, relativeTo: scrollView)
         addSubview(jump)
         findBar.isHidden = true
         findBar.onSearch = { [weak self] term in self?.search(term) }
@@ -118,6 +160,29 @@ final class ChatTranscriptView: NSView {
     ///
     /// Internal because no unit test can enter a real AppKit resize loop.
     var limitsMeasurementToViewport = false
+    /// How much of the bottom of this view something floats over, the composer. The rows scroll
+    /// under it, and the conversation's end stops this far up so the last message stays in view.
+    var bottomOverlay: CGFloat = 0 {
+        didSet { if abs(bottomOverlay - oldValue) > 0.5 { needsLayout = true } }
+    }
+    /// Rows dissolve into the toolbar over this height, and into the page over the overlay.
+    static let topFade: CGFloat = 20
+    private let edgeMask = CAGradientLayer()
+    private let scrollerStrip = CALayer()
+    private let maskContainer = CALayer()
+    /// The vertical scroller's thickness, which the edge effects leave alone.
+    private var scrollerStripWidth: CGFloat {
+        guard let scroller = scrollView.verticalScroller else { return 0 }
+        return type(of: scroller).scrollerWidth(for: scroller.controlSize, scrollerStyle: scrollView.scrollerStyle)
+    }
+    /// Behind the composer the rows are blurred, more so toward the window's edge, the way a
+    /// messaging app lets a conversation run under its input bar.
+    private let bottomBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 24, radius: 4)
+    /// Behind the composer itself the blur deepens, so what shows in the margins around it is a
+    /// wash rather than readable text. Stacked on the band above, it makes the blur progressive.
+    private let deepBlur = EdgeBlurView(opaqueEdge: .bottom, lead: 16, radius: 12)
+    /// Under the toolbar the rows blur as well as fade, so they leave the view rather than being cut.
+    private let topBlur = EdgeBlurView(opaqueEdge: .top, lead: 30, radius: 4)
 
     override func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
@@ -143,7 +208,8 @@ final class ChatTranscriptView: NSView {
         let sideInset = min(Self.horizontalInset, width / 12)
         let columnWidth = max(1, width - sideInset * 2)
         let inset = (width - columnWidth) / 2
-        var y: CGFloat = 16
+        // Clear of the fade into the toolbar, so the first row is never dimmed at rest.
+        var y: CGFloat = Self.topFade + 6
         // A screen either side of the viewport, so a row that scrolls in mid-drag is
         // already exact. Rows are deferred against their previous height, so this window
         // drifts as it goes — that is what the margin is for.
@@ -166,14 +232,26 @@ final class ChatTranscriptView: NSView {
             y = status.frame.maxY + 16
         }
         // Reserve space for the floating jump control, never over the last message.
-        document.frame = NSRect(x: 0, y: 0, width: width, height: max(scrollView.contentSize.height, y + 40))
+        document.frame = NSRect(x: 0, y: 0, width: width, height: max(scrollView.contentSize.height, y + 40 + bottomOverlay))
         let bottom = max(0, document.frame.height - scrollView.contentView.bounds.height)
         let restored = saved.id.flatMap { rows[$0] }.map { $0.frame.minY + saved.offset } ?? saved.origin
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: followsBottom ? bottom : min(bottom, max(0, restored))))
         scrollView.reflectScrolledClipView(scrollView.contentView)
         // A glass button's fitted size is its glyph's, which made a disc too small to hit or see.
         jump.setFrameSize(NSSize(width: FloatingRoundButton.diameter, height: FloatingRoundButton.diameter))
-        jump.frame.origin = NSPoint(x: max(0, (bounds.width - jump.frame.width) / 2), y: max(0, bounds.height - jump.frame.height - 12))
+        jump.frame.origin = NSPoint(x: max(0, (bounds.width - jump.frame.width) / 2), y: max(0, bounds.height - bottomOverlay - jump.frame.height - 12))
+        updateEdgeMask()
+        // From a little above the composer to the bottom edge, so the blur starts before the glass does.
+        topBlur.isHidden = !findBar.isHidden
+        let bandWidth = max(0, bounds.width - scrollerStripWidth)
+        topBlur.frame = NSRect(x: 0, y: scrollView.frame.minY, width: bandWidth, height: 36)
+        let blurHeight = bottomOverlay > 0 ? bottomOverlay + bottomBlur.lead : 0
+        bottomBlur.isHidden = blurHeight == 0
+        bottomBlur.frame = NSRect(x: 0, y: bounds.height - blurHeight, width: bandWidth, height: blurHeight)
+        // From the composer's top edge down; the 12-point gap above it is the band above's alone.
+        let deepHeight = max(0, bottomOverlay - 12)
+        deepBlur.isHidden = deepHeight == 0
+        deepBlur.frame = NSRect(x: 0, y: bounds.height - deepHeight, width: bandWidth, height: deepHeight)
         jump.isHidden = followsBottom || bottom == 0
     }
 
@@ -184,7 +262,7 @@ final class ChatTranscriptView: NSView {
         jump.isHidden = followsBottom
     }
 
-    @objc private func jumpToLatest() {
+    @objc func jumpToLatest() {
         followsBottom = true
         arrange(restoring: anchor())
     }
@@ -305,7 +383,7 @@ final class ChatTranscriptView: NSView {
         try require(shortRow.frame.width == geometry.scrollView.contentSize.width - Self.horizontalInset * 2,
                     "Transcript does not fill the available pane width")
         try require(abs(shortRow.frame.midX - geometry.scrollView.contentSize.width / 2) < 1, "Wide column is not centered in scroll content")
-        try require(shortRow.frame.minX >= 16, "Missing side inset")
+        try require(shortRow.frame.minX >= Self.horizontalInset - 1, "Missing side inset")
         try require(shortRow.bubble.width < longRow.bubble.width && longRow.bubble.width <= longRow.frame.width * 0.8, "User bubbles are not content-sized/capped")
         try require(shortRow.bubble.maxX == shortRow.bounds.maxX && shortRow.textView.string == short.text, "User text is not literal/right aligned")
         try require(plainRow.bubble == .zero && plainRow.textView.frame.minX == 0 && plainRow.textView.frame.width == plainRow.bounds.width && plainRow.textView.frame.minY == 0, "Assistant is boxed or has a role header")
@@ -388,6 +466,17 @@ final class ChatTranscriptView: NSView {
         }
         probe.jumpToLatest()
         try require(abs(probe.document.frame.height - probe.scrollView.contentView.bounds.maxY) < 2, "Jump did not reach bottom")
+        let longCommand = "echo \"=== tree ===\" && " + String(repeating: "find . -name '*.swift' -not -path './.build/*' | wc -l && ", count: 12)
+        let longTool = ChatMessage(role: .tool, text: longCommand + "true · completed\nOutput")
+        probe.update(messages: [longTool], isWorking: false)
+        probe.layoutSubtreeIfNeeded()
+        if let header = probe.rows[longTool.id]?.subviews.compactMap({ $0 as? NSTextField }).first(where: { !$0.isHidden }), let cell = header.cell {
+            let oneLine = ceil(header.font?.boundingRectForFont.height ?? 18)
+            let needed = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: header.bounds.width, height: .greatestFiniteMagnitude)).height
+            try require(needed <= oneLine + 1, "A long tool title wraps instead of truncating, and its status is lost")
+        } else {
+            try require(false, "Missing tool header")
+        }
         var tool = ChatMessage(role: .tool, text: "Read Sources · running\nFull tool details")
         probe.update(messages: [tool], isWorking: false)
         let toolRow = probe.rows[tool.id]!
@@ -424,7 +513,7 @@ private final class TranscriptMessageView: NSView {
     /// Built by hand so the layout manager and container are ours from the start. A text view made
     /// this way does not own its storage, so the row does.
     private let storage = NSTextStorage()
-    private let container = TranscriptTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+    private let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
     private(set) lazy var textView: TranscriptTextView = {
         let manager = TranscriptLayoutManager()
         manager.addTextContainer(container)
@@ -436,6 +525,8 @@ private final class TranscriptMessageView: NSView {
     private let copy = TranscriptCopyButton(title: "Copy", target: nil, action: nil)
     private let disclosure = NSButton(title: "", target: nil, action: nil)
     private(set) var rawText: String?
+    /// A sent message's files and images, listed above its text. Set once: a user message never changes.
+    private var attachments: [ChatAttachment] = []
     /// Resumable Markdown state for this row, so a streaming answer re-parses from its
     /// first changed line instead of from the top on every frame. Unused by other roles.
     private let markdown = ChatMarkdown.Cache()
@@ -456,6 +547,7 @@ private final class TranscriptMessageView: NSView {
 
     init(message: ChatMessage) {
         role = message.role
+        attachments = message.attachments
         super.init(frame: .zero)
         label.stringValue = switch role {
         case .user: "You"
@@ -498,9 +590,8 @@ private final class TranscriptMessageView: NSView {
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = false
         textView.textContainerInset = .zero
-        // Code panels and quote bars are drawn behind the text, and prose keeps a readable measure;
-        // see TranscriptLayoutManager and TranscriptTextContainer.
-        container.limitsProse = role == .assistant
+        // Code panels and quote bars are drawn behind the text; see TranscriptLayoutManager. Prose
+        // runs the width of the row like everything else in it.
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.heightTracksTextView = false
@@ -530,9 +621,12 @@ private final class TranscriptMessageView: NSView {
             paragraph.lineBreakMode = .byWordWrapping
             paragraph.lineSpacing = 3
             let font = NSFont.systemFont(ofSize: ChatMarkdown.bodyFontSize)
-            content = NSAttributedString(string: text, attributes: [
+            let body = NSMutableAttributedString(attributedString: Self.attachmentLine(attachments, paragraph: paragraph))
+            if body.length > 0, !text.isEmpty { body.append(NSAttributedString(string: "\n")) }
+            body.append(NSAttributedString(string: text, attributes: [
                 .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
-            ])
+            ]))
+            content = body
         }
         let next = content.string as NSString
         let shared = Self.sharedPrefix(previous, next)
@@ -558,10 +652,43 @@ private final class TranscriptMessageView: NSView {
         }
     }
 
+    /// Each attachment as a symbol and its name, in the secondary colour, on the line above the text.
+    static func attachmentLine(_ attachments: [ChatAttachment], paragraph: NSParagraphStyle) -> NSAttributedString {
+        let font = NSFont.systemFont(ofSize: ChatMarkdown.bodyFontSize - 1)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph,
+        ]
+        let line = NSMutableAttributedString()
+        for (index, attachment) in attachments.enumerated() {
+            if index > 0 { line.append(NSAttributedString(string: "    ", attributes: attributes)) }
+            let symbol = attachment.kind == .image ? "photo" : "doc"
+            let configuration = NSImage.SymbolConfiguration(pointSize: font.pointSize, weight: .regular)
+                .applying(.init(hierarchicalColor: .secondaryLabelColor))
+            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: attachment.kind == .image ? "Image" : "File")?
+                .withSymbolConfiguration(configuration) {
+                let glyph = NSTextAttachment()
+                glyph.image = image
+                // Sit the symbol on the text's baseline rather than above it.
+                glyph.bounds = NSRect(x: 0, y: font.descender / 2, width: image.size.width, height: image.size.height)
+                let piece = NSMutableAttributedString(attachment: glyph)
+                piece.addAttributes(attributes, range: NSRange(location: 0, length: piece.length))
+                line.append(piece)
+            }
+            line.append(NSAttributedString(string: " " + attachment.name, attributes: attributes))
+        }
+        return line
+    }
+
     /// "Title · status", with the status coloured when it is one a reader should not skim past.
     /// Colour backs up the word, never replaces it, so nothing depends on seeing red.
     static func toolHeader(_ line: String, font: NSFont?) -> NSAttributedString {
-        let base: [NSAttributedString.Key: Any] = [.font: font ?? .systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]
+        // An attributed title brings its own paragraph style, and without one it wraps by word:
+        // a long shell command lost its tail and its status to the clipped second line. Cutting
+        // the middle keeps what ran and how it went; the tooltip has the whole line.
+        let oneLine = NSMutableParagraphStyle()
+        oneLine.lineBreakMode = .byTruncatingMiddle
+        let base: [NSAttributedString.Key: Any] = [.font: font ?? .systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor,
+                                                   .paragraphStyle: oneLine]
         let result = NSMutableAttributedString(string: line, attributes: base)
         guard let separator = line.range(of: " · ", options: .backwards) else { return result }
         let status = line[separator.upperBound...].lowercased()
@@ -890,5 +1017,72 @@ final class FloatingRoundButton: NSButton {
         disc.lineWidth = 1
         disc.stroke()
         super.draw(dirtyRect)
+    }
+}
+
+/// A band that blurs and dims whatever scrolls behind it, both ramping from nothing at one edge to
+/// full at the other, so rows sink out of focus rather than stopping at a line. It is a plain
+/// Gaussian blur of the backdrop, not a vibrancy material: materials are tinted close to opaque in
+/// dark mode, and the point is that the rows stay faintly legible as they pass under the composer.
+/// It is decoration: clicks, scrolling and selection pass straight through to the rows behind it.
+@MainActor
+final class EdgeBlurView: NSView {
+    enum Edge { case top, bottom }
+
+    /// The distance from the band's clear edge over which rows go from sharp to nearly fully
+    /// blurred; they are fully blurred at its far edge.
+    let lead: CGFloat
+    private let edge: Edge
+    private let dim = CAGradientLayer()
+    private let ramp = CAGradientLayer()
+
+    init(opaqueEdge: Edge, lead: CGFloat, radius: CGFloat) {
+        edge = opaqueEdge
+        self.lead = lead
+        super.init(frame: .zero)
+        wantsLayer = true
+        layerUsesCoreImageFilters = true
+        let blur = CIFilter(name: "CIGaussianBlur")!
+        blur.setValue(radius, forKey: kCIInputRadiusKey)
+        backgroundFilters = [blur]
+        layer?.addSublayer(dim)
+        // The same ramp masks the blur and the dimming, so both fade in together.
+        ramp.colors = [NSColor.clear.cgColor, NSColor.black.withAlphaComponent(0.5).cgColor, NSColor.black.cgColor]
+        layer?.mask = ramp
+        updateColors()
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        dim.frame = bounds
+        ramp.frame = bounds
+        // Start at the clear edge. Which way up that is depends on whether the layer is flipped.
+        let clearAtTop = (edge == .bottom) != (layer?.contentsAreFlipped() ?? false)
+        let (start, end) = clearAtTop ? (CGPoint(x: 0.5, y: 1), CGPoint(x: 0.5, y: 0)) : (CGPoint(x: 0.5, y: 0), CGPoint(x: 0.5, y: 1))
+        ramp.startPoint = start; ramp.endPoint = end
+        dim.startPoint = start; dim.endPoint = end
+        let lead = NSNumber(value: min(1, self.lead / max(1, bounds.height)))
+        ramp.locations = [0, lead, 1]
+        dim.locations = [0, lead, 1]
+        CATransaction.commit()
+    }
+
+    private func updateColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let page = LatchPalette.page
+            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            dim.colors = [page.withAlphaComponent(0).cgColor, page.withAlphaComponent(dark ? 0.1 : 0.08).cgColor,
+                          page.withAlphaComponent(dark ? 0.3 : 0.25).cgColor]
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
     }
 }

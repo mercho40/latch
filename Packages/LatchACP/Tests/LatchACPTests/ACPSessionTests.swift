@@ -63,6 +63,57 @@ final class ACPSessionTests: XCTestCase {
         XCTAssertEqual(updatedTool.content, [])
     }
 
+    func testProjectsAvailableCommandsAndSkipsMalformedEntries() {
+        let notification = ACPSessionNotification(
+            sessionId: "session-1",
+            update: .object([
+                "sessionUpdate": .string("available_commands_update"),
+                "availableCommands": .array([
+                    .object([
+                        "name": .string("review"),
+                        "description": .string("Review the current changes"),
+                        "input": .object(["hint": .string("what to focus on")]),
+                    ]),
+                    .object(["name": .string("/compact"), "description": .string("Summarise the conversation")]),
+                    .object(["name": .string("init")]),
+                    .object(["description": .string("No name")]),
+                    .object(["name": .string("two words")]),
+                    .object(["name": .string("empty-hint"), "input": .object(["hint": .string("")])]),
+                    .string("not a command"),
+                ]),
+            ])
+        )
+
+        guard case let .availableCommands(commands) = notification.event else {
+            return XCTFail("Expected available commands")
+        }
+        XCTAssertEqual(commands, [
+            ACPAvailableCommand(name: "review", description: "Review the current changes", inputHint: "what to focus on"),
+            ACPAvailableCommand(name: "compact", description: "Summarise the conversation"),
+            ACPAvailableCommand(name: "init", description: ""),
+            ACPAvailableCommand(name: "empty-hint", description: ""),
+        ])
+    }
+
+    func testPromptBlocksEncodeAsACPContent() {
+        XCTAssertEqual(ACPPromptBlock.text("Look").content,
+                       .object(["type": .string("text"), "text": .string("Look")]))
+        XCTAssertEqual(ACPPromptBlock.image(data: Data([1, 2, 3]), mimeType: "image/png").content,
+                       .object(["type": .string("image"), "data": .string("AQID"), "mimeType": .string("image/png")]))
+        XCTAssertEqual(ACPPromptBlock.resourceLink(uri: "file:///tmp/a%20b.txt", name: "a b.txt", mimeType: "text/plain").content,
+                       .object(["type": .string("resource_link"), "uri": .string("file:///tmp/a%20b.txt"),
+                                "name": .string("a b.txt"), "mimeType": .string("text/plain")]))
+        XCTAssertEqual(ACPPromptBlock.resourceLink(uri: "file:///tmp/dir", name: "dir", mimeType: nil).content,
+                       .object(["type": .string("resource_link"), "uri": .string("file:///tmp/dir"), "name": .string("dir")]))
+    }
+
+    func testImagesAreAcceptedOnlyWhenTheAgentSaysSo() {
+        XCTAssertFalse(ACPAgentCapabilities().acceptsImages)
+        XCTAssertFalse(ACPAgentCapabilities(promptCapabilities: .object(["embeddedContext": .bool(true)])).acceptsImages)
+        XCTAssertFalse(ACPAgentCapabilities(promptCapabilities: .object(["image": .bool(false)])).acceptsImages)
+        XCTAssertTrue(ACPAgentCapabilities(promptCapabilities: .object(["image": .bool(true)])).acceptsImages)
+    }
+
     func testPreservesUnknownSessionUpdate() {
         let update: ACPJSONValue = .object([
             "sessionUpdate": .string("future_update"),

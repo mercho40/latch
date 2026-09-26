@@ -51,6 +51,12 @@ public struct ACPAgentCapabilities: Codable, Equatable, Sendable {
     public let sessionCapabilities: ACPJSONValue?
     public let meta: ACPJSONValue?
 
+    /// Whether a prompt may carry image blocks. Absent means no, per the protocol.
+    public var acceptsImages: Bool {
+        guard case let .object(capabilities)? = promptCapabilities else { return false }
+        return capabilities["image"] == .bool(true)
+    }
+
     public init(
         loadSession: Bool = false,
         promptCapabilities: ACPJSONValue? = nil,
@@ -413,6 +419,10 @@ public actor ACPClient {
     }
 
     public func prompt(_ text: String) async throws -> ACPPromptResponse {
+        try await prompt([.text(text)])
+    }
+
+    public func prompt(_ blocks: [ACPPromptBlock]) async throws -> ACPPromptResponse {
         try requireInitialized()
         guard let activeSessionID else {
             throw ACPClientError.noActiveSession
@@ -425,7 +435,7 @@ public actor ACPClient {
         defer { promptIsActive = false }
         let request = PromptRequest(
             sessionId: activeSessionID,
-            prompt: [try ACPJSONValue.encode(ACPTextContent(text: text))]
+            prompt: blocks.map(\.content)
         )
         return try await connection.request(
             "session/prompt",

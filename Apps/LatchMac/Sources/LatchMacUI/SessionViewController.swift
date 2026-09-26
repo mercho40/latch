@@ -1,4 +1,5 @@
 import AppKit
+import LatchACP
 
 /// One ACP session: agent selection, settings, transcript, and composer.
 /// The workspace is fixed at creation; the sidebar owns the list of sessions.
@@ -18,7 +19,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                      customCommand: customCommand,
                      draft: prompt.string,
                      messages: pendingNewContext ? [] : model.messages,
-                     agentSessionID: pendingNewContext ? nil : model.savedAgentSessionID)
+                     agentSessionID: pendingNewContext ? nil : model.savedAgentSessionID,
+                     lastActiveAt: model.lastActiveAt)
     }
 
     /// Asks the window for a sibling session in this workspace on the given harness.
@@ -47,6 +49,31 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         return model.status
     }
+
+    /// A reply finished while another session was on screen. Selecting this one clears it.
+    var hasUnseenReply = false
+
+    /// The sidebar row. Only working, a pending decision, a failure and an unread reply get a
+    /// mark; a session at rest says which agent it belongs to and nothing else, so "Ready ·
+    /// end_turn" and "Connected ·" never reach the list.
+    func sidebarRow(now: Date) -> (status: SessionCellView.Status, detail: String) {
+        if model.permissions.current != nil { return (.waiting, "Waiting for a decision") }
+        if model.errorMessage != nil {
+            return (.failed, model.status == "Not connected" ? "Couldn’t connect" : model.status)
+        }
+        switch model.phase {
+        case .prompting where model.status == "Working…":
+            // How long this turn has run, so a long one looks long.
+            let elapsed = model.promptStartedAt.map { RelativeTime.duration(now.timeIntervalSince($0)) }
+            return (.working, elapsed.map { "Working · \($0)" } ?? model.status)
+        case .connecting, .stopping, .prompting: return (.working, model.status)
+        case .ready: return (hasUnseenReply ? .unseen : .resting, selectedAgent.title)
+        case .disconnected: return (.resting, displayStatus)
+        }
+    }
+
+    /// Whether the sidebar should tick every second for this session.
+    var isWorkingTurn: Bool { model.phase == .prompting }
 
     /// What this session wants the user to know about, whether or not it is on screen.
     var attention: AttentionCenter.State {
@@ -144,11 +171,22 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Collapses out of the stack with the banner, so a session with nothing wrong gives
     /// the whole column to the transcript.
     private let bannerRow = NSView()
+    private let composerContainer = NSView()
     let conversation = ChatTranscriptView(frame: .zero)
+    /// A session with nothing in it yet opens on its workspace, not on an empty page.
+    private let emptyHeading = NSTextField(labelWithString: "")
+    private let commandMenu = SlashCommandMenu()
+    /// Pasted or dropped into the composer, sent with the next prompt, then cleared with it.
+    /// Not saved with the draft: an image's bytes would bloat the session library.
+    private(set) var attachments: [ComposerAttachment] = []
+    private let attachmentStrip = ComposerAttachmentStrip()
+    /// Escape closes the menu for this draft only; typing on, or starting over, opens it again.
+    private var dismissedCommandDraft: String?
     private let prompt = ChatInputView(frame: .zero)
     private let composer = ChatComposerScrollView(frame: .zero)
     private let send = NSButton(title: "Send", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
+    private let attach = NSButton(title: "", target: nil, action: nil)
     private let modelPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let effortPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let permissionModePicker = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -158,7 +196,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         pickers: [.init(modelPicker, maximumWidth: 260),
                   .init(effortPicker, maximumWidth: 150),
                   .init(permissionModePicker)],
-        actions: [cancel, send])
+        actions: [attach, cancel, send])
     private var renderedConfiguration: SessionConfiguration?
     private var renderedPickerPlaceholder: String?
     private lazy var transcriptUpdates = TranscriptRenderScheduler { [weak self] in
@@ -185,7 +223,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         if let savedSession {
             sessionTitle = savedSession.title
             prompt.string = savedSession.draft
-            model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID)
+            model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID,
+                          lastActiveAt: savedSession.lastActiveAt)
+        } else {
+            // A new session was last active when it was made, so it sorts and reads as "now".
+            model.restore(messages: [], agentSessionID: nil, lastActiveAt: model.now())
         }
         model.onChange = { [weak self] in
             self?.refresh()
@@ -216,10 +258,14 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         root.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(root)
         NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            root.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            root.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            root.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            // Edge to edge: the transcript's own inset is the only side margin, and its scroll bar
+            // sits at the window's edge where a Mac scroll bar belongs.
+            root.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            root.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            // The transcript runs from the toolbar to the window's bottom edge; the composer floats
+            // over its end rather than sitting below it.
+            root.topAnchor.constraint(equalTo: view.topAnchor),
+            root.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
         // The banner keeps the transcript's column so a failure reads as part of the
@@ -229,7 +275,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         NSLayoutConstraint.activate([
             banner.leadingAnchor.constraint(equalTo: bannerRow.leadingAnchor, constant: ChatTranscriptView.horizontalInset),
             banner.trailingAnchor.constraint(equalTo: bannerRow.trailingAnchor, constant: -ChatTranscriptView.horizontalInset),
-            banner.topAnchor.constraint(equalTo: bannerRow.topAnchor),
+            banner.topAnchor.constraint(equalTo: bannerRow.topAnchor, constant: 12),
             banner.bottomAnchor.constraint(equalTo: bannerRow.bottomAnchor),
         ])
         banner.isHidden = true
@@ -292,6 +338,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         composer.drawsBackground = false
         prompt.drawsBackground = false
         prompt.onSubmit = { [weak self] in self?.sendPrompt() }
+        prompt.onMenuKey = { [weak self] key in self?.handleCommandMenuKey(key) ?? false }
+        commandMenu.onAccept = { [weak self] command in self?.acceptCommand(command) }
+        prompt.onAttach = { [weak self] pasteboard in self?.attach(from: pasteboard) ?? false }
+        attachmentStrip.onRemove = { [weak self] id in self?.removeAttachment(id) }
+        attachmentStrip.isHidden = true
         prompt.font = .systemFont(ofSize: 14)
         prompt.textContainerInset = NSSize(width: 8, height: 8)
         prompt.isRichText = false
@@ -308,6 +359,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         prompt.setAccessibilityLabel("Message to agent")
         prompt.setAccessibilityHelp("Return to send. Shift Return to insert a new line.")
         configureTextView(prompt, in: composer)
+        composerContent.addArrangedSubview(attachmentStrip)
         composerContent.addArrangedSubview(composer)
 
         send.target = self
@@ -318,6 +370,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                 button.bezelStyle = .glass
                 button.borderShape = .circle
             }
+            // The system's own accent treatment: a white arrow on the fill, and the plain rim
+            // while disabled. A forced bezel colour drew the arrow black.
+            send.tintProminence = .primary
         }
         send.keyEquivalent = "\r"
         send.keyEquivalentModifierMask = [.command]
@@ -330,6 +385,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             button.imagePosition = .imageOnly
             button.controlSize = .large
         }
+        // Plain, not glass: beside Send it is a quiet way in, as the paperclip is elsewhere.
+        attach.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach files")
+        attach.symbolConfiguration = .init(pointSize: 15, weight: .regular)
+        attach.isBordered = false
+        attach.imagePosition = .imageOnly
+        attach.contentTintColor = .secondaryLabelColor
+        attach.target = self
+        attach.action = #selector(chooseAttachments(_:))
+        attach.toolTip = "Attach Files… (⇧⌘A)"
+        attach.setAccessibilityLabel("Attach files")
         send.setAccessibilityLabel("Send message")
         send.toolTip = "Send message (Return or ⌘ Return)"
         cancel.setAccessibilityLabel("Stop response")
@@ -339,7 +404,6 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             item.translatesAutoresizingMaskIntoConstraints = false
             item.widthAnchor.constraint(equalTo: composerContent.widthAnchor).isActive = true
         }
-        let composerContainer = NSView()
         composerBox.translatesAutoresizingMaskIntoConstraints = false
         composerContainer.addSubview(composerBox)
         NSLayoutConstraint.activate([
@@ -348,13 +412,56 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             composerBox.topAnchor.constraint(equalTo: composerContainer.topAnchor),
             composerBox.bottomAnchor.constraint(equalTo: composerContainer.bottomAnchor),
         ])
-        // No keyboard caption under the composer: the shortcuts stay in the field's
-        // accessibility help, where they cost no chrome.
-        root.addArrangedSubview(composerContainer)
         for view in root.arrangedSubviews {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         }
+        // No keyboard caption under the composer: the shortcuts stay in the field's
+        // accessibility help, where they cost no chrome.
+        composerContainer.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(composerContainer, positioned: .above, relativeTo: root)
+        NSLayoutConstraint.activate([
+            composerContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            composerContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            composerContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            composerContainer.topAnchor.constraint(greaterThanOrEqualTo: bannerRow.bottomAnchor, constant: 12),
+        ])
+
+        emptyHeading.stringValue = "What should we build in \(workspace.lastPathComponent)?"
+        emptyHeading.font = .systemFont(ofSize: 26)
+        emptyHeading.alignment = .center
+        emptyHeading.lineBreakMode = .byTruncatingMiddle
+        emptyHeading.setAccessibilityRole(.staticText)
+        emptyHeading.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(emptyHeading, positioned: .above, relativeTo: root)
+        // Centred in the part of the transcript the composer leaves visible.
+        let open = NSLayoutGuide()
+        view.addLayoutGuide(open)
+        NSLayoutConstraint.activate([
+            open.topAnchor.constraint(equalTo: conversation.topAnchor),
+            open.bottomAnchor.constraint(equalTo: composerContainer.topAnchor),
+            emptyHeading.centerYAnchor.constraint(equalTo: open.centerYAnchor),
+            emptyHeading.centerXAnchor.constraint(equalTo: conversation.centerXAnchor),
+            emptyHeading.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: ChatTranscriptView.horizontalInset),
+        ])
+
+        // Over the transcript and the heading, attached to the composer it belongs to.
+        commandMenu.isHidden = true
+        commandMenu.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(commandMenu, positioned: .above, relativeTo: composerContainer)
+        NSLayoutConstraint.activate([
+            commandMenu.leadingAnchor.constraint(equalTo: composerBox.leadingAnchor, constant: 12),
+            commandMenu.trailingAnchor.constraint(equalTo: composerBox.trailingAnchor, constant: -12),
+            commandMenu.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -8),
+        ])
+    }
+
+    /// Tells the transcript how much of its end the composer covers, which changes as a draft grows.
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let composerTop = composerContainer.frame.maxY
+        let transcriptBottom = conversation.convert(conversation.bounds, to: view).minY
+        conversation.bottomOverlay = max(0, composerTop - transcriptBottom + 12)
     }
 
     private func configureTextView(_ text: NSTextView, in scroll: NSScrollView) {
@@ -379,14 +486,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let readOnlyArchive = model.archivedWithoutContext && model.phase == .disconnected
         prompt.isEditable = !shuttingDown && !readOnlyArchive && (operation == nil || model.phase != .ready)
         refreshPickers()
-        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && hasSomethingToSend
         let preparing = operation != nil || model.phase == .connecting
         // A forced bezel colour ignores the disabled state, so a button that could not send looked ready to.
-        send.bezelColor = send.isEnabled ? .controlAccentColor : nil
+        if #unavailable(macOS 26.0) {
+            // A forced bezel colour ignores the disabled state, so a button that could not send looked ready to.
+            send.bezelColor = send.isEnabled ? .controlAccentColor : nil
+        }
         cancel.isEnabled = canStop
         cancel.isHidden = !preparing && model.phase != .prompting
         composerControls.refreshLayout()
         prompt.placeholder = readOnlyArchive ? "This conversation is read-only" : "Message \(selectedAgent.title)…"
+        attachmentStrip.show(attachments)
+        attach.isEnabled = canAttachFiles
+        refreshCommandMenu()
+        // A banner is the more important thing on an empty page, so the heading yields to it,
+        // and to the command menu, whose glass it would otherwise show through.
+        emptyHeading.isHidden = !model.messages.isEmpty || model.phase == .prompting || !bannerRow.isHidden
+            || !commandMenu.isHidden
         prompt.needsDisplay = true
         composer.refreshHeight()
         // State transitions must show their final text immediately, even when a
@@ -437,18 +554,23 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             bannerRow.isHidden = banner.isHidden
             return
         }
-        let failure = model.errorMessage.map { message in
-            selectedAgent != .custom && disconnected ? startupError(message) : message
-        } ?? launchProblem
+        // The agent's words go on their own line, then one line of advice: Latch's own for this
+        // failure when it has some, otherwise the agent's setup hint for one that cannot start.
+        let failure: (detail: String, advice: String)? = model.errorMessage.map { message in
+            let builtIn = selectedAgent != .custom && disconnected
+            let advice = model.errorAdvice ?? (builtIn ? selectedRecipe?.setup : nil) ?? ""
+            return (Self.agentWords(builtIn ? withoutLaunchInternals(message) : message), advice)
+        } ?? launchProblem.map { ("", $0) }
         guard let failure, !shuttingDown else {
             banner.update(key: nil, title: "", message: "", severity: .error, actions: [])
             bannerRow.isHidden = true
             return
         }
         banner.update(
-            key: "\(model.phase)\u{0}\(selectedAgent.rawValue)\u{0}\(failure)",
+            key: "\(model.phase)\u{0}\(selectedAgent.rawValue)\u{0}\(failure.detail)\u{0}\(failure.advice)",
             title: disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem",
-            message: failure,
+            message: failure.advice,
+            detail: failure.detail,
             severity: disconnected ? .error : .warning,
             actions: [
                 SessionBannerView.Action(title: "Retry") { [weak self] in self?.retryConnection() },
@@ -457,6 +579,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                 },
             ])
         bannerRow.isHidden = banner.isHidden
+    }
+
+    /// The banner's title already names the agent, so the service's "Agent reported:" prefix
+    /// would only repeat it.
+    static func agentWords(_ message: String) -> String {
+        let prefix = "Agent reported: "
+        return message.hasPrefix(prefix) ? String(message.dropFirst(prefix.count)) : message
     }
 
     /// The recovery path for everything the banner reports: rescan the filesystem, rebuild
@@ -470,7 +599,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         initializeSelection()
     }
 
-    private func startupError(_ message: String) -> String {
+    private func withoutLaunchInternals(_ message: String) -> String {
         // Preserve the actual failure, but keep launch implementation details out of built-in UI.
         var detail = message
         if let recipe = selectedRecipe, let parsed = try? AgentCommand(recipe.command) {
@@ -480,7 +609,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                 detail = detail.replacingOccurrences(of: value, with: selectedAgent.title)
             }
         }
-        return "\(detail) \(selectedRecipe?.setup ?? "")"
+        return detail
     }
 
     private func refreshPickers() {
@@ -519,7 +648,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             lastGroup = choice.group
             let item = NSMenuItem(title: choice.name, action: nil, keyEquivalent: "")
             item.representedObject = choice.value
-            item.toolTip = choice.description
+            // Read in the menu, as a second line, rather than only after hovering an item.
+            item.subtitle = choice.description
             item.indentationLevel = choice.group == nil ? 0 : 1
             button.menu?.addItem(item)
             if choice.value == picker.currentValue { selected = item }
@@ -531,7 +661,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             selected = unavailable
         }
         button.select(selected)
-        button.toolTip = picker.description ?? selected?.toolTip ?? selected?.title
+        button.toolTip = picker.description ?? selected?.subtitle ?? selected?.title
     }
 
     @objc private func selectModel() { select(.model, from: modelPicker) }
@@ -610,6 +740,53 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     func textDidChange(_ notification: Notification) { refresh(); onChange?() }
+
+    // MARK: Slash commands
+
+    /// The query while the draft is a bare `/query`: one token, nothing after it yet.
+    private var commandQuery: String? {
+        let draft = prompt.string
+        guard draft.hasPrefix("/"), !draft.contains(where: \.isWhitespace) else { return nil }
+        return String(draft.dropFirst())
+    }
+
+    private func refreshCommandMenu() {
+        let draft = prompt.string
+        if dismissedCommandDraft != nil, !draft.hasPrefix("/") { dismissedCommandDraft = nil }
+        let open = prompt.isEditable && !model.commands.isEmpty && dismissedCommandDraft != draft
+            && commandQuery.map { commandMenu.show(model.commands, query: $0) } == true
+        commandMenu.isHidden = !open
+        // Once a command is chosen, what it expects next shows after it until typing starts.
+        let chosen = draft.hasPrefix("/") && draft.hasSuffix(" ") && draft.dropFirst().dropLast().allSatisfy { !$0.isWhitespace }
+            ? model.commands.first { "/\($0.name) " == draft } : nil
+        prompt.inputHint = chosen?.inputHint
+    }
+
+    private func handleCommandMenuKey(_ key: ChatInputView.MenuKey) -> Bool {
+        guard !commandMenu.isHidden else { return false }
+        switch key {
+        case .up: commandMenu.moveSelection(by: -1)
+        case .down: commandMenu.moveSelection(by: 1)
+        case .accept:
+            guard let command = commandMenu.selectedCommand else { return false }
+            acceptCommand(command)
+        case .dismiss:
+            dismissedCommandDraft = prompt.string
+            refreshCommandMenu()
+        }
+        return true
+    }
+
+    /// Replaces the draft through the text system, so undo returns to the typed query.
+    private func acceptCommand(_ command: ACPAvailableCommand) {
+        let whole = NSRange(location: 0, length: (prompt.string as NSString).length)
+        let replacement = "/\(command.name) "
+        guard prompt.shouldChangeText(in: whole, replacementString: replacement) else { return }
+        prompt.replaceCharacters(in: whole, with: replacement)
+        prompt.didChangeText()
+        prompt.setSelectedRange(NSRange(location: (replacement as NSString).length, length: 0))
+        view.window?.makeFirstResponder(prompt)
+    }
 
     func undoManager(for view: NSTextView) -> UndoManager? { view === prompt ? composerUndo : nil }
 
@@ -734,6 +911,60 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     /// Send never initializes or retries a connection, nor commits an in-progress command edit.
+    private var hasSomethingToSend: Bool {
+        !prompt.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    // MARK: Attachments
+
+    /// Takes a paste or drop that holds files or an image. Returns false for anything else, so
+    /// the field pastes it as text.
+    private func attach(from pasteboard: NSPasteboard) -> Bool {
+        guard prompt.isEditable else { return false }
+        return add(ComposerAttachment.attachments(from: pasteboard))
+    }
+
+    var canAttachFiles: Bool { prompt.isEditable && attachments.count < ComposerAttachment.maximumCount }
+
+    /// The paperclip and Session ▸ Attach Files…: a panel over the window, starting in the
+    /// workspace, for files and folders alike.
+    @objc func chooseAttachments(_ sender: Any?) {
+        guard let window = view.window, canAttachFiles, window.attachedSheet == nil else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = workspace
+        panel.prompt = "Attach"
+        panel.message = "Choose files or folders to send with your message."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK else { return }
+            self.add(panel.urls.map(ComposerAttachment.fromFile))
+            window.makeFirstResponder(self.prompt)
+        }
+    }
+
+    /// Up to the limit; anything past it is refused with a beep rather than silently dropped.
+    @discardableResult
+    private func add(_ added: [ComposerAttachment]) -> Bool {
+        guard !added.isEmpty else { return false }
+        let room = ComposerAttachment.maximumCount - attachments.count
+        guard room > 0 else {
+            NSSound.beep()
+            return true
+        }
+        attachments += added.prefix(room)
+        if added.count > room { NSSound.beep() }
+        refresh()
+        return true
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        attachments.removeAll { $0.id == id }
+        refresh()
+        view.window?.makeFirstResponder(prompt)
+    }
+
     private func beginOperation(draft: String) {
         guard !shuttingDown, operation == nil, !changingConfiguration,
               !model.isChangingConfiguration,
@@ -748,21 +979,26 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             guard !Task.isCancelled, !shuttingDown, operation == token,
                   model.phase == .ready else { return }
             prompt.string = ""
+            // Its recorded edits point into the draft that just left; undoing one against
+            // the empty field corrupts the text system.
+            composerUndo.removeAllActions()
+            let sent = attachments
+            attachments = []
             if sessionTitle == "New Session" {
                 let firstLine = draft.split(whereSeparator: \.isNewline).first.map(String.init) ?? draft
-                sessionTitle = String(firstLine.trimmingCharacters(in: .whitespaces).prefix(60))
+                let title = firstLine.trimmingCharacters(in: .whitespaces)
+                sessionTitle = String((title.isEmpty ? sent.first?.name ?? title : title).prefix(60))
                 onChange?()
             }
             operation = nil
             operationTask = nil
-            await model.send(draft)
+            await model.send(draft, attachments: sent)
         }
     }
 
     @objc private func sendPrompt() {
-        let text = prompt.string
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        beginOperation(draft: text)
+        guard hasSomethingToSend else { return }
+        beginOperation(draft: prompt.string)
     }
 
     @objc private func cancelPrompt() {
@@ -810,6 +1046,116 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     /// Phase one. Exercises actual AppKit controls without a model provider, file picker, or
     /// UI scripting permissions. The caller creates this session with `fixtureHome` as its workspace.
+    /// The agent sends its commands just before its session reply, on the event stream, so
+    /// they may land either side of it; either way they must arrive. Keys go through the
+    /// field, the way typing does.
+    private func smokeTestCommandMenu() async throws {
+        func key(_ code: UInt16, _ characters: String) {
+            prompt.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: view.window!.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!)
+        }
+        func type(_ text: String) {
+            prompt.insertText(text, replacementRange: prompt.selectedRange())
+        }
+        try await wait { !self.model.commands.isEmpty }
+        guard model.commands.map(\.name) == ["review", "compact", "init"] else {
+            throw SmokeError.failed("Commands sent with the session reply were lost")
+        }
+        prompt.string = ""
+        refresh()
+        type("/")
+        guard !commandMenu.isHidden, commandMenu.matches.count == 3, commandMenu.selectedCommand?.name == "review" else {
+            throw SmokeError.failed("A bare slash must list every command")
+        }
+        type("c")
+        guard commandMenu.matches.first?.name == "compact", commandMenu.selectedCommand?.name == "compact" else {
+            throw SmokeError.failed("The command menu did not filter by name")
+        }
+        prompt.string = ""
+        type("/")
+        key(125, String(UnicodeScalar(NSDownArrowFunctionKey)!))
+        key(125, String(UnicodeScalar(NSDownArrowFunctionKey)!))
+        key(126, String(UnicodeScalar(NSUpArrowFunctionKey)!))
+        guard commandMenu.selectedCommand?.name == "compact" else { throw SmokeError.failed("Arrows did not move the command selection") }
+        key(53, "\u{1b}")
+        guard commandMenu.isHidden, prompt.string == "/" else { throw SmokeError.failed("Escape did not close the command menu") }
+        // Setting the string above recorded nothing, so start undo from here, and group the
+        // typing and the choice separately, as two key events would be.
+        composerUndo.removeAllActions()
+        composerUndo.groupsByEvent = false
+        composerUndo.beginUndoGrouping()
+        type("r")
+        composerUndo.endUndoGrouping()
+        guard !commandMenu.isHidden else { throw SmokeError.failed("Typing on did not reopen the command menu") }
+        composerUndo.beginUndoGrouping()
+        key(36, "\r")
+        composerUndo.endUndoGrouping()
+        guard prompt.string == "/review ", commandMenu.isHidden, prompt.inputHint == "what to focus on",
+              model.phase == .ready, model.messages.isEmpty else {
+            throw SmokeError.failed("Return must choose the command, not send the draft")
+        }
+        composerUndo.undo()
+        // Before any further edit: with grouping off, an edit outside a group raises.
+        composerUndo.groupsByEvent = true
+        guard prompt.string == "/r" else { throw SmokeError.failed("Undo did not return to the typed query") }
+        composerUndo.removeAllActions()
+        prompt.string = "/review "
+        type("a")
+        guard prompt.inputHint == nil else { throw SmokeError.failed("The input hint stayed after typing began") }
+        prompt.string = ""
+        composerUndo.removeAllActions()
+        refresh()
+    }
+
+    /// A pasted image joins the composer without touching the draft, can be sent on its own,
+    /// keeps the composer inside the window at the smallest size, and can be taken out again.
+    /// Uses a private pasteboard, never the user's clipboard.
+    private func smokeTestAttachments() throws {
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 40, bitsPerSample: 8,
+                                            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                            bytesPerRow: 0, bitsPerPixel: 0),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw SmokeError.failed("Could not make a smoke image")
+        }
+        let board = NSPasteboard(name: NSPasteboard.Name("dev.latchapp.smoke.\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.setData(png, forType: .png)
+        prompt.string = ""
+        refresh()
+        view.window?.contentView?.layoutSubtreeIfNeeded()
+        let paperclip = attach.convert(attach.bounds, to: composerBox)
+        let sendFrame = send.convert(send.bounds, to: composerBox)
+        guard !attach.isHidden, attach.isEnabled, canAttachFiles, composerBox.bounds.contains(paperclip),
+              paperclip.maxX <= sendFrame.minX, abs(paperclip.midY - sendFrame.midY) < 1 else {
+            throw SmokeError.failed("The attach button must sit before Send, inside the composer, and be enabled")
+        }
+        guard attach(from: board), attachments.count == 1, prompt.string.isEmpty else {
+            throw SmokeError.failed("A pasted image did not become an attachment")
+        }
+        guard !attachmentStrip.isHidden, send.isEnabled else {
+            throw SmokeError.failed("An attachment must show in the composer and be sendable without text")
+        }
+        try smokeTestComposerBounds()
+        board.clearContents()
+        board.setString("Just text", forType: .string)
+        guard !attach(from: board), attachments.count == 1 else {
+            throw SmokeError.failed("Pasted text was taken as an attachment")
+        }
+        board.clearContents()
+        board.setData(png, forType: .png)
+        for _ in 1..<ComposerAttachment.maximumCount { _ = attach(from: board) }
+        guard attachments.count == ComposerAttachment.maximumCount, !attach.isEnabled, !canAttachFiles else {
+            throw SmokeError.failed("The attach button stayed enabled at the attachment limit")
+        }
+        for extra in attachments.dropFirst() { removeAttachment(extra.id) }
+        removeAttachment(attachments[0].id)
+        guard attachments.isEmpty, attachmentStrip.isHidden, !send.isEnabled, attach.isEnabled else {
+            throw SmokeError.failed("Removing the attachment did not clear the composer")
+        }
+    }
+
     func smokeTestConversation(fixtureHome: URL) async throws {
         let localBin = fixtureHome.appendingPathComponent(".local/bin")
         let nodeBin = fixtureHome.appendingPathComponent(".local/share/fnm/node-versions/v99.0.0/installation/bin")
@@ -878,6 +1224,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             windowNumber: view.window!.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
         prompt.keyDown(with: shiftReturn)
         guard prompt.string.contains("\n"), model.phase == .ready else { throw SmokeError.failed("Shift Return must insert a newline, not send") }
+        try await smokeTestCommandMenu()
+        try smokeTestAttachments()
         prompt.string = "Keep working"
         refresh()
         guard send.isEnabled else { throw SmokeError.failed("Send stayed disabled") }
@@ -1041,6 +1389,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             guard !bannerRow.isHidden, !banner.isHidden else {
                 throw SmokeError.failed("A launch problem did not raise the banner at \(size)")
             }
+            // The composer floats over the transcript by design; the transcript keeps its end clear of it.
+            let composer = composerBox.convert(composerBox.bounds, to: view)
+            let transcriptFrame = conversation.convert(conversation.bounds, to: view)
+            guard transcriptFrame.insetBy(dx: -1, dy: -1).contains(composer),
+                  conversation.bottomOverlay >= composer.maxY - transcriptFrame.minY else {
+                throw SmokeError.failed("The composer does not float within the transcript at \(size)")
+            }
             let controls: [NSView] = [banner, conversation, composerBox]
             let visible = controls.filter { !$0.isHiddenOrHasHiddenAncestor }
             for (index, control) in visible.enumerated() {
@@ -1049,7 +1404,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                       view.bounds.insetBy(dx: -1, dy: -1).contains(frame) else {
                     throw SmokeError.failed("Session content clipped at \(size): \(frame)")
                 }
-                for other in visible.dropFirst(index + 1) {
+                for other in visible.dropFirst(index + 1) where !(control === conversation && other === composerBox) {
                     let otherFrame = other.convert(other.alignmentRect(forFrame: other.bounds), to: view)
                     guard !frame.intersects(otherFrame) else {
                         throw SmokeError.failed("Session content overlaps at \(size): \(frame), \(otherFrame)")
@@ -1084,7 +1439,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             let transcript = conversation.convert(conversation.bounds, to: view)
             let expected = transcript.width - ChatTranscriptView.horizontalInset * 2
             guard abs(box.width - expected) < 2, abs(box.midX - transcript.midX) < 2,
-                  box.minX >= transcript.minX + 15, box.maxX <= transcript.maxX - 15,
+                  box.minX >= transcript.minX + ChatTranscriptView.horizontalInset - 1,
+                  box.maxX <= transcript.maxX - ChatTranscriptView.horizontalInset + 1,
                   box.height > 88, box.minY >= 0, box.maxY <= view.bounds.height else {
                 throw SmokeError.failed("Composer column is clipped or misaligned at \(size): \(box)")
             }

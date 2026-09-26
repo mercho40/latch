@@ -88,8 +88,8 @@ public actor LatchAgentService {
             let sequence = try await registry.setSessionMode(runtimeID: runtimeID, modeID: modeID)
             return .sessionModeSet(runtimeID: runtimeID, sequence: sequence)
 
-        case let .prompt(runtimeID, text):
-            let response = try await registry.prompt(runtimeID: runtimeID, text: text)
+        case let .prompt(runtimeID, blocks):
+            let response = try await registry.prompt(runtimeID: runtimeID, blocks: blocks)
             return .promptCompleted(runtimeID: runtimeID, response: response)
 
         case let .cancelPrompt(runtimeID):

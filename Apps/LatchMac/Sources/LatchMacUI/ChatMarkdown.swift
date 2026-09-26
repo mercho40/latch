@@ -225,11 +225,18 @@ internal enum ChatMarkdown {
             for (column, text) in texts.enumerated() {
                 let block = NSTextTableBlock(table: layout, startingRow: row, rowSpan: 1,
                                              startingColumn: column, columnSpan: 1)
-                block.setBorderColor(.separatorColor)
-                block.setWidth(1, type: .absoluteValueType, for: .border)
+                // Rules between rows only: no columns boxed in, no filled header. The bold header
+                // stands on a firmer rule than the rows below it, and the last row needs none.
+                block.setWidth(0, type: .absoluteValueType, for: .border)
+                if row < cells.count - 1 {
+                    block.setWidth(1, type: .absoluteValueType, for: .border, edge: .maxY)
+                    block.setBorderColor(row == 0 ? LatchPalette.tableRule : LatchPalette.tableRowRule, for: .maxY)
+                }
                 block.setWidth(tableCellPadding, type: .absoluteValueType, for: .padding)
+                // With no box around it, the table's outer text lines up with the prose beside it.
+                if column == 0 { block.setWidth(0, type: .absoluteValueType, for: .padding, edge: .minX) }
+                if column == texts.count - 1 { block.setWidth(0, type: .absoluteValueType, for: .padding, edge: .maxX) }
                 block.setValue(shares[column], type: .percentageValueType, for: .width)
-                if row == 0 { block.backgroundColor = .quaternaryLabelColor }
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.textBlocks = [block]
                 paragraph.alignment = table.alignments[column]
@@ -384,7 +391,7 @@ internal enum ChatMarkdown {
             }
             // Explicit allowlist: never bridge image/HTML or other parser attributes.
             var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-            if code { attributes[.backgroundColor] = NSColor.quaternaryLabelColor }
+            if code { attributes[.backgroundColor] = LatchPalette.inlineCode }
             if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
             if !code, let url = run.link, isSafeLink(url) {
                 attributes[.link] = url

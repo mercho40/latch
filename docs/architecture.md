@@ -9,10 +9,10 @@ Latch should preserve ACP semantics rather than inventing a second agent abstrac
 - `session/list` → session list
 - `session/new` → new session
 - `session/load` / `session/resume` → open session
-- `session/prompt` → send message
+- `session/prompt` → send message: text, plus an `image` block for each attached image when the agent's `promptCapabilities.image` allows it, and a `resource_link` for each attached file or folder, or for an image the agent cannot take
 - `session/cancel` → stop action
 - `session/set_mode` → permission mode
-- ACP updates → streamed messages and tool state
+- ACP updates → streamed messages and tool state; `available_commands_update` → the composer's `/` menu
 - ACP permission request → native approval sheet
 
 A thin internal adapter can isolate ACP version changes and allow other structured harness adapters later.
@@ -47,7 +47,7 @@ The service layer now has these small primitives:
 - `AgentRuntimeRegistry` reserves stable Latch-local IDs, prevents duplicate launches, supervises multiple runtimes, exposes Codable status snapshots and an outbound event stream, evicts terminated processes, and supports individual or concurrent shutdown.
 - `LatchServiceProtocol` defines shared Codable commands, responses, events, launch profiles, and versioned request/reply/event envelopes used across the macOS service and native clients.
 - `LatchAgentService` dispatches those transport-neutral commands, including permission resolutions, onto the runtime registry and exposes its single outbound event stream.
-- `LatchServiceCodec` checks JSON payload byte limits before decoding and after encoding.
+- `LatchServiceCodec` checks JSON payload byte limits before decoding and after encoding. The limit is 8 MB, the same as the largest frame the ACP connection accepts, so a prompt carrying several resized screenshots crosses the boundary whole.
 - `LatchAgentXPC` (a macOS-only target in `LatchAgentCore`) adapts bounded `Data` requests to versioned service replies. Codec failures use sanitized transport errors; command failures remain in correlated replies.
 - `LatchAgentXPCEventHub` consumes the service event stream once and broadcasts versioned, sequenced events to attached clients. Each client acknowledges delivery, with one event in flight and a configurable per-client queue limit (128 events including the in-flight event by default). Slow clients are disconnected; an unencodable event disconnects all current recipients rather than silently skipping it.
 

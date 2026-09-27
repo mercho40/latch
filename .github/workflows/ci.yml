@@ -45,9 +45,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      # The wire types stay buildable for an iOS client; the agent runtime is gated to macOS and Linux.
+      # The wire types and the client stay buildable for an iOS app; the agent runtime is gated to macOS and Linux.
       - run: >-
           swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteProtocol
+          --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+      - run: >-
+          swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteClient
           --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
 
   linux:

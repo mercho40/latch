@@ -1,5 +1,6 @@
 import AppKit
 import LatchRemoteProtocol
+import LatchSessionKit
 
 /// The Servers pane: the `latch-server`s this Mac runs remote sessions on. A list, and below it
 /// what belongs to the selected server: whether its token may cross an unencrypted network,

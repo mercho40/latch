@@ -4,8 +4,9 @@ Latch is a native macOS client for ACP coding agents. Read [README.md](README.md
 
 ## Layout
 
-- `Apps/LatchMac` — the app. `Sources/LatchMacUI` holds nearly everything; `Sources/Latch` is the entry point and `Sources/LatchAgentXPCService` the embedded service's. The Xcode project and the SwiftPM package build the same sources.
-- `Packages/LatchACP` → `Packages/LatchServiceProtocol` → `Packages/LatchAgentCore` — ACP client, wire types, then the service and its XPC layer. `LatchServiceProtocol` also holds the network protocol (`LatchRemoteProtocol`) and its Network.framework client (`LatchRemoteClient`); `LatchAgentCore` also builds `latch-server` (`LatchAgentServer`) for Linux and macOS. See [docs/server.md](docs/server.md).
+- `Apps/LatchMac` — the app. `Sources/LatchMacUI` holds the AppKit UI and the local agent clients; `Sources/Latch` is the entry point and `Sources/LatchAgentXPCService` the embedded service's. The Xcode project and the SwiftPM package build the same sources.
+- `Packages/LatchSessionKit` — the session layer without UI, shared with the iOS app: `SessionModel`, saved sessions, server profiles, and remote sessions' client and connector. No UI framework, for macOS and iOS; each app wires its own wake-up to `ChannelRemoteSessionConnector.probeAll()`. `LatchSessionKitTestSupport` runs a real `latch-server` on loopback for its tests and the app's.
+- `Packages/LatchACP` → `Packages/LatchServiceProtocol` → `Packages/LatchAgentCore` — ACP client, wire types, then the service and its XPC layer. `LatchServiceProtocol` also holds the network protocol (`LatchRemoteProtocol`) and its Network.framework client (`LatchRemoteClient`); `LatchAgentCore` also builds `latch-server` (`LatchAgentServer`) for Linux and macOS, and its presets for iOS without the runtime. See [docs/server.md](docs/server.md).
 - The UI never touches an agent runtime in-process. Local sessions go through `LatchAgentXPCClient`, even in the SwiftPM preview; remote sessions through `LatchRemoteClient`.
 
 ## Constraints
@@ -21,6 +22,7 @@ Latch is a native macOS client for ACP coding agents. Read [README.md](README.md
 swift test --package-path Packages/LatchACP
 swift test --package-path Packages/LatchServiceProtocol
 swift test --package-path Packages/LatchAgentCore
+swift test --package-path Packages/LatchSessionKit
 swift test --package-path Apps/LatchMac
 bash Scripts/test-mac-app.sh            # builds the bundle, runs the UI smoke over XPC and the remote smoke against a loopback latch-server
 bash Scripts/test-linux.sh              # the package tests on Linux, in Apple's container tool

@@ -1,5 +1,6 @@
 import AppKit
 import LatchAgentCore
+import LatchSessionKit
 
 /// Sidebar of workspaces and sessions beside the selected session's detail view.
 @MainActor

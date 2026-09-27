@@ -1,4 +1,5 @@
 import AppKit
+import LatchSessionKit
 
 /// The ⌘, window: Agents, then Servers, as toolbar tabs.
 @MainActor

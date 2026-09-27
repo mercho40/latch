@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 /// Dragging the window edge re-wraps every message in the transcript. That work is limited
 /// to the rows the reader can see, so the rows that were skipped have to settle exactly

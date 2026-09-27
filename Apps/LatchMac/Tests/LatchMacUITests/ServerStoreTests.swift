@@ -2,6 +2,7 @@ import Foundation
 import LatchRemoteProtocol
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 @MainActor
 final class ServerStoreTests: XCTestCase {
@@ -101,27 +102,5 @@ final class ServerStoreTests: XCTestCase {
         try store.save(added)
         XCTAssertNil(store.problem)
         XCTAssertEqual(store.servers.map(\.id), [kept.id, added.id], "The file's servers are kept, not replaced")
-    }
-
-    func testTheTokenIsInNoDescriptionOrDump() throws {
-        let server = profile()
-        let secret = server.token.rawValue
-        var dumped = ""
-        dump(server, to: &dumped)
-        var dumpedList = ""
-        dump([server], to: &dumpedList)
-        for text in [String(describing: server), String(reflecting: server), "\(server)", dumped, dumpedList,
-                     String(describing: Mirror(reflecting: server).children.map(\.value))] {
-            XCTAssertFalse(text.contains(secret), "Token leaked into: \(text)")
-            XCTAssertFalse(text.contains(String(secret.dropFirst(LatchRemoteToken.prefix.count))))
-        }
-        XCTAssertTrue(dumped.contains("vps.example.ts.net"), "The rest of the profile is still described")
-    }
-
-    func testAStoreBroadcastsItsChanges() throws {
-        let store = InMemoryServerStore()
-        let changed = expectation(forNotification: .serverStoreDidChange, object: store)
-        try store.save(profile())
-        wait(for: [changed], timeout: 1)
     }
 }

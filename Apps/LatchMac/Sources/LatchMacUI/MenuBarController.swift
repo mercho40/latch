@@ -1,4 +1,5 @@
 import AppKit
+import LatchSessionKit
 
 /// One row of the menu bar extra.
 struct MenuBarSession: Equatable {

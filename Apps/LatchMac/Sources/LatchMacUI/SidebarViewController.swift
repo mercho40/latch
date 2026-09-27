@@ -1,4 +1,5 @@
 import AppKit
+import LatchSessionKit
 
 /// Source list of saved and newly opened sessions, grouped by workspace.
 @MainActor

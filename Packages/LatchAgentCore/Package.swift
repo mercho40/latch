@@ -6,6 +6,7 @@ let package = Package(
     name: "LatchAgentCore",
     platforms: [
         .macOS(.v15),
+        .iOS(.v18),
     ],
     products: [
         .library(name: "LatchAgentCore", targets: ["LatchAgentCore"]),

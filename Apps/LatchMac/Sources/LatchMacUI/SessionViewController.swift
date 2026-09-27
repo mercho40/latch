@@ -2,6 +2,7 @@ import AppKit
 import LatchACP
 import LatchAgentCore
 import LatchRemoteProtocol
+import LatchSessionKit
 import UniformTypeIdentifiers
 
 /// One ACP session: agent selection, settings, transcript, and composer.
@@ -267,7 +268,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             model = SessionModel(makeClient: { remoteConnector.makeClient(serverID: serverID) })
             model.sendsAttachmentsRemotely = true
         } else {
-            model = SessionModel()
+            model = SessionModel(makeClient: AgentServiceClients.makeDefault)
         }
         self.injectedLaunchEnvironment = launchEnvironment
         // A remote agent's readiness is the server's business, so a remote session never
@@ -1184,10 +1185,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         guard !added.isEmpty else { return false }
         var added = added
         attachmentNotice = nil
-        let refused = added.filter(model.refusesRemotely)
+        let refused = added.filter { model.refusesRemotely($0.prompt) }
         if !refused.isEmpty {
             refuse(refused)
-            added.removeAll(where: model.refusesRemotely)
+            added.removeAll { model.refusesRemotely($0.prompt) }
             guard !added.isEmpty else { return true }
         }
         let room = ComposerAttachment.maximumCount - attachments.count
@@ -1236,9 +1237,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                   model.phase == .ready else { return }
             // An image added before the agent said it takes none. Take it out and keep the
             // draft, so the user can send the rest as it is.
-            let refused = attachments.filter(model.refusesRemotely)
+            let refused = attachments.filter { model.refusesRemotely($0.prompt) }
             guard refused.isEmpty else {
-                attachments.removeAll(where: model.refusesRemotely)
+                attachments.removeAll { model.refusesRemotely($0.prompt) }
                 return refuse(refused)
             }
             prompt.string = ""
@@ -1256,7 +1257,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             }
             operation = nil
             operationTask = nil
-            await model.send(draft, attachments: sent)
+            await model.send(draft, attachments: sent.map(\.prompt))
         }
     }
 

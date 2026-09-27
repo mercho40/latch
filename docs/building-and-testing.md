@@ -28,7 +28,7 @@ The smoke test opens a real window, exercises AppKit controls and permission she
 With a working local Codex login, an opt-in live test drives the native `SessionModel` against the pinned Codex adapter in a temporary workspace. It checks pre-prompt model and effort changes, a streamed no-tools reply, cancellation, disconnect/reconnect, and a real permission round trip (one approved write, one rejected write). It uses network access and model quota and skips during normal runs:
 
 ```sh
-LATCH_LIVE_CODEX=1 swift test --package-path Apps/LatchMac --filter LiveCodexIntegrationTests
+LATCH_LIVE_CODEX=1 swift test --package-path Packages/LatchSessionKit --filter LiveCodexIntegrationTests
 ```
 
 ## Performance benchmarks
@@ -36,8 +36,8 @@ LATCH_LIVE_CODEX=1 swift test --package-path Apps/LatchMac --filter LiveCodexInt
 Run the opt-in local performance comparisons (no network or model quota):
 
 ```sh
-LATCH_HISTORY_BENCHMARK=1 swift test --package-path Apps/LatchMac -c release --filter ChatHistoryRegressionTests
-LATCH_STREAMING_BENCHMARK=1 swift test --package-path Apps/LatchMac -c release --filter TranscriptRenderSchedulerTests
+LATCH_HISTORY_BENCHMARK=1 swift test --package-path Packages/LatchSessionKit -c release --filter ChatHistoryRegressionTests
+LATCH_STREAMING_BENCHMARK=1 swift test --package-path Apps/LatchMac -c release --filter TranscriptStreamingBenchmarkTests
 ```
 
 The history benchmark compares the frozen previous implementation against incremental bookkeeping, including retained snapshots. The rendering benchmark compares per-chunk and coalesced AppKit updates for one and eight sessions with simulated eight-chunk frames; it measures CPU work, not display FPS or end-to-end agent latency. Normal tests cover Unicode, eviction, state/transcript notification routing, pending-render cancellation, and final content.
@@ -170,7 +170,7 @@ swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteCli
 
 ### App tests against latch-server
 
-In `Apps/LatchMac`, `RemoteSessionLiveTests` and `RemoteSessionReattachTests` run sessions through the real window and model against `latch-server`'s hub and network layer, listening on 127.0.0.1 inside the test process, with shell mock agents. The live tests cover streaming, permissions, dropped links, a server that never answers, a refused token and an edited server, a server shutting down, and an agent stopped by another client. The re-attach tests run Latch twice against one server: quitting mid-turn, idle, or with a permission pending, then relaunching; a turn that ended while Latch was closed; a restarted server; an agent that exited or was stopped; evicted output; and closing and undoing. `RemoteSessionTests` and `ServersSettingsTests` cover remote locations, saving, the sidebar, attachments and the Servers pane.
+In `Packages/LatchSessionKit`, `RemoteSessionLiveTests` and `RemoteSessionReattachTests` run sessions through the model, and in `Apps/LatchMac` their window counterparts (`RemoteSessionLiveWindowTests` and the window cases of `RemoteSessionReattachTests`) run them through the real window, against `latch-server`'s hub and network layer, listening on 127.0.0.1 inside the test process, with shell mock agents. The live tests cover streaming, permissions, dropped links, a server that never answers, a refused token and an edited server, a server shutting down, and an agent stopped by another client. The re-attach tests run Latch twice against one server: quitting mid-turn, idle, or with a permission pending, then relaunching; a turn that ended while Latch was closed; a restarted server; an agent that exited or was stopped; evicted output; and closing and undoing. `RemoteSessionTests` and `ServersSettingsTests` cover remote locations, saving, the sidebar, attachments and the Servers pane.
 
 ### Remote smoke test
 

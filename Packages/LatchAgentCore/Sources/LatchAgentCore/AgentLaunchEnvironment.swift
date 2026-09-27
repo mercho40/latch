@@ -14,7 +14,7 @@ public struct AgentLaunchEnvironment: Sendable {
 
     public init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        home: URL = AgentLaunchEnvironment.defaultHome,
         includeCommonLocations: Bool = true
     ) {
         self.home = home
@@ -63,6 +63,16 @@ public struct AgentLaunchEnvironment: Sendable {
         var childEnvironment = environment
         childEnvironment["PATH"] = directories.joined(separator: ":")
         self.environment = childEnvironment
+    }
+
+    /// iOS runs no agents and has no home of its own, only the app's container, which it
+    /// stands in for so presets still describe themselves there.
+    @usableFromInline static var defaultHome: URL {
+        #if os(iOS)
+        URL(fileURLWithPath: NSHomeDirectory())
+        #else
+        FileManager.default.homeDirectoryForCurrentUser
+        #endif
     }
 
     public func executable(named name: String) -> String? {

@@ -7,6 +7,7 @@ import LatchServiceProtocol
 import Synchronization
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 @MainActor
 final class RemoteSessionTests: XCTestCase {
@@ -314,7 +315,7 @@ final class RemoteSessionTests: XCTestCase {
             // The model holds the same line if an image reaches it anyway, and says nothing
             // that would offer a Retry.
             let image = try XCTUnwrap(ComposerAttachment.attachments(from: try pngPasteboard()).first)
-            await session.model.send("", attachments: [image])
+            await session.model.send("", attachments: [image.prompt])
             XCTAssertNil(session.model.errorMessage)
             XCTAssertEqual(session.model.phase, .ready)
             XCTAssertTrue(connector.prompts.isEmpty)

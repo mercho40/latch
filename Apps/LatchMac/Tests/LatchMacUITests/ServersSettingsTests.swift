@@ -3,6 +3,7 @@ import LatchRemoteClient
 import LatchRemoteProtocol
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 @MainActor
 final class ServersSettingsTests: XCTestCase {

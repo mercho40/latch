@@ -2,6 +2,7 @@ import AppKit
 import LatchAgentCore
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 final class SessionPersistenceTests: XCTestCase {
     @MainActor func testUnopenedSessionSnapshotPreservesAllFieldsWithoutLoadingView() async throws {

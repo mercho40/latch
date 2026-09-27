@@ -2,6 +2,7 @@ import AppKit
 import LatchACP
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 @MainActor
 final class ToolTranscriptStyleTests: XCTestCase {

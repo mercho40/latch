@@ -1,4 +1,5 @@
 import AppKit
+import LatchSessionKit
 
 /// A session-local, selectable transcript. The composer and connection status belong to the parent.
 @MainActor

@@ -1,6 +1,7 @@
 import LatchACP
 import LatchServiceProtocol
 
+#if os(macOS) || os(Linux)
 /// Transport-neutral command boundary for the macOS Latch Agent.
 ///
 /// XPC and Network.framework adapters can encode messages as data and delegate execution here.
@@ -131,3 +132,4 @@ public actor LatchAgentService {
         return LatchAgentFailure(code: .commandFailed, message: message)
     }
 }
+#endif

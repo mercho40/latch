@@ -1,6 +1,7 @@
 import AppKit
 import LatchAgentCore
 import LatchRemoteProtocol
+import LatchSessionKit
 
 /// Session ▸ New Remote Session…: which server, which folder on it, which agent. Latch cannot
 /// browse a server's folders, so the folder is typed, starting from the server's home, which

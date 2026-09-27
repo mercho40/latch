@@ -2,6 +2,7 @@ import AppKit
 import LatchAgentCore
 import LatchRemoteClient
 import LatchRemoteProtocol
+import LatchSessionKit
 
 @MainActor
 public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -92,9 +93,10 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
                 ?? (smokeTest ? nil : SessionStore(directory: SessionStore.defaultDirectory)),
             attention: attention, menuBar: menuBar, settings: agentSettings, servers: servers,
             remoteConnector: remoteSmoke == nil
-                ? ChannelRemoteSessionConnector(servers: servers)
+                ? ChannelRemoteSessionConnector(servers: servers, notificationCenter: NSWorkspace.shared.notificationCenter)
                 : ChannelRemoteSessionConnector(servers: servers,
-                                                backoff: LatchRemoteBackoff(initial: .seconds(30), maximum: .seconds(30)))
+                                                backoff: LatchRemoteBackoff(initial: .seconds(30), maximum: .seconds(30)),
+                                                notificationCenter: NSWorkspace.shared.notificationCenter)
         )
         self.controller = controller
         controller.showWindow(nil)

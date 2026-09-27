@@ -13,10 +13,11 @@ let package = Package(
         .package(path: "../../Packages/LatchACP"),
         .package(path: "../../Packages/LatchAgentCore"),
         .package(path: "../../Packages/LatchServiceProtocol"),
+        .package(path: "../../Packages/LatchSessionKit"),
     ],
     targets: [
         .target(name: "LatchMacUI", dependencies: [
-            "LatchACP", "LatchAgentCore", "LatchServiceProtocol",
+            "LatchACP", "LatchAgentCore", "LatchServiceProtocol", "LatchSessionKit",
             .product(name: "LatchAgentXPC", package: "LatchAgentCore"),
             .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
             .product(name: "LatchRemoteClient", package: "LatchServiceProtocol"),
@@ -26,7 +27,8 @@ let package = Package(
         ]),
         .executableTarget(name: "Latch", dependencies: ["LatchMacUI"]),
         .testTarget(name: "LatchMacUITests", dependencies: [
-            "LatchMacUI", "LatchServiceProtocol",
+            "LatchMacUI", "LatchServiceProtocol", "LatchSessionKit",
+            .product(name: "LatchSessionKitTestSupport", package: "LatchSessionKit"),
             .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
             .product(name: "LatchRemoteClient", package: "LatchServiceProtocol"),
             // A real latch-server in the test process, for remote sessions end to end.

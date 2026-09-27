@@ -9,6 +9,7 @@ public enum AgentRuntimeRegistryError: Error, Equatable, Sendable {
     case invalidPermissionOption(UUID)
 }
 
+#if os(macOS) || os(Linux)
 /// Owns the set of ACP runtimes supervised by the Latch Agent process.
 ///
 /// IDs are Latch-local and exist independently of the ACP session ID assigned after startup.
@@ -275,3 +276,4 @@ public actor AgentRuntimeRegistry {
         tasks.forEach { $0.cancel() }
     }
 }
+#endif

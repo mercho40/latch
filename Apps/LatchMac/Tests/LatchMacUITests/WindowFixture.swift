@@ -2,6 +2,7 @@ import AppKit
 import LatchAgentCore
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 /// A temporary store, workspace, and window for tests that drive the real window controller.
 /// The launch environment has no harness installed, so no selection can launch a process,
@@ -145,5 +146,21 @@ final class WindowFixture {
         }
         windows.removeAll()
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+extension XCTestCase {
+    /// Waits for a condition that may need the server to answer, such as a runtime's state.
+    @MainActor func eventually(_ description: String, timeout: Duration = .seconds(15),
+                    file: StaticString = #filePath, line: UInt = #line,
+                    _ condition: () async throws -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while try await !condition() {
+            guard ContinuousClock.now < deadline else {
+                XCTFail("Timed out waiting for \(description)", file: file, line: line)
+                throw WindowFixture.SettleTimeout(description: description)
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 }

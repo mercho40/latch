@@ -42,7 +42,7 @@ public actor LatchAgentService {
         } catch {
             return LatchAgentReply(
                 requestID: request.requestID,
-                result: .failure(publicFailure(for: error))
+                result: .failure(Self.publicFailure(for: error))
             )
         }
     }
@@ -106,7 +106,9 @@ public actor LatchAgentService {
         await registry.stopAll()
     }
 
-    private func publicFailure(for error: any Error) -> LatchAgentFailure {
+    /// What a client may see of a failed command: agent RPC display text after redaction, or
+    /// a fixed message. Never native errors, paths, or stderr.
+    public static func publicFailure(for error: any Error) -> LatchAgentFailure {
         let message: String
         switch error {
         case let error as ACPJSONRPCErrorObject:

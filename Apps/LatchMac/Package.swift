@@ -18,11 +18,17 @@ let package = Package(
         .target(name: "LatchMacUI", dependencies: [
             "LatchACP", "LatchAgentCore", "LatchServiceProtocol",
             .product(name: "LatchAgentXPC", package: "LatchAgentCore"),
+            .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
+            .product(name: "LatchRemoteClient", package: "LatchServiceProtocol"),
         ]),
         .target(name: "LatchAgentServiceHost", dependencies: [
             .product(name: "LatchAgentXPC", package: "LatchAgentCore"),
         ]),
         .executableTarget(name: "Latch", dependencies: ["LatchMacUI"]),
-        .testTarget(name: "LatchMacUITests", dependencies: ["LatchMacUI", "LatchServiceProtocol"]),
+        .testTarget(name: "LatchMacUITests", dependencies: [
+            "LatchMacUI", "LatchServiceProtocol",
+            .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
+            .product(name: "LatchRemoteClient", package: "LatchServiceProtocol"),
+        ]),
     ]
 )

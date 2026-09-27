@@ -194,9 +194,13 @@ final class SessionBannerView: NSView {
         handlers[ObjectIdentifier(sender)]?()
     }
 
+    /// After the user dismisses whatever is showing.
+    var onDismiss: (() -> Void)?
+
     @objc private func dismissBanner() {
         dismissedKey = key
         isHidden = true
+        onDismiss?()
     }
 
     /// Reconnecting clears the record of what was dismissed: a failure the user dismissed

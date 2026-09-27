@@ -1,12 +1,11 @@
 import AppKit
 
-/// The ⌘, window. It hosts one pane today; the tab controller is what lets a second one
-/// arrive later without moving the window, the menu item, or the shortcut.
+/// The ⌘, window: Agents, then Servers, as toolbar tabs.
 @MainActor
 final class SettingsWindowController: NSWindowController {
-    private let tabs = NSTabViewController()
+    private let tabs = SettingsTabViewController()
 
-    init(settings: AgentSettings = .shared) {
+    init(settings: AgentSettings = .shared, servers: (any ServerStore)? = nil, serverCheck: ServerCheck? = nil) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -21,6 +20,12 @@ final class SettingsWindowController: NSWindowController {
         item.label = "Agents"
         item.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: "Agents")
         tabs.addTabViewItem(item)
+        let serversPane = ServersSettingsViewController(store: servers ?? FileServerStore.shared,
+                                                        check: serverCheck ?? ServerCheckText.live)
+        let serversItem = NSTabViewItem(viewController: serversPane)
+        serversItem.label = "Servers"
+        serversItem.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "Servers")
+        tabs.addTabViewItem(serversItem)
         window.contentViewController = tabs
         // The tab controller titles the window when a tab is selected, but its first selection
         // happens before it has a window, which left the title bar blank.
@@ -33,8 +38,39 @@ final class SettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError("Not used") }
 
+    /// Brings a pane forward by its label, as clicking its toolbar item does.
+    func select(pane label: String) {
+        guard let index = tabs.tabViewItems.firstIndex(where: { $0.label == label }) else { return }
+        tabs.selectedTabViewItemIndex = index
+    }
+
+    var selectedPane: String? {
+        tabs.tabViewItems.indices.contains(tabs.selectedTabViewItemIndex)
+            ? tabs.tabViewItems[tabs.selectedTabViewItemIndex].label : nil
+    }
+
+    /// The window's title, for tests.
+    var title: String? { window?.title }
+
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate()
+    }
+}
+
+/// Titles the window after the pane on show and fits the window to it, as System Settings
+/// panes do: a short pane after a tall one does not keep the tall one's empty space.
+@MainActor
+private final class SettingsTabViewController: NSTabViewController {
+    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        guard let window = view.window, let tabViewItem, let pane = tabViewItem.viewController?.view else { return }
+        window.title = tabViewItem.label
+        let size = pane.fittingSize
+        guard size.width > 0, size.height > 0 else { return }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        // Grow and shrink from the top edge, which is where the toolbar the user clicked stays.
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: window.isVisible)
     }
 }

@@ -1,6 +1,7 @@
 import Foundation
 import LatchACP
 import LatchAgentCore
+import LatchRemoteProtocol
 import LatchServiceProtocol
 
 @MainActor
@@ -15,10 +16,12 @@ final class SessionModel {
     private var history = ChatHistory()
     /// What went wrong, in the words it arrived in. Setting it clears `errorAdvice`, so
     /// advice never outlives the failure it was written for.
-    private(set) var errorMessage: String? { didSet { errorAdvice = nil } }
+    private(set) var errorMessage: String? { didSet { errorAdvice = nil; errorIsConnectionFailure = false } }
     /// What to do about `errorMessage`, in Latch's words; kept apart so the banner can set
     /// the agent's text off from the advice instead of running them into one sentence.
     private(set) var errorAdvice: String?
+    /// `errorMessage` is about reaching a server, not about the agent on it.
+    private(set) var errorIsConnectionFailure = false
     static let idleSavedStatus = "Saved · Not connected"
     private(set) var cancellationRequested = false
     private(set) var configuration = SessionConfiguration()
@@ -67,6 +70,17 @@ final class SessionModel {
     private var commandsSequence: UInt64 = 0
     /// From the agent's prompt capabilities at connection; without it, images go as file links.
     private(set) var acceptsImages = false
+    /// The agent runs on a server, where a link to a file on this Mac means nothing: only an
+    /// image, and only to an agent that takes images, can go with a prompt.
+    var sendsAttachmentsRemotely = false
+
+    /// Whether the agent cannot receive this attachment. An image is judged by the agent's
+    /// capabilities, so it is refused only once they are known.
+    func refusesRemotely(_ attachment: ComposerAttachment) -> Bool {
+        guard sendsAttachmentsRemotely else { return false }
+        guard attachment.isImage else { return true }
+        return (phase == .ready || phase == .prompting) && !acceptsImages
+    }
     /// When the conversation last moved: a prompt sent, or a turn that finished.
     private(set) var lastActiveAt: Date?
     /// When the turn now running began. Only meaningful while `phase` is `.prompting`.
@@ -126,14 +140,7 @@ final class SessionModel {
     }
 
     func connect(command: String, workspace: URL?, launchEnvironment: AgentLaunchEnvironment = AgentLaunchEnvironment(), startNewSession: Bool = false) async {
-        guard phase == .disconnected else { return }
-        errorMessage = nil
-        if !startNewSession, archivedWithoutContext {
-            // Not a failure: nothing was attempted, so there is nothing to retry.
-            status = "Saved · Read only"
-            onChange?()
-            return
-        }
+        guard beginConnecting(startNewSession: startNewSession) else { return }
         let parsed: ResolvedAgentCommand
         do {
             parsed = try launchEnvironment.resolve(AgentCommand(command))
@@ -147,6 +154,33 @@ final class SessionModel {
             return
         }
         guard let workspace else { return }
+        await launch(.local(ACPCommandProfile(
+            executablePath: parsed.executable, arguments: parsed.arguments,
+            workingDirectoryPath: workspace.path, environment: parsed.environment
+        )), cwd: workspace.path, startNewSession: startNewSession)
+    }
+
+    /// A session on a server. The server resolves the agent and checks the folder, so
+    /// nothing is looked up on this Mac; the client launches it, and everything after the
+    /// launch is the local path's.
+    func connect(remote agent: LatchRemoteAgent, path: String, startNewSession: Bool = false) async {
+        guard beginConnecting(startNewSession: startNewSession) else { return }
+        await launch(.remote(agent: agent, path: path), cwd: path, startNewSession: startNewSession)
+    }
+
+    private func beginConnecting(startNewSession: Bool) -> Bool {
+        guard phase == .disconnected else { return false }
+        errorMessage = nil
+        if !startNewSession, archivedWithoutContext {
+            // Not a failure: nothing was attempted, so there is nothing to retry.
+            status = "Saved · Read only"
+            onChange?()
+            return false
+        }
+        return true
+    }
+
+    private func launch(_ launch: AgentLaunch, cwd: String, startNewSession: Bool) async {
         let token = UUID()
         generation = token
         let id = AgentRuntimeID(token.uuidString)
@@ -165,10 +199,7 @@ final class SessionModel {
         status = resumingID == nil ? "Connecting…" : "Resuming…"
         onChange?()
         do {
-            let result = try await client.execute(.startRuntime(id: id, profile: ACPCommandProfile(
-                executablePath: parsed.executable, arguments: parsed.arguments,
-                workingDirectoryPath: workspace.path, environment: parsed.environment
-            )))
+            let result = try await client.launch(launch, id: id)
             // Superseded while starting: the service may outlive this session, so release the runtime.
             guard generation == token else { _ = try? await client.execute(.stopRuntime(id: id)); return }
             let sequence: UInt64?
@@ -177,14 +208,14 @@ final class SessionModel {
                       initialization.agentCapabilities.loadSession else {
                     throw ResumeError.unsupported
                 }
-                let session = try await client.execute(.loadSession(runtimeID: id, sessionID: resumingID, cwd: workspace.path))
+                let session = try await client.execute(.loadSession(runtimeID: id, sessionID: resumingID, cwd: cwd))
                 guard generation == token else { _ = try? await client.execute(.stopRuntime(id: id)); return }
                 guard case let .sessionLoaded(_, response) = session else { throw ResumeError.invalidResponse }
                 configuration = SessionConfiguration(configOptions: response.configOptions, models: response.models, modes: response.modes)
                 sequence = response.localSequence
                 loadedThroughSequence = sequence
             } else {
-                let session = try await client.execute(.newSession(runtimeID: id, cwd: workspace.path))
+                let session = try await client.execute(.newSession(runtimeID: id, cwd: cwd))
                 guard generation == token else { _ = try? await client.execute(.stopRuntime(id: id)); return }
                 guard case let .sessionCreated(_, response) = session else { throw ResumeError.invalidResponse }
                 sessionID = response.sessionId
@@ -213,6 +244,7 @@ final class SessionModel {
             phase = .disconnected
             status = resumingID == nil ? "Not connected" : "Saved · Resume failed"
             errorMessage = error.localizedDescription
+            errorIsConnectionFailure = error is RemoteConnectionFailure
             if resumingID != nil { errorAdvice = "Your saved history is unchanged. Retry, or start a new session." }
         }
         onChange?()
@@ -277,6 +309,9 @@ final class SessionModel {
     func send(_ text: String, attachments: [ComposerAttachment] = []) async {
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard phase == .ready, !isChangingConfiguration, let id = runtimeID, hasText || !attachments.isEmpty else { return }
+        // The composer takes these out before the draft leaves it, and says why; this only
+        // makes sure a link to a file on this Mac never reaches a server.
+        guard !attachments.contains(where: refusesRemotely) else { return }
         // Attachments first, then what the user wrote about them. A pasted image an agent cannot
         // take is written to a file here, before anything is recorded as sent.
         let blocks: [ACPPromptBlock]

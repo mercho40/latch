@@ -85,7 +85,7 @@ final class SessionStoreTests: XCTestCase {
         let cases: [(Data, SessionStore.StoreError)] = [
             (Data("private transcript: not JSON".utf8), .corrupt),
             (Data(), .corrupt),
-            (Data(#"{"version":2,"sessions":"future payload"}"#.utf8), .unsupportedVersion),
+            (Data(#"{"version":3,"sessions":"future payload"}"#.utf8), .unsupportedVersion),
             (Data(#"{"version":0,"sessions":[]}"#.utf8), .unsupportedVersion),
             (Data(#"{"sessions":[]}"#.utf8), .corrupt),
         ]

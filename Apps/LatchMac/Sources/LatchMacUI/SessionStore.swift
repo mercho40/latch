@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import LatchAgentCore
 
@@ -16,12 +15,32 @@ struct SavedSession: Codable, Equatable, Sendable {
     /// When the conversation last moved: a prompt sent or a turn finished. Absent in sessions
     /// saved before it was kept, which then show no time.
     var lastActiveAt: Date? = nil
+    /// The server the session runs on, or nil for this Mac. For a remote session
+    /// `workspacePath` is a path on that server, never one on this Mac.
+    var serverID: UUID? = nil
 }
 
 struct SavedSessionLibrary: Codable, Equatable, Sendable {
-    var version: Int = 1
+    /// Version 2 marks a library holding a remote session. A build that predates remote
+    /// sessions ignores `serverID`, so it would reopen a server's path as a folder on this
+    /// Mac; the bump makes it refuse the file instead. A library without one stays at 1,
+    /// so it remains readable by that build.
+    static let supportedVersions = 1...2
+
+    var version: Int
     var sessions: [SavedSession]
     var selectedSessionID: UUID?
+
+    init(version: Int? = nil, sessions: [SavedSession], selectedSessionID: UUID?) {
+        self.version = version ?? Self.requiredVersion(for: sessions)
+        self.sessions = sessions
+        self.selectedSessionID = selectedSessionID
+    }
+
+    /// The oldest version able to hold these sessions.
+    static func requiredVersion(for sessions: [SavedSession]) -> Int {
+        sessions.contains { $0.serverID != nil } ? 2 : 1
+    }
 }
 
 /// Private, local plaintext storage; filesystem permissions are not encryption.
@@ -70,6 +89,12 @@ actor SessionStore {
 
     func save(_ library: SavedSessionLibrary) throws {
         guard !failedLoad else { throw StoreError.saveBlocked }
+        var library = library
+        // Written at the lowest version that holds its sessions: closing the last remote
+        // session hands the file back to builds that predate them.
+        if SavedSessionLibrary.supportedVersions.contains(library.version) {
+            library.version = SavedSessionLibrary.requiredVersion(for: library.sessions)
+        }
         try Self.validate(library)
         // Never replace corrupt or unsupported data, including when load was not called.
         do {
@@ -94,7 +119,10 @@ actor SessionStore {
     }
 
     private static func validate(_ library: SavedSessionLibrary) throws {
-        guard library.version == 1 else { throw StoreError.unsupportedVersion }
+        guard SavedSessionLibrary.supportedVersions.contains(library.version) else { throw StoreError.unsupportedVersion }
+        guard library.version >= SavedSessionLibrary.requiredVersion(for: library.sessions) else {
+            throw StoreError.invalidLibrary
+        }
         var sessionIDs = Set<UUID>()
         var messageIDs = Set<UUID>()
         for session in library.sessions {
@@ -117,41 +145,22 @@ actor SessionStore {
     }
 
     private func readLibrary() throws -> SavedSessionLibrary {
-        guard directory.isFileURL else { throw StoreError.unreadable }
-        let file = directory.appendingPathComponent(Self.fileName)
-        // Refuse symlinks and special files; O_NONBLOCK avoids hanging on a FIFO.
-        let descriptor = file.withUnsafeFileSystemRepresentation {
-            Darwin.open($0!, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        }
-        guard descriptor >= 0 else {
-            if errno == ENOENT { return SavedSessionLibrary(sessions: [], selectedSessionID: nil) }
-            throw StoreError.unreadable
-        }
-        defer { Darwin.close(descriptor) }
-        var info = stat()
-        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
-            throw StoreError.unreadable
-        }
-        guard info.st_size >= 0, info.st_size <= Self.maximumFileSize else { throw StoreError.tooLarge }
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            // Read at most one byte beyond the limit if the file grows after fstat.
-            let count = min(buffer.count, Self.maximumFileSize - data.count + 1)
-            let received = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, count) }
-            if received < 0 {
-                if errno == EINTR { continue }
-                throw StoreError.unreadable
+        let data: Data
+        do {
+            guard let contents = try PrivateFile.read(Self.fileName, in: directory, maximumSize: Self.maximumFileSize) else {
+                return SavedSessionLibrary(sessions: [], selectedSessionID: nil)
             }
-            if received == 0 { break }
-            guard received <= Self.maximumFileSize - data.count else { throw StoreError.tooLarge }
-            data.append(contentsOf: buffer.prefix(received))
+            data = contents
+        } catch .tooLarge {
+            throw StoreError.tooLarge
+        } catch {
+            throw StoreError.unreadable
         }
         do {
             // Check the schema before decoding its payload: future payloads may differ.
             struct Header: Decodable { let version: Int }
             let decoder = JSONDecoder()
-            guard try decoder.decode(Header.self, from: data).version == 1 else {
+            guard SavedSessionLibrary.supportedVersions.contains(try decoder.decode(Header.self, from: data).version) else {
                 throw StoreError.unsupportedVersion
             }
             let library = try decoder.decode(SavedSessionLibrary.self, from: data)
@@ -166,42 +175,10 @@ actor SessionStore {
     }
 
     private func writeAtomically(_ data: Data) throws {
-        guard directory.isFileURL else { throw StoreError.writeFailed }
         do {
-            try FileManager.default.createDirectory(
-                at: directory, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
+            try PrivateFile.write(data, as: Self.fileName, in: directory)
         } catch {
             throw StoreError.writeFailed
         }
-        let dirFD = directory.withUnsafeFileSystemRepresentation {
-            Darwin.open($0!, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        }
-        guard dirFD >= 0 else { throw StoreError.writeFailed }
-        defer { Darwin.close(dirFD) }
-        guard fchmod(dirFD, 0o700) == 0 else { throw StoreError.writeFailed }
-
-        // Exclusive creation keeps the staging file private from its first byte.
-        // A same-directory rename is atomic; errors before rename leave the old file intact.
-        let temporaryName = ".sessions-\(UUID().uuidString).tmp"
-        let fd = openat(dirFD, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
-        guard fd >= 0 else { throw StoreError.writeFailed }
-        defer {
-            Darwin.close(fd)
-            unlinkat(dirFD, temporaryName, 0)
-        }
-        guard fchmod(fd, 0o600) == 0 else { throw StoreError.writeFailed }
-        try data.withUnsafeBytes { bytes in
-            var offset = 0
-            while offset < bytes.count {
-                let written = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
-                if written < 0, errno == EINTR { continue }
-                guard written > 0 else { throw StoreError.writeFailed }
-                offset += written
-            }
-        }
-        guard fsync(fd) == 0 else { throw StoreError.writeFailed }
-        guard renameat(dirFD, temporaryName, dirFD, Self.fileName) == 0 else { throw StoreError.writeFailed }
     }
 }

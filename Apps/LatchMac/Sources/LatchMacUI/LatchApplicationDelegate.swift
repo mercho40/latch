@@ -10,12 +10,28 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
     /// Built on first use and kept alive: the pane holds the selected agent and the
     /// window's frame, and reopening ⌘, should land where it was left.
     private var settingsWindow: SettingsWindowController?
+    /// The servers remote sessions run on. A smoke run swaps in an in-memory store at launch,
+    /// so it never reads or writes this Mac's real servers.
+    private var servers: any ServerStore = FileServerStore.shared
+    private var agentSettings: AgentSettings = .shared
 
     /// Agent install state and the custom command live here, not in any session.
     @objc func showSettings(_ sender: Any?) {
-        let controller = settingsWindow ?? SettingsWindowController()
+        let controller = settingsWindow ?? SettingsWindowController(settings: agentSettings, servers: servers)
         settingsWindow = controller
         controller.show()
+    }
+
+    /// Settings, open on the Agents pane: where a local agent that can't start is fixed.
+    @objc func showAgentSettings(_ sender: Any?) {
+        showSettings(sender)
+        settingsWindow?.select(pane: "Agents")
+    }
+
+    /// Settings, open on the Servers pane: where a remote session's server is fixed.
+    @objc func showServerSettings(_ sender: Any?) {
+        showSettings(sender)
+        settingsWindow?.select(pane: "Servers")
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -30,10 +46,13 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         // A smoke run gets its own preferences for the same reason it gets its own store:
         // it must assert on Latch's behaviour, not on the agents this Mac's owner happens
         // to have turned off.
+        if smokeTest {
+            agentSettings = AgentSettings(defaults: UserDefaults(suiteName: "LatchSmoke-\(UUID().uuidString)")!)
+            servers = InMemoryServerStore()
+        }
         let controller = SessionWindowController(
             store: smokeTest ? nil : SessionStore(directory: SessionStore.defaultDirectory),
-            attention: attention, menuBar: menuBar,
-            settings: smokeTest ? AgentSettings(defaults: UserDefaults(suiteName: "LatchSmoke-\(UUID().uuidString)")!) : nil
+            attention: attention, menuBar: menuBar, settings: agentSettings, servers: servers
         )
         self.controller = controller
         controller.showWindow(nil)
@@ -198,6 +217,9 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         menu.addItem(viewItem)
         let sessionItem = NSMenuItem()
         let session = NSMenu(title: "Session")
+        session.addItem(withTitle: "New Remote Session…", action: #selector(SessionWindowController.newRemoteSession(_:)), keyEquivalent: "n")
+            .keyEquivalentModifierMask = [.command, .option]
+        session.addItem(.separator())
         session.addItem(withTitle: "Attach Files…", action: #selector(SessionWindowController.attachFiles(_:)), keyEquivalent: "a")
             .keyEquivalentModifierMask = [.command, .shift]
         session.addItem(.separator())

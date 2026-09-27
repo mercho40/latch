@@ -1,27 +1,51 @@
 import AppKit
 import LatchACP
 import LatchAgentCore
+import LatchRemoteProtocol
+import UniformTypeIdentifiers
 
 /// One ACP session: agent selection, settings, transcript, and composer.
 /// The workspace is fixed at creation; the sidebar owns the list of sessions.
 @MainActor
 final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextFieldDelegate {
-    let model = SessionModel()
+    let model: SessionModel
     let id: UUID
-    let workspace: URL
+    /// A folder on this Mac or a path on a server; fixed for the session's life.
+    let location: WorkspaceLocation
+    /// The folder on this Mac, for everything that needs one. Nil for a remote session.
+    var localURL: URL? { location.localURL }
+    /// The folder of a local session. Kept for callers that predate remote sessions; new code
+    /// asks `localURL`, so a remote session cannot be treated as a folder here by accident.
+    @available(*, deprecated, message: "Local sessions only: use localURL or location")
+    var workspace: URL { location.localURL ?? URL(fileURLWithPath: location.path) }
     private var pendingNewContext = false
 
     /// No view loading or process launch is needed to save an unopened sidebar row.
     /// Only the committed command is stored: an uncommitted edit is transient UI state,
     /// because committing one forks a sibling session rather than replacing this context.
     var savedSession: SavedSession {
-        SavedSession(id: id, workspacePath: workspace.path, title: sessionTitle,
+        SavedSession(id: id, workspacePath: location.path, title: sessionTitle,
                      agentID: selectedAgent.rawValue,
                      customCommand: customCommand,
                      draft: prompt.string,
                      messages: pendingNewContext ? [] : model.messages,
                      agentSessionID: pendingNewContext ? nil : model.savedAgentSessionID,
-                     lastActiveAt: model.lastActiveAt)
+                     lastActiveAt: model.lastActiveAt,
+                     serverID: location.serverID)
+    }
+
+    /// The server's name for a remote session, even once the server has left Settings.
+    var serverName: String? {
+        location.serverID.map { servers.server(id: $0)?.name ?? "Removed server" }
+    }
+
+    /// Where the session works, as the window's subtitle says it: a path with `~` for this
+    /// Mac's home, or `server · path`.
+    var locationTitle: String {
+        switch location {
+        case let .local(url): url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        case let .remote(_, path): "\(serverName ?? "") · \(path)"
+        }
     }
 
     /// Asks the window for a sibling session in this workspace on the given harness.
@@ -80,7 +104,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     var attention: AttentionCenter.State {
         let pending = model.permissions.current
         return AttentionCenter.State(
-            workspaceName: workspace.lastPathComponent,
+            workspaceName: serverName.map { "\($0) · \(location.folderName)" } ?? location.folderName,
             permission: pending?.id,
             allowOptionID: pending?.options.first { $0.kind == "allow_once" }?.optionId,
             rejectOptionID: pending?.options.first { $0.kind == "reject_once" }?.optionId,
@@ -142,6 +166,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     private var permissionAlert: (id: UUID, alert: NSAlert, escapeMonitor: Any?)?
     private let settings: AgentSettings
+    /// Names and custom commands of the servers remote sessions run on.
+    private let servers: any ServerStore
+    /// How a remote session reaches its server. Never consulted for a local one.
+    private let remoteConnector: any RemoteSessionConnector
+    /// Something refused on its way into the composer, said once on the banner. The ID keys
+    /// the banner, so a second refusal is shown even after the first was dismissed.
+    private var attachmentNotice: (id: UUID, title: String, message: String)?
     /// One filesystem scan, shared by the picker and the banner. Rescanning replaces it.
     private var catalog: AgentCatalog
     private var launchEnvironment: AgentLaunchEnvironment
@@ -204,21 +235,46 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         self?.renderTranscript()
     }
 
-    init(workspace: URL, launchEnvironment: AgentLaunchEnvironment? = nil, savedSession: SavedSession? = nil,
+    /// A session in a folder on this Mac.
+    convenience init(workspace: URL, launchEnvironment: AgentLaunchEnvironment? = nil, savedSession: SavedSession? = nil,
+                     initialAgent: AgentPreset? = nil, initialCommand: String? = nil,
+                     settings: AgentSettings? = nil) {
+        self.init(location: .local(workspace), launchEnvironment: launchEnvironment, savedSession: savedSession,
+                  initialAgent: initialAgent, initialCommand: initialCommand, settings: settings)
+    }
+
+    init(location: WorkspaceLocation, launchEnvironment: AgentLaunchEnvironment? = nil, savedSession: SavedSession? = nil,
          initialAgent: AgentPreset? = nil, initialCommand: String? = nil,
-         settings: AgentSettings? = nil) {
+         settings: AgentSettings? = nil, servers: (any ServerStore)? = nil,
+         remoteConnector: (any RemoteSessionConnector)? = nil) {
         self.id = savedSession?.id ?? UUID()
-        self.workspace = workspace
+        self.location = location
+        let servers = servers ?? FileServerStore.shared
+        self.servers = servers
+        let remoteConnector = remoteConnector ?? UnconnectedRemoteSessionConnector()
+        self.remoteConnector = remoteConnector
+        if let serverID = location.serverID {
+            model = SessionModel(makeClient: { remoteConnector.makeClient(serverID: serverID) })
+            model.sendsAttachmentsRemotely = true
+        } else {
+            model = SessionModel()
+        }
         self.injectedLaunchEnvironment = launchEnvironment
-        self.launchEnvironment = launchEnvironment ?? AgentLaunchEnvironment()
+        // A remote agent's readiness is the server's business, so a remote session never
+        // scans this Mac for agents: its environment searches nowhere.
+        self.launchEnvironment = launchEnvironment
+            ?? (location.isRemote ? Self.remoteEnvironment : AgentLaunchEnvironment())
         let settings = settings ?? .shared
         self.settings = settings
         // A fresh session starts on the command configured in Settings; a restored or
-        // forked one keeps the command it already connected with.
-        let command = initialCommand ?? savedSession?.customCommand ?? settings.customCommand
-        catalog = AgentCatalog(environment: self.launchEnvironment, customCommand: command)
+        // forked one keeps the command it already connected with. A remote one runs its
+        // server's command.
+        let server = location.serverID.flatMap { servers.server(id: $0) }
+        let command = initialCommand ?? savedSession?.customCommand ?? server?.customCommand ?? settings.customCommand
+        catalog = AgentCatalog(environment: self.launchEnvironment, customCommand: location.isRemote ? "" : command)
         selectedAgent = savedSession.flatMap { AgentPreset(rawValue: $0.agentID) }
-            ?? initialAgent ?? settings.suggested(in: catalog)
+            ?? initialAgent
+            ?? (location.isRemote ? .fx : settings.suggested(in: catalog))
         super.init(nibName: nil, bundle: nil)
         customCommand = command
         if let savedSession {
@@ -240,7 +296,14 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         NotificationCenter.default.addObserver(self, selector: #selector(agentSettingsChanged),
                                                name: AgentSettings.didChangeNotification, object: settings)
+        if location.isRemote {
+            NotificationCenter.default.addObserver(self, selector: #selector(serversChanged),
+                                                   name: .serverStoreDidChange, object: servers)
+        }
     }
+
+    private static let remoteEnvironment = AgentLaunchEnvironment(
+        environment: [:], home: URL(fileURLWithPath: "/var/empty"), includeCommonLocations: false)
 
     required init?(coder: NSCoder) { fatalError("Not used") }
 
@@ -281,6 +344,12 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         ])
         banner.isHidden = true
         bannerRow.isHidden = true
+        // A dismissed refusal is done with; whatever it was covering gets its say again.
+        banner.onDismiss = { [weak self] in
+            guard let self, self.attachmentNotice != nil else { return }
+            self.attachmentNotice = nil
+            self.refresh()
+        }
         root.addArrangedSubview(bannerRow)
 
         conversation.setAccessibilityLabel("Conversation")
@@ -428,7 +497,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             composerContainer.topAnchor.constraint(greaterThanOrEqualTo: bannerRow.bottomAnchor, constant: 12),
         ])
 
-        emptyHeading.stringValue = "What should we build in \(workspace.lastPathComponent)?"
+        emptyHeading.stringValue = "What should we build in \(location.folderName)?"
         emptyHeading.font = .systemFont(ofSize: 26)
         emptyHeading.alignment = .center
         emptyHeading.lineBreakMode = .byTruncatingMiddle
@@ -521,21 +590,30 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// What the window's harness control should show and offer for this session.
     var harnessSelection: HarnessSelection {
         // A session never loses the harness it is running on, even when Settings stops
-        // offering it: the current selection always has to be representable.
-        let presets = AgentPreset.allCases.filter { settings.isEnabled($0) || $0 == selectedAgent }
+        // offering it: the current selection always has to be representable. A server
+        // offers every preset, whatever this Mac's Agents pane has switched off, and Custom
+        // only when it has a command for it.
+        let presets = AgentPreset.allCases.filter { preset in
+            guard preset != selectedAgent else { return true }
+            guard let serverID = location.serverID else { return settings.isEnabled(preset) }
+            if preset == .custom { return !(servers.server(id: serverID)?.customCommand.isEmpty ?? true) }
+            return true
+        }
         let rows = presets.map { preset in
             HarnessSelection.Row(preset: preset, title: preset.title, detail: agentDetail(for: preset),
                                  isCurrent: preset == selectedAgent)
         }
         return HarnessSelection(rows: rows, current: selectedAgent,
-                                problem: catalog.status(for: selectedAgent).readiness.problem,
+                                problem: location.isRemote ? launchProblem : catalog.status(for: selectedAgent).readiness.problem,
                                 isEditable: canEditLaunch && !shuttingDown)
     }
 
     /// Switching harness once a transcript exists opens a sibling session rather than
-    /// replacing this one's context. Say so on the row, before it happens.
+    /// replacing this one's context. Say so on the row, before it happens. A remote agent
+    /// has no readiness here to report: the server says what it lacks when it launches.
     private func agentDetail(for preset: AgentPreset) -> String {
         if holdsConversation, preset != selectedAgent { return "Opens a new session" }
+        if let serverName { return "Runs on \(serverName)" }
         return catalog.status(for: preset).readiness.badge
     }
 
@@ -543,6 +621,14 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// dismissing one keeps it dismissed while nothing has changed, and a different failure
     /// always gets its say.
     private func refreshBanner() {
+        // A refused attachment is said once, and never over a failure, which has its own
+        // remedy to offer.
+        if let notice = attachmentNotice, model.errorMessage == nil, launchProblem == nil, !shuttingDown {
+            banner.update(key: "attachments\u{0}\(notice.id)", title: notice.title, message: notice.message,
+                          severity: .warning, actions: [])
+            bannerRow.isHidden = banner.isHidden
+            return
+        }
         let disconnected = model.phase == .disconnected
         if disconnected, model.archivedWithoutContext, model.errorMessage == nil, !shuttingDown {
             // A saved transcript that cannot be continued is a state, not a failure: no red, no Retry.
@@ -569,17 +655,31 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         banner.update(
             key: "\(model.phase)\u{0}\(selectedAgent.rawValue)\u{0}\(failure.detail)\u{0}\(failure.advice)",
-            title: disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem",
+            title: failureTitle(disconnected: disconnected),
             message: failure.advice,
             detail: failure.detail,
             severity: disconnected ? .error : .warning,
             actions: [
                 SessionBannerView.Action(title: "Retry") { [weak self] in self?.retryConnection() },
-                SessionBannerView.Action(title: "Agent Settings…") {
-                    NSApp.sendAction(#selector(LatchApplicationDelegate.showSettings(_:)), to: nil, from: nil)
-                },
+                location.isRemote
+                    ? SessionBannerView.Action(title: "Server Settings…") {
+                        NSApp.sendAction(#selector(LatchApplicationDelegate.showServerSettings(_:)), to: nil, from: nil)
+                    }
+                    : SessionBannerView.Action(title: "Agent Settings…") {
+                        NSApp.sendAction(#selector(LatchApplicationDelegate.showAgentSettings(_:)), to: nil, from: nil)
+                    },
             ])
         bannerRow.isHidden = banner.isHidden
+    }
+
+    /// Whose failure it is. A remote session names its server: an unreachable server is not
+    /// the agent's fault, and an agent that cannot start there may start fine on this Mac.
+    private func failureTitle(disconnected: Bool) -> String {
+        guard let serverName else {
+            return disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem"
+        }
+        if model.errorIsConnectionFailure { return "Can’t connect to \(serverName)" }
+        return disconnected ? "\(selectedAgent.title) can’t start on \(serverName)" : "\(selectedAgent.title) reported a problem"
     }
 
     /// The banner's title already names the agent, so the service's "Agent reported:" prefix
@@ -740,7 +840,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         refresh()
     }
 
-    func textDidChange(_ notification: Notification) { refresh(); onChange?() }
+    func textDidChange(_ notification: Notification) {
+        attachmentNotice = nil
+        refresh()
+        onChange?()
+    }
 
     // MARK: Slash commands
 
@@ -797,7 +901,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     @objc private func agentSettingsChanged() {
         guard isViewLoaded, !shuttingDown else { return }
         let adopted = settings.customCommand
-        if selectedAgent == .custom, model.phase == .disconnected, adopted != customCommand, !holdsConversation {
+        // A remote session's command is its server's, never the one for this Mac.
+        if !location.isRemote, selectedAgent == .custom, model.phase == .disconnected, adopted != customCommand,
+           !holdsConversation {
             customCommand = adopted
             pendingNewContext = true
         }
@@ -848,6 +954,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// catalog from them. Tests inject a fixed environment, which must not be replaced by a
     /// real scan — but its catalog is still rebuilt, because the custom command can change.
     private func rescanLaunchEnvironment() {
+        guard !location.isRemote else { return }
         if injectedLaunchEnvironment == nil { launchEnvironment = AgentLaunchEnvironment() }
         catalog = AgentCatalog(environment: launchEnvironment, customCommand: customCommand)
     }
@@ -855,6 +962,22 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Re-resolves the selected harness. The command Latch will run and the problem stopping
     /// it are read from the catalog, never from the contents of a control.
     private func updateAgentCommand() {
+        if let serverID = location.serverID {
+            // The server resolves its own agents; all that can be wrong here is a missing
+            // server or a Custom agent the server has no command for.
+            selectedRecipe = nil
+            let server = servers.server(id: serverID)
+            if let server { customCommand = server.customCommand }
+            launchCommand = selectedAgent == .custom ? customCommand : ""
+            launchProblem = if server == nil {
+                "This session’s server is no longer in Settings."
+            } else if selectedAgent == .custom, customCommand.isEmpty {
+                "No custom agent command is set for \(server?.name ?? "this server")."
+            } else {
+                nil
+            }
+            return
+        }
         selectedRecipe = selectedAgent.recipe(in: launchEnvironment)
         let status = catalog.status(for: selectedAgent)
         launchCommand = status.command
@@ -890,6 +1013,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     private func initializeSelection() {
         guard !shuttingDown else { return }
+        if location.isRemote { return initializeRemoteSelection() }
         let drain = drainConnection()
         let token = UUID()
         let input = launchCommand
@@ -903,10 +1027,43 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             }
             await drain.value
             guard !Task.isCancelled, !shuttingDown, operation == token, valid else { return }
-            await model.connect(command: input, workspace: workspace, launchEnvironment: environment, startNewSession: startNewSession)
+            await model.connect(command: input, workspace: localURL, launchEnvironment: environment, startNewSession: startNewSession)
             if operation == token, model.phase == .ready { pendingNewContext = false }
             onChange?()
         }
+        refresh()
+        onChange?()
+    }
+
+    /// The remote counterpart of a launch: the same drain and operation bookkeeping, but the
+    /// model's channel came from the connector, so the launch goes to the server and nothing
+    /// runs on this Mac. A server gone from Settings is a launch problem, so it never gets here.
+    private func initializeRemoteSelection() {
+        guard case let .remote(_, path) = location else { return }
+        let drain = drainConnection()
+        let token = UUID()
+        let agent: LatchRemoteAgent = selectedAgent == .custom ? .custom(customCommand) : .preset(selectedAgent.rawValue)
+        let valid = launchProblem == nil
+        let startNewSession = pendingNewContext
+        operation = token
+        operationTask = Task {
+            defer {
+                if operation == token { operation = nil; operationTask = nil; refresh() }
+            }
+            await drain.value
+            guard !Task.isCancelled, !shuttingDown, operation == token, valid else { return }
+            await model.connect(remote: agent, path: path, startNewSession: startNewSession)
+            if operation == token, model.phase == .ready { pendingNewContext = false }
+            onChange?()
+        }
+        refresh()
+        onChange?()
+    }
+
+    /// A server was renamed, removed, or given another custom command.
+    @objc private func serversChanged() {
+        guard isViewLoaded, !shuttingDown else { return }
+        updateAgentCommand()
         refresh()
         onChange?()
     }
@@ -928,16 +1085,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     var canAttachFiles: Bool { prompt.isEditable && attachments.count < ComposerAttachment.maximumCount }
 
     /// The paperclip and Session ▸ Attach Files…: a panel over the window, starting in the
-    /// workspace, for files and folders alike.
+    /// workspace, for files and folders alike. A remote session can send only images, and
+    /// has no folder on this Mac, so its panel offers images and starts in the home folder.
     @objc func chooseAttachments(_ sender: Any?) {
         guard let window = view.window, canAttachFiles, window.attachedSheet == nil else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
-        panel.directoryURL = workspace
         panel.prompt = "Attach"
-        panel.message = "Choose files or folders to send with your message."
+        if let localURL {
+            panel.canChooseDirectories = true
+            panel.directoryURL = localURL
+            panel.message = "Choose files or folders to send with your message."
+        } else {
+            panel.canChooseDirectories = false
+            panel.allowedContentTypes = [.image]
+            panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            panel.message = "Choose images to send with your message."
+        }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK else { return }
             self.add(panel.urls.map(ComposerAttachment.fromFile))
@@ -946,9 +1111,20 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     /// Up to the limit; anything past it is refused with a beep rather than silently dropped.
+    /// Paste, drop and the panel all arrive here, so this is where a remote session turns
+    /// away what its agent cannot receive. A refused drop is still taken, so a file's path
+    /// is not typed into the draft instead.
     @discardableResult
     private func add(_ added: [ComposerAttachment]) -> Bool {
         guard !added.isEmpty else { return false }
+        var added = added
+        attachmentNotice = nil
+        let refused = added.filter(model.refusesRemotely)
+        if !refused.isEmpty {
+            refuse(refused)
+            added.removeAll(where: model.refusesRemotely)
+            guard !added.isEmpty else { return true }
+        }
         let room = ComposerAttachment.maximumCount - attachments.count
         guard room > 0 else {
             NSSound.beep()
@@ -958,6 +1134,20 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         if added.count > room { NSSound.beep() }
         refresh()
         return true
+    }
+
+    /// Says why a remote agent cannot have these. Files and folders never reach a server; an
+    /// image reaches only an agent that takes images.
+    private func refuse(_ refused: [ComposerAttachment]) {
+        attachmentNotice = if refused.allSatisfy(\.isImage) {
+            (UUID(), "\(selectedAgent.title) on \(serverName ?? "this server") can’t receive images.",
+             "Send your message without the image, or start a session with an agent that accepts images.")
+        } else {
+            (UUID(), ComposerAttachment.remoteRefusal,
+             "Files and folders stay on this Mac. Paste or drop an image to send one.")
+        }
+        NSSound.beep()
+        refresh()
     }
 
     private func removeAttachment(_ id: UUID) {
@@ -979,12 +1169,20 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             }
             guard !Task.isCancelled, !shuttingDown, operation == token,
                   model.phase == .ready else { return }
+            // An image added before the agent said it takes none. Take it out and keep the
+            // draft, so the user can send the rest as it is.
+            let refused = attachments.filter(model.refusesRemotely)
+            guard refused.isEmpty else {
+                attachments.removeAll(where: model.refusesRemotely)
+                return refuse(refused)
+            }
             prompt.string = ""
             // Its recorded edits point into the draft that just left; undoing one against
             // the empty field corrupts the text system.
             composerUndo.removeAllActions()
             let sent = attachments
             attachments = []
+            attachmentNotice = nil
             if sessionTitle == "New Session" {
                 let firstLine = draft.split(whereSeparator: \.isNewline).first.map(String.init) ?? draft
                 let title = firstLine.trimmingCharacters(in: .whitespaces)
@@ -1183,8 +1381,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         launchEnvironment = smokeEnvironment(fixtureHome)
         // Default initialization is injected before loadView; only fixture executables exist here.
         // Inherit this run's settings, never the ones this Mac's owner configured.
-        let initial = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment,
-                                            settings: settings)
+        let initial = SessionViewController(location: location, launchEnvironment: launchEnvironment,
+                                            settings: settings, servers: servers, remoteConnector: remoteConnector)
         _ = initial.view
         try await wait { initial.model.phase == .ready && initial.operation == nil }
         guard initial.selectedAgent == .fx, initial.model.messages.isEmpty else {
@@ -1549,8 +1747,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     private func smokeTestShutdownDraft() async throws {
-        let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment,
-                                            settings: settings)
+        let session = SessionViewController(location: location, launchEnvironment: launchEnvironment,
+                                            settings: settings, servers: servers, remoteConnector: remoteConnector)
         _ = session.view
         session.smokeSelectAgent(.custom)
         session.smokeSetCustomCommand("sh -c " + AgentCommand.quotedArgument(SmokeAgent.script))

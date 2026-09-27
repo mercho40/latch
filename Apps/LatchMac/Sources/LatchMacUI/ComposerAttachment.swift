@@ -45,6 +45,14 @@ struct ComposerAttachment: Identifiable {
         }
     }
 
+    /// A remote agent cannot open a file on this Mac, so a file or folder would go as a link
+    /// to a path the server does not have. Only an image's pixels can reach it.
+    static let remoteRefusal = "Only images can be sent to a remote agent."
+
+    var isImage: Bool {
+        if case .image = content { true } else { false }
+    }
+
     private static func link(to url: URL, name: String) -> ACPPromptBlock {
         .resourceLink(uri: url.absoluteString, name: name,
                       mimeType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType)

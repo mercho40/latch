@@ -3,15 +3,20 @@ import AppKit
 /// Source list of saved and newly opened sessions, grouped by workspace.
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
+    /// One folder on this Mac, or one path on one server.
     final class Workspace {
-        let url: URL
+        let location: WorkspaceLocation
         var sessions: [SessionViewController] = []
-        init(url: URL) { self.url = url }
+        init(location: WorkspaceLocation) { self.location = location }
+
+        /// The folder of a local group.
+        @available(*, deprecated, message: "Local groups only: use location")
+        var url: URL { location.localURL ?? URL(fileURLWithPath: location.path) }
     }
 
     /// Where a session sat, so closing one can be undone back into the same place.
     struct Slot {
-        let workspace: URL
+        let workspace: WorkspaceLocation
         let workspaceIndex: Int
         let sessionIndex: Int
     }
@@ -21,6 +26,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onCloseSession: ((SessionViewController) -> Void)?
     /// A folder dropped on the list opens a session in it.
     var onOpenWorkspace: ((URL) -> Void)?
+    /// A remote group's server name, looked up when the row is drawn so a rename shows.
+    var serverName: ((UUID) -> String?)?
+    /// Copy Path writes here. Tests substitute a private pasteboard for the user's clipboard.
+    var pasteboard = NSPasteboard.general
 
     let outline = NSOutlineView()
     private let scroll = NSScrollView()
@@ -57,6 +66,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.delegate = self
         let menu = NSMenu()
         menu.delegate = self
+        // Reveal and Terminal are shown but disabled for a remote session, so the menu says
+        // they exist and why they do not apply rather than changing shape.
+        menu.autoenablesItems = false
         outline.menu = menu
         outline.registerForDraggedTypes([.fileURL])
         scroll.documentView = outline
@@ -80,10 +92,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// A fork is placed next to the session it came from; anything else goes last.
     func add(_ session: SessionViewController, after sibling: SessionViewController? = nil, selecting: Bool = true) {
         let workspace: Workspace
-        if let existing = workspaces.first(where: { $0.url.standardizedFileURL == session.workspace.standardizedFileURL }) {
+        if let existing = workspaces.first(where: { $0.location.groupKey == session.location.groupKey }) {
             workspace = existing
         } else {
-            workspace = Workspace(url: session.workspace)
+            workspace = Workspace(location: session.location)
             workspaces.append(workspace)
         }
         if let sibling, let index = workspace.sessions.firstIndex(where: { $0 === sibling }) {
@@ -103,7 +115,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
               let sessionIndex = workspaces[workspaceIndex].sessions.firstIndex(where: { $0 === session })
         else { return nil }
         let workspace = workspaces[workspaceIndex]
-        let slot = Slot(workspace: workspace.url, workspaceIndex: workspaceIndex, sessionIndex: sessionIndex)
+        let slot = Slot(workspace: workspace.location, workspaceIndex: workspaceIndex, sessionIndex: sessionIndex)
         let wasSelected = selectedSession === session
         workspace.sessions.remove(at: sessionIndex)
         if workspace.sessions.isEmpty { workspaces.remove(at: workspaceIndex) }
@@ -122,10 +134,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Puts a closed session back where it was, recreating its workspace group if needed.
     func insert(_ session: SessionViewController, at slot: Slot) {
         let workspace: Workspace
-        if let existing = workspaces.first(where: { $0.url.standardizedFileURL == slot.workspace.standardizedFileURL }) {
+        if let existing = workspaces.first(where: { $0.location.groupKey == slot.workspace.groupKey }) {
             workspace = existing
         } else {
-            workspace = Workspace(url: slot.workspace)
+            workspace = Workspace(location: slot.workspace)
             workspaces.insert(workspace, at: min(slot.workspaceIndex, workspaces.count))
         }
         workspace.sessions.insert(session, at: min(slot.sessionIndex, workspace.sessions.count))
@@ -136,7 +148,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// The next session in the same workspace, else the previous one, else anything left.
     private func neighbour(of slot: Slot) -> SessionViewController? {
-        if let workspace = workspaces.first(where: { $0.url.standardizedFileURL == slot.workspace.standardizedFileURL }) {
+        if let workspace = workspaces.first(where: { $0.location.groupKey == slot.workspace.groupKey }) {
             if slot.sessionIndex < workspace.sessions.count { return workspace.sessions[slot.sessionIndex] }
             return workspace.sessions.last
         }
@@ -246,8 +258,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 ])
                 return cell
             }()
-            cell.textField?.stringValue = workspace.url.lastPathComponent
-            cell.toolTip = workspace.url.path
+            let title = groupTitle(workspace.location)
+            cell.textField?.stringValue = title.name
+            cell.toolTip = title.tooltip
             return cell
         }
         guard let session = item as? SessionViewController else { return nil }
@@ -265,6 +278,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                        time: active.map { RelativeTime.since($0, now: now) },
                        spokenTime: active.map { RelativeTime.spoken($0, now: now) })
         return cell
+    }
+
+    /// A local group is its folder's name; a remote one also names its server, so the same
+    /// folder name on two servers, or here and on a server, never reads as one group.
+    func groupTitle(_ location: WorkspaceLocation) -> (name: String, tooltip: String) {
+        guard let serverID = location.serverID else { return (location.folderName, location.path) }
+        let server = serverName?(serverID) ?? "Removed server"
+        return ("\(server) · \(location.folderName)", "\(server) · \(location.path)")
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -305,29 +326,41 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Acts on the right-clicked row, which is not necessarily the selected one.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        if let workspace = outline.item(atRow: outline.clickedRow) as? Workspace {
-            add(to: menu, title: "Reveal in Finder", action: #selector(revealClicked), object: workspace.url)
-            add(to: menu, title: "Open in Terminal", action: #selector(openClickedInTerminal), object: workspace.url)
-            add(to: menu, title: "Copy Path", action: #selector(copyClickedPath), object: workspace.url)
-            return
-        }
-        guard let session = outline.item(atRow: outline.clickedRow) as? SessionViewController else { return }
-        add(to: menu, title: "Rename…", action: #selector(renameClickedSession), object: session)
-        menu.addItem(.separator())
-        add(to: menu, title: "Fork Session", action: #selector(forkClickedSession), object: session)
-        menu.addItem(.separator())
-        add(to: menu, title: "Reveal Workspace in Finder", action: #selector(revealClicked), object: session.workspace)
-        add(to: menu, title: "Open Workspace in Terminal", action: #selector(openClickedInTerminal), object: session.workspace)
-        add(to: menu, title: "Copy Workspace Path", action: #selector(copyClickedPath), object: session.workspace)
-        menu.addItem(.separator())
-        add(to: menu, title: "Close Session", action: #selector(closeClickedSession), object: session)
+        guard outline.clickedRow >= 0, let item = outline.item(atRow: outline.clickedRow) else { return }
+        for entry in contextMenuItems(for: item) { menu.addItem(entry) }
     }
 
-    private func add(to menu: NSMenu, title: String, action: Selector, object: Any) {
+    /// The context menu for a group or a session row. Separate from the menu delegate so a
+    /// test can read it without a real right-click.
+    func contextMenuItems(for item: Any) -> [NSMenuItem] {
+        if let workspace = item as? Workspace {
+            return locationItems(workspace.location, reveal: "Reveal in Finder", terminal: "Open in Terminal",
+                                 copy: "Copy Path")
+        }
+        guard let session = item as? SessionViewController else { return [] }
+        return [entry("Rename…", #selector(renameClickedSession), session), .separator(),
+                entry("Fork Session", #selector(forkClickedSession), session), .separator()]
+            + locationItems(session.location, reveal: "Reveal Workspace in Finder",
+                            terminal: "Open Workspace in Terminal", copy: "Copy Workspace Path")
+            + [.separator(), entry("Close Session", #selector(closeClickedSession), session)]
+    }
+
+    /// The Finder and Terminal open folders on this Mac, so a remote location disables them;
+    /// Copy Path copies the server's path.
+    private func locationItems(_ location: WorkspaceLocation, reveal: String, terminal: String, copy: String) -> [NSMenuItem] {
+        let url = location.localURL
+        let revealItem = entry(reveal, #selector(revealClicked), url)
+        revealItem.isEnabled = url != nil
+        let terminalItem = entry(terminal, #selector(openClickedInTerminal), url)
+        terminalItem.isEnabled = url != nil
+        return [revealItem, terminalItem, entry(copy, #selector(copyClickedPath), location.path)]
+    }
+
+    private func entry(_ title: String, _ action: Selector, _ object: Any?) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.representedObject = object
-        menu.addItem(item)
+        return item
     }
 
     @objc private func closeClickedSession(_ sender: NSMenuItem) {
@@ -367,9 +400,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     @objc private func copyClickedPath(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url.path, forType: .string)
+        guard let path = sender.representedObject as? String else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(path, forType: .string)
     }
 }
 

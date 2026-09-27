@@ -25,6 +25,14 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// Agent preferences every session in this window reads. Tests pass their own so a run
     /// never reads or writes the developer's real settings.
     private let settings: AgentSettings
+    /// Servers remote sessions run on. Tests and smoke runs pass an in-memory store.
+    let servers: any ServerStore
+    /// How remote sessions reach their servers; every remote session in the window shares it.
+    private let remoteConnector: any RemoteSessionConnector
+    /// One handshake, for a new remote session's default folder.
+    private let serverCheck: ServerCheck
+    /// The New Remote Session sheet while it is open.
+    private(set) var remoteSessionSheet: NewRemoteSessionController?
     private(set) var persistenceError: String?
 
     var savedLibrary: SavedSessionLibrary {
@@ -36,11 +44,15 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// They also run without an attention center or menu bar extra, so no test posts a
     /// notification, claims the Dock badge, or adds a status item.
     init(store: SessionStore? = nil, attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil,
-         settings: AgentSettings? = nil) {
+         settings: AgentSettings? = nil, servers: (any ServerStore)? = nil,
+         remoteConnector: (any RemoteSessionConnector)? = nil, serverCheck: ServerCheck? = nil) {
         self.store = store
         self.attention = attention
         self.menuBar = menuBar
         self.settings = settings ?? .shared
+        self.servers = servers ?? FileServerStore.shared
+        self.remoteConnector = remoteConnector ?? UnconnectedRemoteSessionConnector()
+        self.serverCheck = serverCheck ?? ServerCheckText.live
         persistenceReady = store == nil
         restoreFinished = store == nil
         let window = NSWindow(
@@ -81,6 +93,9 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         sidebar.onSelect = { [weak self] session in self?.show(session) }
         sidebar.onCloseSession = { [weak self] session in self?.close(session) }
         sidebar.onOpenWorkspace = { [weak self] url in self?.openWorkspace(url) }
+        sidebar.serverName = { [weak self] id in self?.servers.server(id: id)?.name }
+        NotificationCenter.default.addObserver(self, selector: #selector(serversChanged),
+                                               name: .serverStoreDidChange, object: self.servers)
         detail.onNewSession = { [weak self] in self?.newSession(nil) }
         detail.onOpenWorkspace = { [weak self] url in self?.openWorkspace(url) }
         attention?.isSessionVisible = { [weak self] id in
@@ -139,13 +154,53 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     @discardableResult
     func addSession(workspace: URL, launchEnvironment: AgentLaunchEnvironment? = nil) -> SessionViewController {
-        let session = SessionViewController(workspace: workspace, launchEnvironment: launchEnvironment,
-                                            settings: settings)
+        let session = makeSession(.local(workspace), launchEnvironment: launchEnvironment)
         adopt(session)
         sidebar.add(session)
         NSDocumentController.shared.noteNewRecentDocumentURL(workspace)
         scheduleSave()
         return session
+    }
+
+    /// Session ▸ New Remote Session…: a server, a folder on it, and an agent. There is no
+    /// remote browser, so the folder is typed, starting from the server's home.
+    @objc func newRemoteSession(_ sender: Any?) {
+        guard let window, !shuttingDown, restoreFinished, !servers.servers.isEmpty,
+              window.attachedSheet == nil else { return }
+        window.makeKeyAndOrderFront(nil)
+        let sheet = NewRemoteSessionController(servers: servers.servers, check: serverCheck)
+        sheet.onFinish = { [weak self] choice in
+            guard let self else { return }
+            self.remoteSessionSheet = nil
+            if let choice { self.addRemoteSession(serverID: choice.serverID, path: choice.path, agent: choice.agent) }
+        }
+        remoteSessionSheet = sheet
+        sheet.begin(over: window)
+    }
+
+    /// Adds a session that runs on a server, grouped and selected like a local one.
+    @discardableResult
+    func addRemoteSession(serverID: UUID, path: String, agent: AgentPreset) -> SessionViewController {
+        let session = makeSession(.remote(serverID: serverID, path: path), initialAgent: agent)
+        adopt(session)
+        sidebar.add(session)
+        scheduleSave()
+        return session
+    }
+
+    private func makeSession(_ location: WorkspaceLocation, launchEnvironment: AgentLaunchEnvironment? = nil,
+                             savedSession: SavedSession? = nil, initialAgent: AgentPreset? = nil,
+                             initialCommand: String? = nil) -> SessionViewController {
+        SessionViewController(location: location, launchEnvironment: launchEnvironment, savedSession: savedSession,
+                              initialAgent: initialAgent, initialCommand: initialCommand, settings: settings,
+                              servers: servers, remoteConnector: remoteConnector)
+    }
+
+    /// A renamed or removed server changes group names, the subtitle and the agent menu.
+    @objc private func serversChanged() {
+        sidebar.refreshRows()
+        refreshHarness()
+        updateTitle()
     }
 
     /// Bring a session on screen because something outside the window asked for it.
@@ -169,10 +224,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// history and agent context and no folder has to be chosen again.
     private func forkSession(from session: SessionViewController, agent: AgentPreset, command: String) {
         guard !shuttingDown, restoreFinished else { return }
-        let fork = SessionViewController(workspace: session.workspace,
-                                         launchEnvironment: session.injectedEnvironment,
-                                         initialAgent: agent, initialCommand: command,
-                                         settings: settings)
+        let fork = makeSession(session.location, launchEnvironment: session.injectedEnvironment,
+                               initialAgent: agent, initialCommand: command)
         adopt(fork)
         sidebar.add(fork, after: session)
         scheduleSave()
@@ -207,9 +260,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// saved snapshot exactly as a restore at launch would, and resumes context on select.
     private func reopen(_ snapshot: SavedSession, launchEnvironment: AgentLaunchEnvironment?, at slot: SidebarViewController.Slot) {
         guard !shuttingDown else { return }
-        let session = SessionViewController(workspace: URL(fileURLWithPath: snapshot.workspacePath),
-                                            launchEnvironment: launchEnvironment, savedSession: snapshot,
-                                            settings: settings)
+        let session = makeSession(WorkspaceLocation(snapshot), launchEnvironment: launchEnvironment,
+                                  savedSession: snapshot)
         adopt(session)
         sidebar.insert(session, at: slot)
         sessionUndo.setActionName("Close Session")
@@ -245,15 +297,15 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     @objc func revealWorkspace(_ sender: Any?) {
-        guard let session = sidebar.selectedSession else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([session.workspace])
+        guard let url = sidebar.selectedSession?.localURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     @objc func openWorkspaceInTerminal(_ sender: Any?) {
-        guard let session = sidebar.selectedSession,
+        guard let url = sidebar.selectedSession?.localURL,
               let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
         else { return }
-        NSWorkspace.shared.open([session.workspace], withApplicationAt: terminal,
+        NSWorkspace.shared.open([url], withApplicationAt: terminal,
                                 configuration: NSWorkspace.OpenConfiguration())
     }
 
@@ -282,6 +334,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             return !(session?.model.transcript.isEmpty ?? true)
         case #selector(newSession(_:)):
             return restoreFinished && !shuttingDown
+        case #selector(newRemoteSession(_:)):
+            return restoreFinished && !shuttingDown && !servers.servers.isEmpty && window?.attachedSheet == nil
         case #selector(stopSession(_:)):
             return session?.canStop ?? false
         case #selector(attachFiles(_:)):
@@ -293,9 +347,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         case #selector(nextSession(_:)), #selector(previousSession(_:)):
             return sidebar.allSessions.count > 1
         case #selector(revealWorkspace(_:)):
-            return session != nil
+            return session?.localURL != nil
         case #selector(openWorkspaceInTerminal(_:)):
-            return session != nil && NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") != nil
+            return session?.localURL != nil
+                && NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") != nil
         case #selector(performFindPanelAction(_:)):
             return session != nil
         case #selector(findNextMatch(_:)), #selector(findPreviousMatch(_:)):
@@ -358,9 +413,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             let library = try await store.load()
             guard !shuttingDown else { return }
             for saved in library.sessions {
-                let session = SessionViewController(workspace: URL(fileURLWithPath: saved.workspacePath),
-                                                    launchEnvironment: launchEnvironment, savedSession: saved,
-                                                    settings: settings)
+                let session = makeSession(WorkspaceLocation(saved), launchEnvironment: launchEnvironment,
+                                          savedSession: saved)
                 adopt(session)
                 // Building the sidebar must not start every saved command.
                 sidebar.add(session, selecting: false)
@@ -424,7 +478,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         guard let window else { return }
         if let session = sidebar.selectedSession {
             window.title = session.sessionTitle
-            window.subtitle = session.workspace.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            window.subtitle = session.locationTitle
         } else {
             window.title = "Latch"
             window.subtitle = ""
@@ -527,8 +581,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        // Mirrors the system menus that end in their own settings entry.
-        menu.addItem(withTitle: "Agent Settings…", action: nil, keyEquivalent: "")
+        // Mirrors the system menus that end in their own settings entry. A remote session's
+        // agents are its server's, set up in the Servers pane.
+        menu.addItem(withTitle: session.location.isRemote ? "Server Settings…" : "Agent Settings…",
+                     action: nil, keyEquivalent: "")
         harnessPopUp.menu = menu
         resizeHarnessToTitle()
     }
@@ -553,8 +609,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     @objc private func harnessChanged(_ sender: NSPopUpButton) {
         guard let chosen = sender.selectedItem else { return }
         guard let raw = chosen.representedObject as? String, let preset = AgentPreset(rawValue: raw) else {
+            let remote = sidebar.selectedSession?.location.isRemote == true
             refreshHarness()
-            NSApp.sendAction(#selector(LatchApplicationDelegate.showSettings(_:)), to: nil, from: nil)
+            NSApp.sendAction(remote ? #selector(LatchApplicationDelegate.showServerSettings(_:))
+                                    : #selector(LatchApplicationDelegate.showAgentSettings(_:)), to: nil, from: nil)
             return
         }
         sidebar.selectedSession?.chooseHarness(preset)
@@ -756,7 +814,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
               let parent = sessions.firstIndex(where: { $0 === session }),
               sessions.firstIndex(where: { $0 === fork }) == parent + 1,
               sidebar.workspaces.count == 1,
-              fork.workspace.standardizedFileURL == session.workspace.standardizedFileURL,
+              fork.location.groupKey == session.location.groupKey,
               fork.savedSession.agentID == agent.rawValue, fork.model.messages.isEmpty,
               fork.savedSession.agentSessionID == nil,
               session.view.window == nil, fork.view.window != nil else {

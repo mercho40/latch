@@ -100,7 +100,8 @@ final class QRCodeTests: XCTestCase {
     ]
 
     /// Byte-mode symbols as CoreImage's generator draws them at level M, including version 7,
-    /// the first with version information, filled to capacity.
+    /// the first with version information, and version 8, the first whose Reed–Solomon blocks
+    /// differ in length, so that interleaving is checked where the server runs too.
     func testSymbolsMatchReferenceEncodings() throws {
         let hello = try QRCode("hello, world!")
         XCTAssertEqual([hello.version, hello.mask], [1, 2])
@@ -207,6 +208,60 @@ final class QRCodeTests: XCTestCase {
         #.....#....##..###..#.#..#..#####.####.#.##..
         #######.#...######.#....#..#...#......###..#.
         """)
+
+        let longHost = try QRCode("latch://build-server-with-a-much-longer-name.example-tailnet-name.ts.net:7428?token=\(Self.token)")
+        XCTAssertEqual([longHost.version, longHost.mask], [8, 2])
+        XCTAssertEqual(picture(longHost), """
+        #######....#.#.#.#...#..#.....##...##...#.#######
+        #.....#..####.##.#.#.##..#.#.##......####.#.....#
+        #.###.#.###..#.....##.#####..####......##.#.###.#
+        #.###.#.#.....##.###.##.##...#.#...###.#..#.###.#
+        #.###.#.###.##...#...######.###.#....#....#.###.#
+        #.....#.#...##.###.#..#...##...#..#...#...#.....#
+        #######.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#######
+        ........#.###..####...#...#######..#.............
+        #.#####..#.#..#...##########..##.#.###..#.#####..
+        #.#.#..#..#######..#..####....##...###.#.##..##..
+        .#...####.......###.#...#.#....#.###..#..##.##..#
+        .#.#....#.##..##...#.#...####..##.#.....#...##...
+        #####.##.#....#####...###.##.###...###.##..#..#.#
+        .#.###..##.##########.#..#...###.#.#.#....###.#..
+        ##..###..#..####....###..###.####.#.####....#..##
+        ...#....#.##....##.##.#...##.#...###..#.###.#...#
+        ##..###.#.###...#....#.##...#..##..###.#####.#.#.
+        .#..##...#.##.##.###..#..#.###..#....#....##.#...
+        ..###.#.#..#.##..#.#...#.#..#.##########...##..##
+        ##...#.#.##...#.#..##....####....#.##.#######..##
+        #.#..########.#.#########.#..###.#####..###...#..
+        ####....##.#....#......#.#######...#.#...##...##.
+        ..#############...#########..#.##.##..#######...#
+        #..##...#.#....#..##..#...####..##...##.#...#....
+        ...##.#.##.##.#.##..###.#.#..###....##.##.#.###.#
+        .#.##...##.#.......#..#...#..##.#..###.##...#.##.
+        .#.########.#.#...#.#.#####.#..##############.###
+        ###....##...#.##..###.#.#..##...####.#..#...#..##
+        ...##.####.##.##.#.#.#..###..##....##..#.###..###
+        .##.#....##.#####....###.#...##.#..###.....#.....
+        .###..##.##.#..#.#.#..#..#..#.....##..#...#######
+        ##........##..##..#..###.##...#...#.##..##...#...
+        ###..####..##.#.##..##.###.#.##....##.####..#.###
+        #...##....#.#..##.##.####.....#.#..###.###.#...##
+        .#######.###..##..##.#..##.#.###.#.#.#..#.####.##
+        .##..#.##.....#.###.#.#####.###.#..####.#..##..##
+        #.##..####..#.#.##.####..#.#..##.####..###..###..
+        ...###.#....#.####...#..#.######....##.##..#..##.
+        .#...###..#.##..#.#.#.##........###...##.###.##.#
+        .###.....###.#..#.#.##..######..###.....#.......#
+        ###...##.#.#.###..#.#.#####....#...##..##########
+        ........#.###..#.#.#.##...#..##.....##..#...#....
+        #######..##.###########.#.##...#####..#.#.#.##.##
+        #.....#.#.####.#..#####...####.##.......#...#..#.
+        #.###.#.#...##.#..#..#######.###.##.###.#########
+        #.###.#.##.####..####.#....#.###....##...#..#...#
+        #.###.#.#.#.#.......#..###.##.##...##.#....#.##..
+        #.....#..#.###.##..######..#.#.##.....##..###...#
+        #######.###..##....#...###..#....#####...#...####
+        """)
     }
 
     func testPicksTheSmallestVersionAndRefusesWhatDoesNotFit() throws {
@@ -225,21 +280,33 @@ final class QRCodeTests: XCTestCase {
     func testTerminalText() throws {
         let symbol = try QRCode("hello, world!")
         let extent = symbol.size + 8
-        for invert in [false, true] {
-            let text = symbol.terminalText(invert: invert)
+        for darkModules in [false, true] {
+            let text = symbol.terminalText(darkModules: darkModules)
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false).dropLast()
             XCTAssertEqual(lines.count, (extent + 1) / 2)
             XCTAssertTrue(lines.allSatisfy { $0.count == extent })
             XCTAssertTrue(Set(text).isSubset(of: ["█", "▀", "▄", " ", "\n"]))
             // The quiet zone above is two lines, and below it the last line's lower half is empty.
-            XCTAssertEqual(lines.first, Substring(String(repeating: invert ? "█" : " ", count: extent)))
-            XCTAssertEqual(lines.last, Substring(String(repeating: invert ? "▀" : " ", count: extent)))
-            XCTAssertEqual(try modules(fromTerminalText: text, invert: invert), paddedModules(symbol))
+            XCTAssertEqual(lines.first, Substring(String(repeating: darkModules ? " " : "█", count: extent)))
+            XCTAssertEqual(lines.last, Substring(String(repeating: darkModules ? " " : "▀", count: extent)))
+            XCTAssertEqual(try modules(fromTerminalText: text, darkModules: darkModules), paddedModules(symbol))
+
+            // In colour, each line sets its own and resets it before the newline.
+            let colored = symbol.terminalText(darkModules: darkModules, colors: true)
+            let start = darkModules ? "\u{1B}[38;5;16;48;5;231m" : "\u{1B}[38;5;231;48;5;16m"
+            let coloredLines = colored.split(separator: "\n", omittingEmptySubsequences: false).dropLast()
+            XCTAssertEqual(coloredLines.map { start + $0.dropFirst(start.count).dropLast(4) + "\u{1B}[0m" }, coloredLines.map(String.init))
+            XCTAssertEqual(coloredLines.map { String($0.dropFirst(start.count).dropLast(4)) }, lines.map(String.init))
         }
     }
 
     /// Dark modules read back from `terminalText`, quiet zone included.
-    private func modules(fromTerminalText text: String, invert: Bool) throws -> [[Bool]] {
+    private func modules(fromTerminalText text: String, darkModules: Bool) throws -> [[Bool]] {
+        try drawnCells(fromTerminalText: text).map { row in row.map { $0 == darkModules } }
+    }
+
+    /// The half-character cells `terminalText` draws in the text's colour, quiet zone included.
+    private func drawnCells(fromTerminalText text: String) throws -> [[Bool]] {
         var rows: [[Bool]] = []
         for line in text.split(separator: "\n") {
             var upper: [Bool] = [], lower: [Bool] = []
@@ -252,8 +319,8 @@ final class QRCodeTests: XCTestCase {
                 case " ": halves = (false, false)
                 default: throw HubTestError.unexpected("unexpected character \(character)")
                 }
-                upper.append(halves.0 != invert)
-                lower.append(halves.1 != invert)
+                upper.append(halves.0)
+                lower.append(halves.1)
             }
             rows.append(upper)
             rows.append(lower)
@@ -298,8 +365,9 @@ final class QRCodeTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(sameMask, lengths.count / 2)
     }
 
-    /// CoreImage's detector reads what `pair --qr` prints, both ways round, from a pairing
-    /// string to a symbol at version 10's capacity.
+    /// CoreImage's detector reads what `pair --qr` prints, drawn as a terminal draws it, in a
+    /// light theme and a dark one, so both ways round, from a pairing string to a symbol at
+    /// version 10's capacity. Gaps between lines are not modelled: see `terminalText`.
     func testCoreImageReadsTheTerminalText() throws {
         let messages = [
             "latch://vps.example.ts.net:7428?token=\(Self.token)",
@@ -308,9 +376,12 @@ final class QRCodeTests: XCTestCase {
         ]
         for message in messages {
             let symbol = try QRCode(message)
-            for invert in [false, true] {
-                let modules = try modules(fromTerminalText: symbol.terminalText(invert: invert), invert: invert)
-                XCTAssertEqual(try decode(modules), [message], "version \(symbol.version), invert \(invert)")
+            for darkModules in [false, true] {
+                let drawn = try drawnCells(fromTerminalText: symbol.terminalText(darkModules: darkModules))
+                for darkTheme in [false, true] {
+                    XCTAssertEqual(try decode(drawn, drawnDark: !darkTheme), [message],
+                                   "version \(symbol.version), dark modules \(darkModules), dark theme \(darkTheme)")
+                }
             }
         }
     }
@@ -334,13 +405,15 @@ final class QRCodeTests: XCTestCase {
         return (0..<size).flatMap { y in (0..<size).map { x in dark[(y + margin) * width + x + margin] } }
     }
 
-    /// Draws the modules at eight pixels each, dark on light, and returns what CIDetector reads.
-    private func decode(_ modules: [[Bool]]) throws -> [String] {
+    /// Draws the cells at eight pixels each, black on white or white on black, and returns
+    /// what CIDetector reads.
+    private func decode(_ cells: [[Bool]], drawnDark: Bool) throws -> [String] {
         let scale = 8
-        let extent = modules.count * scale
-        var pixels = [UInt8](repeating: 255, count: extent * extent)
+        let extent = cells.count * scale
+        let (ink, paper): (UInt8, UInt8) = drawnDark ? (0, 255) : (255, 0)
+        var pixels = [UInt8](repeating: paper, count: extent * extent)
         for y in 0..<extent {
-            for x in 0..<extent where modules[y / scale][x / scale] { pixels[y * extent + x] = 0 }
+            for x in 0..<extent where cells[y / scale][x / scale] { pixels[y * extent + x] = ink }
         }
         let provider = try XCTUnwrap(CGDataProvider(data: Data(pixels) as CFData))
         let image = try XCTUnwrap(CGImage(

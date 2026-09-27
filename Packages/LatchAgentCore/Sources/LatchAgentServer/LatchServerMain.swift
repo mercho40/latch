@@ -68,7 +68,9 @@ public enum LatchServerMain {
             print(pairing)
             guard let qr else { return 0 }
             do {
-                print("\n" + (try QRCode(pairing)).terminalText(invert: qr == .lightModulesDrawn), terminator: "")
+                let symbol = try QRCode(pairing)
+                print("\n" + symbol.terminalText(darkModules: qr == .darkModulesDrawn, colors: Self.standardOutputTakesColor),
+                      terminator: "")
                 return 0
             } catch {
                 printError("--qr: the string is too long for a QR code (\(error)); paste it instead")
@@ -216,6 +218,12 @@ public enum LatchServerMain {
 
     static func printError(_ message: String) {
         ServerLog.writeToStandardError("latch-server: \(message)")
+    }
+
+    /// A terminal that has not asked for no colour, as NO_COLOR and TERM=dumb do.
+    private static var standardOutputTakesColor: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return isatty(STDOUT_FILENO) == 1 && environment["NO_COLOR"].map(\.isEmpty) ?? true && environment["TERM"] != "dumb"
     }
 }
 

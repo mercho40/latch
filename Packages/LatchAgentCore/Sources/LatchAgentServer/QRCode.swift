@@ -336,20 +336,29 @@ struct QRCode: Equatable, Sendable {
     // MARK: Terminal
 
     /// The symbol inside a quiet zone of four modules, two rows to a line in half blocks.
-    /// Without `invert` the dark modules are drawn, in the terminal's foreground colour, and
-    /// the light ones left as its background; `invert` draws the light modules instead,
-    /// quiet zone included, for a terminal with light text on a dark background.
-    func terminalText(invert: Bool = false) -> String {
+    /// The light modules are drawn, quiet zone included, and the dark ones left as the
+    /// background, as qrencode draws for a dark theme; `darkModules` draws the dark ones
+    /// instead. With `colors` each line sets its own, white on black or black on white, so the
+    /// code is the same in every theme.
+    ///
+    /// A terminal that draws the blocks from its font, rather than filling their cells, can
+    /// leave a gap between lines in the background's colour. Across light modules on black, as
+    /// by default, Apple's detectors still read the code; across dark modules on white they
+    /// often do not.
+    func terminalText(darkModules: Bool = false, colors: Bool = false) -> String {
         let quiet = 4
         let extent = size + 2 * quiet
         func drawn(_ x: Int, _ y: Int) -> Bool {
             guard y < extent else { return false }
             let (column, row) = (x - quiet, y - quiet)
             let dark = (0..<size).contains(column) && (0..<size).contains(row) && self[column, row]
-            return dark != invert
+            return dark == darkModules
         }
+        // Colours 16 and 231 of the 256, which themes leave alone, unlike the first 16.
+        let (start, end) = colors ? ("\u{1B}[38;5;\(darkModules ? 16 : 231);48;5;\(darkModules ? 231 : 16)m", "\u{1B}[0m") : ("", "")
         var text = ""
         for y in stride(from: 0, to: extent, by: 2) {
+            text += start
             for x in 0..<extent {
                 switch (drawn(x, y), drawn(x, y + 1)) {
                 case (true, true): text += "█"
@@ -358,7 +367,7 @@ struct QRCode: Equatable, Sendable {
                 case (false, false): text += " "
                 }
             }
-            text += "\n"
+            text += end + "\n"
         }
         return text
     }

@@ -22,13 +22,13 @@ public struct ConfigOptions: Equatable, Sendable {
     }
 }
 
-/// How `pair --qr` draws the code: which modules take the terminal's foreground colour.
+/// How `pair --qr` draws the code: which modules the half blocks draw.
 public enum PairQRCode: Equatable, Sendable {
-    /// Dark on a light background, and light on a dark one, which Apple's detector reads too.
-    case darkModulesDrawn
-    /// `--invert`: the light modules and the quiet zone, for scanners that need dark on light
-    /// from a terminal with a dark background.
+    /// The light modules and the quiet zone, in white on black on a terminal.
     case lightModulesDrawn
+    /// `--invert`: the dark modules, in black on white on a terminal, for a terminal or
+    /// scanner that reads that better.
+    case darkModulesDrawn
 }
 
 public struct ServeOptions: Equatable, Sendable {
@@ -75,7 +75,7 @@ public enum ServerCommandLine {
       --allow-root                  run as root
       --qr                          with pair, also print the string as a QR code for the
                                     iPhone's camera; it holds the token, so keep it private
-      --invert                      with --qr, draw the light modules instead of the dark
+      --invert                      with --qr, draw the dark modules instead of the light
 
     SIGHUP re-reads the token file at once; a rotated token closes connections that used the old one.
     """
@@ -195,7 +195,7 @@ public enum ServerCommandLine {
         case "pair":
             guard let host else { throw ServerCommandLineError("pair needs --host, the name or address clients reach this server at") }
             guard qr || !invert else { throw ServerCommandLineError("--invert needs --qr") }
-            let style: PairQRCode? = qr ? (invert ? .lightModulesDrawn : .darkModulesDrawn) : nil
+            let style: PairQRCode? = qr ? (invert ? .darkModulesDrawn : .lightModulesDrawn) : nil
             return .pair(serve.config, host: host, port: port ?? LatchRemoteProtocol.defaultPort, qr: style)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")

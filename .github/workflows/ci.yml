@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v5
       # The wire types stay buildable for an iOS client; the agent runtime is gated to macOS and Linux.
       - run: >-
-          swift build --package-path Packages/LatchServiceProtocol --target LatchServiceProtocol
+          swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteProtocol
           --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
 
   linux:

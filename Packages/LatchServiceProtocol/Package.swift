@@ -10,6 +10,7 @@ let package = Package(
     ],
     products: [
         .library(name: "LatchServiceProtocol", targets: ["LatchServiceProtocol"]),
+        .library(name: "LatchRemoteProtocol", targets: ["LatchRemoteProtocol"]),
     ],
     dependencies: [
         .package(path: "../LatchACP"),
@@ -22,6 +23,14 @@ let package = Package(
         .testTarget(
             name: "LatchServiceProtocolTests",
             dependencies: ["LatchServiceProtocol", "LatchACP"]
+        ),
+        .target(
+            name: "LatchRemoteProtocol",
+            dependencies: ["LatchServiceProtocol", "LatchACP"]
+        ),
+        .testTarget(
+            name: "LatchRemoteProtocolTests",
+            dependencies: ["LatchRemoteProtocol", "LatchServiceProtocol", "LatchACP"]
         ),
     ]
 )

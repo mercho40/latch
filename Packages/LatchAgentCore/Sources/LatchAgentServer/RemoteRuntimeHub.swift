@@ -20,6 +20,10 @@ public struct RemoteRuntimeHubConfiguration: Sendable {
     /// of reach, and forgot it, would otherwise leave it running for good.
     public var detachedPermissionTimeout: Duration = .seconds(7 * 24 * 60 * 60)
     public var reaperInterval: Duration = .seconds(60)
+    /// How long after a load's reply the hub waits for the rest of the history the load
+    /// replayed, when nothing it has received shows that all of it is in. What the hub itself
+    /// publishes for the runtime meanwhile waits too, so that it follows the history.
+    public var replayDrainTimeout: Duration = .seconds(1)
     /// Exited runtimes whose record stays attachable, and whose IDs cannot be reused.
     public var retainedExitedRuntimes = 8
     public var retainedTurns = 64
@@ -359,7 +363,10 @@ public actor RemoteRuntimeHub {
     /// later is ignored. After a crash the registry has usually closed the requests already,
     /// so they may precede `turnEnded`; only `exited` being last is guaranteed.
     private func finish(_ id: AgentRuntimeID, exit: LatchRemoteExit, keepJournal: Bool, retain: Bool = true) {
-        guard var state = runtimes[id], state.lifecycle != .exited else { return }
+        guard runtimes[id]?.lifecycle != .exited else { return }
+        // What waited for history that will not come now goes first.
+        endReplayDrain(id)
+        guard var state = runtimes[id] else { return }
         let before = journal.lastSequence(of: id)
         if let turnID = state.activeTurnID {
             let error = LatchRemoteError.runtimeExited
@@ -459,7 +466,12 @@ public actor RemoteRuntimeHub {
                     // The client that loaded it already has the history the load replayed; it
                     // is journaled marked as replay, for viewers that do not.
                     runtimes[id]!.loadedThrough = response.localSequence
-                    publishHeldUpdates(id, after: response.localSequence)
+                    let complete = publishHeldUpdates(id, after: response.localSequence)
+                    if let loadedThrough = response.localSequence, !complete {
+                        beginReplayDrain(id, loadedThrough: loadedThrough, token: token)
+                    } else {
+                        finishReplayTitle(id)
+                    }
                 default:
                     break
                 }
@@ -591,16 +603,18 @@ public actor RemoteRuntimeHub {
             runtimes[id]!.remember(notification)
             if case .binding(.load, _, _) = runtimes[id]!.binding {
                 // Most likely history the load is replaying; `bindingResult` decides.
-                runtimes[id]!.hold(notification, as: Self.encodedReplay(of: notification), budget: configuration.runtimeJournalBudget)
+                let encoded = Self.encodedReplay(of: notification)
+                runtimes[id]!.hold(notification, as: encoded, fitsAFrame: fitsAFrame(encoded),
+                                   budget: configuration.runtimeJournalBudget)
                 return
             }
+            let sequence = notification.localSequence
+            let loadedThrough = runtimes[id]!.loadedThrough
+            let isHistory = sequence.flatMap { sequence in loadedThrough.map { sequence <= $0 } } ?? false
             // History that reached the hub after the load's reply did.
-            if let loadedThrough = runtimes[id]!.loadedThrough, let sequence = notification.localSequence,
-               sequence <= loadedThrough {
-                publishReplayed(Self.encodedReplay(of: notification), for: id)
-                return
-            }
-            publish(.sessionUpdate(notification: notification), for: id)
+            if isHistory { publishReplayed(notification, for: id) }
+            if let sequence, runtimes[id]!.replayDrain?.isComplete(through: sequence) == true { endReplayDrain(id) }
+            if !isHistory { publish(.sessionUpdate(notification: notification), for: id) }
 
         case let .standardError(id, data):
             standardError?(id, data)
@@ -629,32 +643,101 @@ public actor RemoteRuntimeHub {
 
     /// Publishes the updates held while a load ran, those up to `loadedThrough` marked as
     /// replay, or all of them unmarked when the load failed or its reply had no sequence.
-    private func publishHeldUpdates(_ id: AgentRuntimeID, after loadedThrough: UInt64?) {
-        guard let held = runtimes[id]?.heldUpdates, !held.isEmpty else { return }
+    /// Returns whether they show that all of the load's history is in.
+    @discardableResult
+    private func publishHeldUpdates(_ id: AgentRuntimeID, after loadedThrough: UInt64?) -> Bool {
+        guard let held = runtimes[id]?.heldUpdates, !held.isEmpty else { return false }
         runtimes[id]!.heldUpdates = HeldUpdates()
+        var complete = false
         for update in held.updates {
-            if let loadedThrough, let sequence = update.notification.localSequence, sequence <= loadedThrough {
-                publishReplayed(update.encodedReplay, for: id)
-            } else {
-                publish(.sessionUpdate(notification: update.notification), for: id)
+            let isHistory = update.localSequence.flatMap { sequence in loadedThrough.map { sequence <= $0 } } ?? false
+            if let loadedThrough, let sequence = update.localSequence {
+                complete = complete || ReplayDrain.isComplete(through: sequence, loadedThrough: loadedThrough)
+            }
+            switch (update.notification, isHistory) {
+            case let (notification?, true):
+                publishReplayed(notification, encoded: update.encodedReplay, for: id)
+            case let (notification?, false):
+                publish(.sessionUpdate(notification: notification), for: id)
+            case (nil, true):
+                // Too large for a frame, and history: left out, as `publishReplayed` would.
+                break
+            case (nil, false):
+                publish(.omitted(originalKind: "sessionUpdate", byteCount: update.byteCount), for: id)
             }
         }
+        return complete
     }
 
     /// Journals history a load replayed. One update too large for a frame is left out rather
     /// than journaled as `omitted`, which would tell the client that loaded it, and has it,
     /// that output was lost.
-    private func publishReplayed(_ encoded: Data, for id: AgentRuntimeID) {
-        guard !encoded.isEmpty, encoded.count <= configuration.maxEncodedEventBytes else { return }
+    private func publishReplayed(_ notification: ACPSessionNotification, encoded: Data? = nil, for id: AgentRuntimeID) {
+        collectReplayTitle(id, from: notification)
+        let encoded = encoded ?? Self.encodedReplay(of: notification)
+        guard fitsAFrame(encoded) else { return }
         journal.append(encoded, to: id)
+    }
+
+    private func fitsAFrame(_ encoded: Data) -> Bool {
+        !encoded.isEmpty && encoded.count <= configuration.maxEncodedEventBytes
     }
 
     private static func encodedReplay(of notification: ACPSessionNotification) -> Data {
         (try? LatchRemoteCoding.encodeEvent(.sessionUpdate(notification: notification, replay: true))) ?? Data()
     }
 
-    /// Encodes once; every frame that carries the event splices these bytes.
+    /// Holds back what the hub publishes for the runtime until the rest of the history the
+    /// load replayed is in: that history reaches the hub through several streams, and the
+    /// reply through none, so a prompt or set-* command handled now could otherwise be
+    /// journaled before or among it. Ended by an update from the frame before the reply or
+    /// later, by the runtime finishing, or by the timeout.
+    private func beginReplayDrain(_ id: AgentRuntimeID, loadedThrough: UInt64, token: UInt64) {
+        runtimes[id]!.replayDrain = ReplayDrain(loadedThrough: loadedThrough, token: token)
+        let timeout = configuration.replayDrainTimeout
+        Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            await self?.endReplayDrain(id, token: token)
+        }
+    }
+
+    /// Publishes what waited for the load's history, and takes the title that history gives.
+    /// With a `token`, only the drain that load began.
+    private func endReplayDrain(_ id: AgentRuntimeID, token: UInt64? = nil) {
+        guard let drain = runtimes[id]?.replayDrain, token.map({ $0 == drain.token }) ?? true else { return }
+        runtimes[id]!.replayDrain = nil
+        finishReplayTitle(id)
+        for event in drain.deferred { publish(event, for: id) }
+    }
+
+    /// The first user message of the history a load replayed names the runtime, as the
+    /// prompt of its first turn would have, for devices that did not load it.
+    private func collectReplayTitle(_ id: AgentRuntimeID, from notification: ACPSessionNotification) {
+        guard var prompt = runtimes[id]?.replayedPrompt else { return }
+        if case let .messageChunk(chunk) = notification.event, chunk.role == .user {
+            // Enough for a first line; a pasted file need not be kept whole.
+            guard prompt.utf8.count < 4096 else { return }
+            prompt += chunk.text ?? ""
+            runtimes[id]!.replayedPrompt = prompt
+        } else if Self.title(of: prompt) != nil {
+            finishReplayTitle(id)
+        }
+    }
+
+    private func finishReplayTitle(_ id: AgentRuntimeID) {
+        guard let prompt = runtimes[id]?.replayedPrompt, let title = Self.title(of: prompt) else { return }
+        runtimes[id]!.replayedPrompt = nil
+        // Earlier in the conversation than any turn since the load.
+        runtimes[id]!.title = title
+    }
+
+    /// Encodes once; every frame that carries the event splices these bytes. While a load's
+    /// history is still on its way, the event waits for it.
     private func publish(_ event: LatchRemoteEvent, for id: AgentRuntimeID) {
+        if runtimes[id]?.replayDrain != nil {
+            runtimes[id]!.replayDrain!.deferred.append(event)
+            return
+        }
         var encoded = (try? LatchRemoteCoding.encodeEvent(event)) ?? Data()
         if encoded.isEmpty || encoded.count > configuration.maxEncodedEventBytes {
             // A request left out could never be answered: it goes as its summary instead.
@@ -842,6 +925,10 @@ private struct RuntimeState {
     /// Session updates that arrived while a load ran, unpublished until its reply says which
     /// were replayed history.
     var heldUpdates = HeldUpdates()
+    /// From a load's reply until the history it replayed is all journaled.
+    var replayDrain: ReplayDrain?
+    /// The first user message of a load's history so far; nil once it has named the runtime.
+    var replayedPrompt: String? = ""
     /// The latest notification of each kind in `stateKinds`.
     var sessionState: [String: ACPSessionNotification] = [:]
     var configurationSets: [LatchRemoteConfigurationRoute: LatchRemoteConfigurationSet] = [:]
@@ -885,8 +972,8 @@ private struct RuntimeState {
     /// `encodedReplay` is how the update is journaled if it turns out to be history, as nearly
     /// all of it is. Held to the journal's budget for one runtime, beyond which the journal
     /// would evict the oldest anyway.
-    mutating func hold(_ notification: ACPSessionNotification, as encodedReplay: Data, budget: Int) {
-        heldUpdates.append(HeldUpdate(notification: notification, encodedReplay: encodedReplay), budget: budget)
+    mutating func hold(_ notification: ACPSessionNotification, as encodedReplay: Data, fitsAFrame: Bool, budget: Int) {
+        heldUpdates.append(HeldUpdate(notification, encodedReplay: encodedReplay, fitsAFrame: fitsAFrame), budget: budget)
     }
 
     mutating func endTurn(_ turnID: UUID, stopReason: String?, error: LatchRemoteError?) {
@@ -897,8 +984,41 @@ private struct RuntimeState {
 }
 
 private struct HeldUpdate {
-    let notification: ACPSessionNotification
+    let localSequence: UInt64?
+    /// Nil for one too large for a frame, which is never journaled whole: as history it is
+    /// left out, and otherwise it goes as `omitted`. Only its size is kept, and it costs
+    /// nothing against the budget, so it cannot push out the history held before it.
+    let notification: ACPSessionNotification?
     let encodedReplay: Data
+    /// Of the encoding, whether or not it is kept.
+    let byteCount: Int
+
+    init(_ notification: ACPSessionNotification, encodedReplay: Data, fitsAFrame: Bool) {
+        localSequence = notification.localSequence
+        self.notification = fitsAFrame ? notification : nil
+        self.encodedReplay = fitsAFrame ? encodedReplay : Data()
+        byteCount = encodedReplay.count
+    }
+}
+
+/// See `RemoteRuntimeHub.beginReplayDrain`.
+private struct ReplayDrain {
+    let loadedThrough: UInt64
+    /// The binding's, so a timeout ends only the drain its load began.
+    let token: UInt64
+    /// Published once the drain ends, in order.
+    var deferred: [LatchRemoteEvent] = []
+
+    func isComplete(through sequence: UInt64) -> Bool {
+        Self.isComplete(through: sequence, loadedThrough: loadedThrough)
+    }
+
+    /// An agent replays a session's history and then replies, so the frame just before the
+    /// reply is the last of the history, and every stream keeps the order: once the hub has
+    /// an update from that frame or later, nothing the load replayed is still on its way.
+    static func isComplete(through sequence: UInt64, loadedThrough: UInt64) -> Bool {
+        sequence >= loadedThrough || loadedThrough - sequence == 1
+    }
 }
 
 /// Updates held while a load runs, the oldest dropped past a byte budget.

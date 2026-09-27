@@ -9,7 +9,9 @@ import XCTest
 
 /// A capable ACP agent in `sh`. Every `case` matches one JSON key, never two: Latch's encoder
 /// orders keys differently in every process. A load replays a question, two chunks of answer
-/// and a tool call around them. The prompt text picks the turn's behavior, and
+/// and a tool call around them; the session ID picks a load with no history (`empty`), with a
+/// chunk of 4000 characters before the last (`huge`), or one that sends all of its history a
+/// second before it replies (`slow`). The prompt text picks the turn's behavior, and
 /// `sessions.log` and `prompts.log` in the workspace count what actually reached the agent. It
 /// sets its own PATH so tests can launch it with a minimal environment.
 enum MockAgent {
@@ -34,10 +36,16 @@ enum MockAgent {
         *\"method\":\"session*/load\"*)
           echo load >> sessions.log
           session=saved-1
-          update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"}}'
-          chunk "history one"
-          update '{"sessionUpdate":"tool_call","toolCallId":"call-h","title":"Read notes","status":"completed"}'
-          chunk "history two"
+          case "$line" in
+            *empty*) ;;
+            *)
+              update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"}}'
+              chunk "history one"
+              update '{"sessionUpdate":"tool_call","toolCallId":"call-h","title":"Read notes","status":"completed"}'
+              case "$line" in *huge*) chunk "$(printf '%04000d' 0)" ;; esac
+              chunk "history two" ;;
+          esac
+          case "$line" in *slow*) sleep 1 ;; esac
           reply "$id" '{"modes":{"currentModeId":"code","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]}}' ;;
         *\"method\":\"session*/set_config_option\"*)
           reply "$id" '{"configOptions":[{"id":"effort","name":"Effort","type":"select","currentValue":"high","options":[{"value":"low","name":"Low"},{"value":"high","name":"High"}]}]}' ;;

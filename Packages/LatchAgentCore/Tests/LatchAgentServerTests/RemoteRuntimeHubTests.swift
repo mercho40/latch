@@ -274,8 +274,8 @@ final class RemoteRuntimeHubTests: XCTestCase {
             try await bed.expect(.loadSession(runtimeID: id, sessionID: "other"), fails: .sessionAlreadyBound)
             try await bed.expect(.newSession(runtimeID: id), fails: .sessionAlreadyBound)
 
-            // A device that takes the runtime up from the start gets the whole conversation.
-            try await Task.sleep(for: .milliseconds(300))
+            // A device that takes the runtime up from the start gets the whole conversation, in
+            // order, however soon after the reply the next prompt comes.
             let turnID = UUID()
             try await bed.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("go on")]))
             let viewer = bed.viewer()
@@ -732,6 +732,46 @@ final class RemoteRuntimeHubTests: XCTestCase {
             XCTAssertEqual(frames.prefix(4).chunkTexts, ["history one", "history two"])
             if case .turnStarted = frames[4].event {} else { XCTFail("Expected the turn after the history: \(frames)") }
             XCTAssertFalse(frames.dropFirst(4).contains(where: \.isReplay))
+            // The first message of the history names the runtime, not the prompt after it.
+            let summary = try await bed.summary(id)
+            XCTAssertEqual(summary.title, "earlier question")
+        }
+    }
+
+    /// With no history to wait for, the hub cannot know there is none: what it publishes waits
+    /// until the agent's next update, or the timeout, and never goes missing.
+    func testWhatALoadWithNoHistoryHoldsBackIsPublishedInOrder() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.replayDrainTimeout = .milliseconds(200)
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("no-history")
+            try await bed.launch(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-empty"))
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("go on")]))
+            var frames = try await viewer.pull(until: "the turn") { $0.turnEnded != nil && $0.chunkTexts.count == 3 }
+            if case .turnStarted = frames.first?.event {} else { XCTFail("Expected the turn first: \(frames)") }
+            XCTAssertEqual(frames.chunkTexts, ["one", "two", "three"])
+            XCTAssertFalse(frames.contains(where: \.isReplay))
+            try await bed.ok(.setModel(runtimeID: id, modelID: "model-b"))
+            frames = try await viewer.pull(until: "the model set") { $0.count == 6 }
+            XCTAssertEqual(frames.last?.event.kind, "configurationSet")
+            XCTAssertEqual(frames.map(\.sequence), Array(1...6))
+            let summary = try await bed.summary(id)
+            XCTAssertEqual(summary.title, "go on")
+        }
+
+        // And past the timeout, with nothing after the load at all.
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("idle")
+            try await bed.launch(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-empty"))
+            try await bed.ok(.setModel(runtimeID: id, modelID: "model-b"))
+            let frames = try await viewer.pull(until: "the model set") { !$0.isEmpty }
+            XCTAssertEqual(frames.map(\.event.kind), ["configurationSet"])
         }
     }
 
@@ -741,7 +781,8 @@ final class RemoteRuntimeHubTests: XCTestCase {
         try await withTestbed(configuration: configuration) { bed in
             let id = AgentRuntimeID("long-history")
             try await bed.launch(id)
-            try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-1"))
+            // All of the history is held before the reply comes, and all published with it.
+            try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-slow"))
             let viewer = bed.viewer()
             try await viewer.attach(id)
             let frames = try viewer.pull()
@@ -751,6 +792,27 @@ final class RemoteRuntimeHubTests: XCTestCase {
             XCTAssertTrue(frames.allSatisfy(\.isReplay))
             XCTAssertEqual(frames.last?.chunkText, "history two")
             XCTAssertEqual(frames.first?.sequence, 1)
+        }
+    }
+
+    /// An update too large for a frame is never journaled as history, so it must not push the
+    /// rest of the held history out of the budget either.
+    func testHistoryTooLargeForAFrameCostsTheHeldHistoryNothing() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.maxEncodedEventBytes = 2048
+        configuration.runtimeJournalBudget = 4096
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("huge-history")
+            try await bed.launch(id)
+            try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-slow-huge"))
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            let frames = try viewer.pull()
+            XCTAssertEqual(frames.map(\.updateSummary), [
+                "user_message_chunk: earlier question", "agent_message_chunk: history one", "tool_call",
+                "agent_message_chunk: history two",
+            ])
+            XCTAssertTrue(frames.allSatisfy(\.isReplay))
         }
     }
 

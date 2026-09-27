@@ -2,11 +2,11 @@ import Foundation
 
 /// Small argv parser, not a shell: quotes and backslash escaping only. No expansion,
 /// pipelines, redirection, or command substitution. Executable lookup is separate.
-struct AgentCommand {
-    let executable: String
-    let arguments: [String]
+public struct AgentCommand: Sendable {
+    public let executable: String
+    public let arguments: [String]
 
-    init(_ input: String) throws {
+    public init(_ input: String) throws {
         var words: [String] = []
         var word = ""
         var quote: Character?
@@ -43,15 +43,15 @@ struct AgentCommand {
         self.arguments = Array(words.dropFirst())
     }
 
-    static func quotedArgument(_ argument: String) -> String {
+    public static func quotedArgument(_ argument: String) -> String {
         "\"" + argument.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 }
 
-enum CommandError: LocalizedError {
+public enum CommandError: LocalizedError, Sendable {
     case unfinishedQuote, executableRequired, relativeExecutableNotAllowed, executableNotFound, workspaceRequired
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .unfinishedQuote: "Finish the quoted argument or trailing backslash."
         case .executableRequired: "Enter an executable name or path."

@@ -1,18 +1,18 @@
 import Foundation
 
-struct ResolvedAgentCommand {
-    let executable: String
-    let arguments: [String]
-    let environment: [String: String]
+public struct ResolvedAgentCommand: Sendable {
+    public let executable: String
+    public let arguments: [String]
+    public let environment: [String: String]
 }
 
 /// Filesystem-only discovery. Never consults the working directory or a shell.
-struct AgentLaunchEnvironment {
+public struct AgentLaunchEnvironment: Sendable {
     let environment: [String: String]
     let searchDirectories: [String]
     private let home: URL
 
-    init(
+    public init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         includeCommonLocations: Bool = true
@@ -33,7 +33,7 @@ struct AgentLaunchEnvironment {
             for path in [".local/bin", ".fx/bin", ".opencode/bin", ".bun/bin", ".npm-global/bin", ".volta/bin"] {
                 append(home.appendingPathComponent(path).path)
             }
-            for path in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+            for path in Self.systemDirectories {
                 append(path)
             }
 
@@ -65,7 +65,7 @@ struct AgentLaunchEnvironment {
         self.environment = childEnvironment
     }
 
-    func executable(named name: String) -> String? {
+    public func executable(named name: String) -> String? {
         guard !name.isEmpty, !name.contains("\0") else { return nil }
         let candidates: [String]
         if name.hasPrefix("/") {
@@ -80,12 +80,22 @@ struct AgentLaunchEnvironment {
         return candidates.first(where: Self.isExecutableFile)
     }
 
-    func resolve(_ command: AgentCommand) throws -> ResolvedAgentCommand {
+    public func resolve(_ command: AgentCommand) throws -> ResolvedAgentCommand {
         guard let executable = executable(named: command.executable) else {
             throw CommandError.executableNotFound
         }
         return ResolvedAgentCommand(executable: executable, arguments: command.arguments, environment: environment)
     }
+
+    #if os(Linux)
+    // Homebrew ahead of the system directories, as on macOS; snaps after them.
+    private static let systemDirectories = [
+        "/home/linuxbrew/.linuxbrew/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        "/snap/bin",
+    ]
+    #else
+    private static let systemDirectories = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    #endif
 
     private static func isExecutableFile(_ path: String) -> Bool {
         let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().path

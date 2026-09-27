@@ -1,10 +1,10 @@
 import Foundation
 
 /// Launch recipes only: provider authentication and policy remain owned by each agent.
-enum AgentPreset: String, CaseIterable {
+public enum AgentPreset: String, CaseIterable, Sendable {
     case fx, codex, claudeCode, openCode, custom
 
-    var title: String {
+    public var title: String {
         switch self {
         case .fx: "fx"
         case .codex: "Codex"
@@ -15,7 +15,7 @@ enum AgentPreset: String, CaseIterable {
     }
 
     /// Suggestion is filesystem-only; the session controller connects the selected harness.
-    static func suggested(in environment: AgentLaunchEnvironment) -> AgentPreset {
+    public static func suggested(in environment: AgentLaunchEnvironment) -> AgentPreset {
         let installed: [(AgentPreset, String)] = [
             (.fx, "fx"), (.codex, "codex-acp"), (.claudeCode, "claude-agent-acp"),
             (.openCode, "opencode"), (.codex, "codex"), (.claudeCode, "claude"),
@@ -23,7 +23,7 @@ enum AgentPreset: String, CaseIterable {
         return installed.first { environment.executable(named: $0.1) != nil }?.0 ?? .fx
     }
 
-    func recipe(in environment: AgentLaunchEnvironment) -> AgentLaunchRecipe? {
+    public func recipe(in environment: AgentLaunchEnvironment) -> AgentLaunchRecipe? {
         switch self {
         case .fx:
             AgentLaunchRecipe(command: "fx acp", setup: "Install fx and sign in with fx login.", signIn: "Sign in with fx login.")
@@ -51,15 +51,15 @@ enum AgentPreset: String, CaseIterable {
     }
 }
 
-struct AgentLaunchRecipe {
-    let command: String
+public struct AgentLaunchRecipe: Sendable {
+    public let command: String
     /// Everything needed from nothing: shown when the agent cannot start.
-    let setup: String
+    public let setup: String
     /// What remains once it can: shown beside an agent that is already installed.
-    let signIn: String
-    var requiresNode = false
+    public let signIn: String
+    public private(set) var requiresNode = false
 
-    func problem(in environment: AgentLaunchEnvironment) -> String? {
+    public func problem(in environment: AgentLaunchEnvironment) -> String? {
         if requiresNode, environment.executable(named: "node") == nil || environment.executable(named: "npx") == nil {
             return "Install Node.js 22+ with npm, then try again."
         }

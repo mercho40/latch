@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import LatchMacUI
+@testable import LatchAgentCore
 
 final class AgentLaunchEnvironmentTests: XCTestCase {
     private var home: URL!
@@ -71,6 +71,19 @@ final class AgentLaunchEnvironmentTests: XCTestCase {
             XCTAssertNil(launch.executable(named: "agent"))
             XCTAssertNil(launch.executable(named: "Package.swift"))
         }
+    }
+
+    func testCommonSystemLocationsMatchThePlatform() {
+        let launch = AgentLaunchEnvironment(environment: [:], home: home)
+        #if os(Linux)
+        let expected = [
+            "/home/linuxbrew/.linuxbrew/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+            "/snap/bin",
+        ]
+        #else
+        let expected = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        #endif
+        XCTAssertEqual(launch.searchDirectories.filter { !$0.hasPrefix(home.path + "/") }, expected)
     }
 
     func testFinderFallbacksAndFnmDefaultBeforeNumericVersions() throws {

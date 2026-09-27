@@ -6,6 +6,7 @@ public enum AgentRuntimeRegistryError: Error, Equatable, Sendable {
     case duplicateRuntime(AgentRuntimeID)
     case runtimeNotFound(AgentRuntimeID)
     case permissionRequestNotFound(UUID)
+    case invalidPermissionOption(UUID)
 }
 
 /// Owns the set of ACP runtimes supervised by the Latch Agent process.
@@ -24,6 +25,7 @@ public actor AgentRuntimeRegistry {
 
     private struct PendingPermission {
         let runtimeID: AgentRuntimeID
+        let request: ACPPermissionRequest
         let continuation: CheckedContinuation<ACPPermissionOutcome, Never>
     }
 
@@ -80,6 +82,11 @@ public actor AgentRuntimeRegistry {
     ) throws {
         guard let pending = pendingPermissions[requestID], pending.runtimeID == runtimeID else {
             throw AgentRuntimeRegistryError.permissionRequestNotFound(requestID)
+        }
+        // The agent acts on whatever ID comes back, so only an option it offered may be chosen.
+        if case let .selected(optionID) = outcome,
+           !pending.request.options.contains(where: { $0.optionId == optionID }) {
+            throw AgentRuntimeRegistryError.invalidPermissionOption(requestID)
         }
         closePermission(requestID: requestID, pending: pending, outcome: outcome)
     }
@@ -236,12 +243,16 @@ public actor AgentRuntimeRegistry {
         runtime: ACPAgentRuntime,
         request: ACPPermissionRequest
     ) async -> ACPPermissionOutcome {
+        // Duplicate option IDs make a selection ambiguous, so such a request is never shown.
         guard runtimes[runtimeID] === runtime,
+              Set(request.options.map(\.optionId)).count == request.options.count,
               pendingPermissions.values.filter({ $0.runtimeID == runtimeID }).count
                 < Self.maximumPendingPermissionsPerRuntime else { return .cancelled }
         let requestID = UUID()
         return await withCheckedContinuation { continuation in
-            pendingPermissions[requestID] = PendingPermission(runtimeID: runtimeID, continuation: continuation)
+            pendingPermissions[requestID] = PendingPermission(
+                runtimeID: runtimeID, request: request, continuation: continuation
+            )
             eventContinuation.yield(.permissionRequested(runtimeID: runtimeID, requestID: requestID, request: request))
         }
     }

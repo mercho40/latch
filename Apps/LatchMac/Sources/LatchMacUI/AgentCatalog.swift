@@ -1,4 +1,5 @@
 import Foundation
+import LatchAgentCore
 
 /// Where an agent stands on this machine, as one ordered ladder. The composer picker,
 /// the connection banner, and the Agents settings pane all render from this, so none of

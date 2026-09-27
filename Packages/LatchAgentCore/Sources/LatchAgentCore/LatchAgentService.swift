@@ -121,6 +121,8 @@ public actor LatchAgentService {
             message = "Runtime not found."
         case AgentRuntimeRegistryError.permissionRequestNotFound:
             message = "Permission request not found."
+        case AgentRuntimeRegistryError.invalidPermissionOption:
+            message = "The selected option was not offered by this permission request."
         default:
             message = "Agent command failed."
         }

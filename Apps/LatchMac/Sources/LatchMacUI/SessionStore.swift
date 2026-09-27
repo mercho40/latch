@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import LatchAgentCore
 
 /// Stored as plaintext JSON, including commands, drafts, and transcripts. No credentials,
 /// environment, login state, or permission decisions are stored by this model.

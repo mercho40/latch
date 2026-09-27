@@ -1,5 +1,6 @@
 import AppKit
 import LatchACP
+import LatchAgentCore
 
 /// One ACP session: agent selection, settings, transcript, and composer.
 /// The workspace is fixed at creation; the sidebar owns the list of sessions.

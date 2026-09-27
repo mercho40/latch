@@ -1,4 +1,5 @@
 import AppKit
+import LatchAgentCore
 import XCTest
 @testable import LatchMacUI
 

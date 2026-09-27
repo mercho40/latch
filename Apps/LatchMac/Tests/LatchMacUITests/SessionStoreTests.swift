@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import LatchAgentCore
 import XCTest
 @testable import LatchMacUI
 

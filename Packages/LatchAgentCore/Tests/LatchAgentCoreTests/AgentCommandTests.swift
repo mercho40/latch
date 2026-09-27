@@ -1,5 +1,5 @@
 import XCTest
-@testable import LatchMacUI
+@testable import LatchAgentCore
 
 final class AgentCommandTests: XCTestCase {
     func testParsesQuotedArgumentsAndEscapedSpaces() throws {

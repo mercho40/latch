@@ -138,8 +138,8 @@ final class RemoteSessionReattachTests: XCTestCase {
             XCTAssertNil(owner.errorMessage)
             XCTAssertEqual(owner.phase, .ready)
             XCTAssertEqual(server.lines(in: "loads.log"), 1)
-            // Taken in, and not shown again.
-            try await eventually("the replayed history taken in") { owner.appliedSequence >= 4 }
+            // Taken in, and not shown again; the prompt goes at once, before the history may
+            // have reached the server's journal, and still follows it there.
             XCTAssertEqual(texts(owner), saved.map(\.text))
             await owner.send("hello")
             try await eventually("the owner's reply") { self.texts(owner) == saved.map(\.text) + ["hello", "onetwothree"] }
@@ -165,7 +165,148 @@ final class RemoteSessionReattachTests: XCTestCase {
         }
     }
 
+    /// A runtime whose load has not replied yet has no session a record could name. An
+    /// adoption attaches again until it has, and then shows the whole conversation.
+    func testAdoptingARuntimeStillLoadingItsSessionWaitsForTheSession() async throws {
+        try await LoopbackServer.run { server in
+            let connector = connector(server)
+            let saved = ["earlier question", "earlier answer", "Read history · completed"]
+            try Data().write(to: server.workspace.appendingPathComponent("hold-load"))
+            let owner = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            owner.restore(messages: saved.map { ChatMessage(role: .user, text: $0) }, agentSessionID: "session-1")
+            let resuming = Task { await owner.connect(remote: .custom(server.agentCommand), path: server.workspace.path) }
+            try await eventually("the load held") { server.lines(in: "loads.log") == 1 }
+            let id = try await server.onlyRuntime()
+
+            let other = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            let adopting = Task { await other.adopt(runtimeID: id) }
+            try await eventually("an attach that found no session") { other.connectionAttempts >= 2 }
+            XCTAssertEqual(other.phase, .connecting)
+            XCTAssertTrue(other.messages.isEmpty)
+            try Data().write(to: server.workspace.appendingPathComponent("go"))
+            await resuming.value
+            await adopting.value
+            XCTAssertNil(owner.errorMessage)
+            XCTAssertNil(other.errorMessage)
+            XCTAssertEqual(other.phase, .ready)
+            XCTAssertEqual(other.savedAgentSessionID, "session-1")
+            try await eventually("the whole conversation") { self.texts(other) == saved }
+            await other.detach()
+        }
+    }
+
+    /// A binding saved after a load's reply but before the history it replayed was read: the
+    /// history comes after the cursor, and the transcript, which already has it, stays as it is.
+    func testALoaderAttachingAgainFromBeforeItsHistoryShowsItOnce() async throws {
+        try await LoopbackServer.run { server in
+            let connector = connector(server)
+            let saved = [ChatMessage(role: .user, text: "earlier question"), ChatMessage(role: .assistant, text: "earlier answer")]
+            let owner = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            owner.restore(messages: saved, agentSessionID: "session-1")
+            await owner.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertEqual(owner.phase, .ready)
+            let id = try await server.onlyRuntime()
+            await owner.detach()
+
+            let relaunched = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            relaunched.restore(messages: saved, agentSessionID: "session-1",
+                               remote: SavedSession.RemoteBinding(runtimeID: id.rawValue, cursor: 0, boundaryMessageID: saved[1].id))
+            await relaunched.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertEqual(relaunched.phase, .ready)
+            try await eventually("the replayed history taken in") { relaunched.appliedSequence >= 4 }
+            XCTAssertEqual(texts(relaunched), saved.map(\.text))
+            XCTAssertNil(relaunched.remoteBinding?.showsReplayedHistory)
+            await relaunched.detach()
+        }
+    }
+
+    /// A transcript built from the journal's start goes on showing replayed history after a
+    /// relaunch, including one saved while its own turn ran, which saves the turn's boundary.
+    func testAnAdoptedTranscriptStillShowsReplayedHistoryAfterARelaunchMidTurn() async throws {
+        try await LoopbackServer.run { server in
+            let connector = connector(server)
+            let history = ["earlier question", "earlier answer", "Read history · completed"]
+            let owner = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            owner.restore(messages: history.map { ChatMessage(role: .user, text: $0) }, agentSessionID: "session-1")
+            await owner.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            let id = try await server.onlyRuntime()
+            await owner.detach()
+
+            let other = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            await other.adopt(runtimeID: id)
+            try await eventually("the history") { self.texts(other) == history }
+            let sending = Task { await other.send("tools please") }
+            try await eventually("the turn held") { server.lines(in: "tools.log") == 0 && self.texts(other).last == "Read notes · pending" }
+            let binding = try XCTUnwrap(other.remoteBinding)
+            XCTAssertNotNil(binding.boundaryTurnID)
+            XCTAssertEqual(binding.showsReplayedHistory, true)
+            let saved = other.messages
+            await other.detach()
+            await sending.value
+
+            let relaunched = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            relaunched.restore(messages: saved, agentSessionID: "session-1", remote: binding)
+            await relaunched.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertEqual(relaunched.phase, .prompting)
+            try Data().write(to: server.workspace.appendingPathComponent("go"))
+            try await eventually("the turn's end") { relaunched.phase == .ready }
+            XCTAssertEqual(texts(relaunched), history + ["tools please", "reading", "Read notes · completed", "done"])
+            XCTAssertEqual(relaunched.remoteBinding?.showsReplayedHistory, true)
+            await relaunched.detach()
+        }
+    }
+
     // MARK: The model alone
+
+    /// Replayed history in a transcript that shows it: a user message ends at anything other
+    /// than more of it, or at a chunk naming another message; another session's is not shown.
+    func testReplayedHistoryIsShownMessageByMessage() async throws {
+        let id = ReplayingRemoteClient.runtimeID
+        let updates: [ACPSessionNotification] = [
+            Self.update("user_message_chunk", "first"), Self.update("agent_thought_chunk", "hmm"),
+            Self.update("user_message_chunk", "second"), Self.update("user_message_chunk", " part"),
+            Self.update("user_message_chunk", "third", messageID: "m3"), Self.update("user_message_chunk", "fourth", messageID: "m4"),
+            Self.update("agent_message_chunk", "answer"), Self.update("agent_thought_chunk", "hmm"),
+            Self.update("agent_message_chunk", " goes on"), Self.update("agent_message_chunk", " elsewhere", session: "other-session"),
+        ]
+        let client = ReplayingRemoteClient(after: updates.enumerated().map { index, update in
+            .replayed(runtimeID: id, update, sequence: UInt64(index + 1))
+        }, lastSequence: UInt64(updates.count))
+        let model = SessionModel(makeClient: { client })
+        model.restore(messages: [], agentSessionID: "remote-session",
+                      remote: SavedSession.RemoteBinding(runtimeID: id.rawValue, cursor: 0, showsReplayedHistory: true))
+        await model.connect(remote: .custom("agent"), path: "/srv/app")
+        XCTAssertEqual(model.phase, .ready)
+        try await eventually("the history") { model.appliedSequence == UInt64(updates.count) }
+        XCTAssertEqual(texts(model), ["first", "second part", "third", "fourth", "answer goes on"])
+        XCTAssertEqual(model.messages.map(\.role), [.user, .user, .user, .user, .assistant])
+    }
+
+    /// A relaunch whose place in the journal was evicted: losing only history another client's
+    /// load replayed is news only to a transcript that shows it, as for a gap on the way.
+    func testATruncatedAttachThatLostOnlyReplayedHistoryIsNewsOnlyToASessionThatShowsIt() async throws {
+        let id = ReplayingRemoteClient.runtimeID
+        let lost = "_" + SessionModel.outputLostWhileClosed + "_"
+        let cases: [(first: RemoteServiceEvent, showsReplay: Bool, expected: [String])] = [
+            (.replayed(runtimeID: id, Self.chunk("old", 1), sequence: 3), false, ["go", "saved", "after"]),
+            (.replayed(runtimeID: id, Self.chunk("old", 1), sequence: 3), true, ["go", "saved", lost, "oldafter"]),
+            (.skipped(runtimeID: id, sequence: 3), false, ["go", "saved", lost, "after"]),
+        ]
+        for (first, showsReplay, expected) in cases {
+            let client = ReplayingRemoteClient(after: [
+                first, .agent(.sessionUpdate(runtimeID: id, notification: Self.chunk("after", 9)), sequence: 4),
+            ], lastSequence: 4, truncatedFrom: 3)
+            let model = SessionModel(makeClient: { client })
+            let reply = ChatMessage(role: .assistant, text: "saved")
+            model.restore(messages: [ChatMessage(role: .user, text: "go"), reply], agentSessionID: "remote-session",
+                          remote: SavedSession.RemoteBinding(runtimeID: id.rawValue, cursor: 1, boundaryMessageID: reply.id,
+                                                             showsReplayedHistory: showsReplay ? true : nil))
+            await model.connect(remote: .custom("agent"), path: "/srv/app")
+            XCTAssertEqual(model.phase, .ready)
+            try await eventually("the event after the gap") { model.appliedSequence == 4 }
+            XCTAssertEqual(texts(model), expected, "\(first), shows replay: \(showsReplay)")
+        }
+    }
 
     /// An attach that was not truncated drops the turn's saved output for the journal to replay;
     /// eviction can still take part of it before it is read. What the Mac had saved stays.
@@ -244,10 +385,21 @@ extension RemoteSessionReattachTests {
             "content": .object(["type": .string("text"), "text": .string(text)]),
         ]), localSequence: sequence)
     }
+
+    static func update(_ kind: String, _ text: String, messageID: String? = nil,
+                       session: String = "remote-session") -> ACPSessionNotification {
+        var update: [String: ACPJSONValue] = [
+            "sessionUpdate": .string(kind),
+            "content": .object(["type": .string("text"), "text": .string(text)]),
+        ]
+        if let messageID { update["messageId"] = .string(messageID) }
+        return ACPSessionNotification(sessionId: session, update: .object(update))
+    }
 }
 
-/// A runtime a saved binding points at: the attach answers not truncated, and `backlog`
-/// follows it, as the journal would deliver it.
+/// A runtime a saved binding points at: the attach answers not truncated, unless the journal
+/// has evicted what came before `truncatedFrom`, and `backlog` follows it, as the journal
+/// would deliver it.
 private final class ReplayingRemoteClient: AgentServiceClient {
     static let runtimeID = AgentRuntimeID("replaying")
     let events: AsyncStream<LatchAgentEvent>
@@ -257,10 +409,12 @@ private final class ReplayingRemoteClient: AgentServiceClient {
     private let continuation: AsyncStream<RemoteServiceEvent>.Continuation
     private let backlog: [RemoteServiceEvent]
     private let lastSequence: UInt64
+    private let truncatedFrom: UInt64?
 
-    init(after backlog: [RemoteServiceEvent], lastSequence: UInt64) {
+    init(after backlog: [RemoteServiceEvent], lastSequence: UInt64, truncatedFrom: UInt64? = nil) {
         self.backlog = backlog
         self.lastSequence = lastSequence
+        self.truncatedFrom = truncatedFrom
         (events, lifetime) = AsyncStream.makeStream()
         let (stream, continuation) = AsyncStream<RemoteServiceEvent>.makeStream()
         remoteEvents = stream
@@ -273,7 +427,8 @@ private final class ReplayingRemoteClient: AgentServiceClient {
             initialization: ACPInitializeResponse(protocolVersion: 1, agentCapabilities: .init()),
             sessionID: "remote-session", session: .new(ACPNewSessionResponse(sessionId: "remote-session")),
             lastSequence: lastSequence)
-        let attachment = LatchRemoteAttachment(record: record, backlogFrom: cursor + 1, truncated: false)
+        let attachment = LatchRemoteAttachment(record: record, backlogFrom: truncatedFrom ?? cursor + 1,
+                                               truncated: truncatedFrom != nil)
         continuation.yield(.attached(runtimeID: id, attachment, server: "fake"))
         backlog.forEach { continuation.yield($0) }
         return attachment

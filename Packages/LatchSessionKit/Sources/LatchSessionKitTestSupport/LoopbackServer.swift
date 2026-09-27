@@ -139,8 +139,8 @@ public final class LoopbackServer {
 /// conversation; `prompts.log`, `decisions.log` and `loads.log` count what reached the agent, and
 /// `slow.log`, `asked.log`, `tools.log`, `flood.log` and `deluge.log` when a turn got that far. A `fail-new`
 /// file fails session/new. The `tools` and `flood` turns hold after their first output until
-/// a `go` file appears, and exit with status 3 if a `die` file appears first; so does `deluge`,
-/// which streams about 12 KB, a tool row and `mid` first. A hold also ends that way after a
+/// a `go` file appears, and exit with status 3 if a `die` file appears first; so does a load,
+/// before its history, while there is a `hold-load` file, and so does `deluge`, which streams about 12 KB, a tool row and `mid` first. A hold also ends that way after a
 /// minute, or once the process that started the agent has gone, so a test run that dies
 /// mid-turn leaves no agent behind. `SmokeAgent.remoteScript` is the
 /// bundle smoke's cut-down copy: a change to the JSON Latch writes must keep both matching.
@@ -167,6 +167,7 @@ public enum RemoteMockAgent {
           reply "$id" '{"sessionId":"session-1","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]},"models":{"currentModelId":"model-a","availableModels":[{"modelId":"model-a","name":"Model A"},{"modelId":"model-b","name":"Model B"}]}}' ;;
         *\"method\":\"session*/load\"*)
           echo load >> loads.log
+          if [ -f hold-load ]; then hold; fi
           said earlier; said " question"; chunk "earlier answer"
           printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-h","title":"Read history","status":"completed"}}}'
           reply "$id" '{"modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]}}' ;;

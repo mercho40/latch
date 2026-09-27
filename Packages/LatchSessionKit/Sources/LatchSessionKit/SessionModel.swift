@@ -142,9 +142,17 @@ public final class SessionModel {
     /// history an agent replayed when another client loaded its session. Otherwise that
     /// history is already in the transcript, which is where the session loaded it from.
     private var showsReplayedHistory = false
-    /// Output was lost just before the next event. Unless the transcript shows replayed
-    /// history, a loss that the next event shows to be only such history is not news.
-    private var lostBeforeNext = false
+    /// Output was lost just before the next event, and this notice says so. Unless the
+    /// transcript shows replayed history, a loss that the next event shows to be only such
+    /// history is not news.
+    private var lostBeforeNext: String?
+    /// Since the last replayed chunk of a message, an update that ends a user message, such as
+    /// a thought: the user's next chunk begins a message of its own. See `showReplayed`.
+    private var replayEndedMessage = false
+    private var replayedMessageID: String?
+    /// The runtime an adoption attached to has no session yet: it is still creating or loading
+    /// one. `adopt` attaches again shortly.
+    private var adoptionFoundNoSession = false
     public static let outputLostWhileClosed = "Some output from while Latch was closed could not be recovered."
     public static let outputLostWhileUnreachable = "Some output from while the server was out of reach could not be recovered."
     public static let promptNotSent = "This message was not sent before Latch quit."
@@ -360,13 +368,36 @@ public final class SessionModel {
     /// server still has replays. Its record says which agent it is, in `remoteAgent`. A runtime
     /// gone by then is reported, never replaced by a new one: nothing here knows what to start.
     /// For a session with no transcript and no binding of its own.
+    ///
+    /// A runtime still creating or loading its session, whose record cannot yet say which
+    /// session it is or how it is set up, is attached to again until it has one, for up to
+    /// about a minute.
     public func adopt(runtimeID id: AgentRuntimeID) async {
         guard messages.isEmpty, savedAgentSessionID == nil, savedBinding == nil,
               beginConnecting(startNewSession: false) else { return }
         remoteTarget = nil
-        adopting = true
-        await reattach(SavedSession.RemoteBinding(runtimeID: id.rawValue, cursor: 0), resuming: nil)
+        var delay = Duration.milliseconds(250)
+        for _ in 0..<Self.adoptionAttempts {
+            adopting = true
+            adoptionFoundNoSession = false
+            await reattach(SavedSession.RemoteBinding(runtimeID: id.rawValue, cursor: 0), resuming: nil)
+            guard adoptionFoundNoSession else { return }
+            adoptionFoundNoSession = false
+            let token = generation
+            await client.detach(runtimeID: id)
+            try? await Task.sleep(for: delay)
+            // A detach or disconnect meanwhile gave the adoption up.
+            guard generation == token, phase == .connecting else { return }
+            delay = min(delay * 2, .seconds(2))
+        }
+        phase = .disconnected
+        status = "Not connected"
+        errorMessage = "The agent on the server has not started its session."
+        errorAdvice = "Try again once it has."
+        onChange?()
     }
+
+    static let adoptionAttempts = 32
 
     /// Attaches to the runtime the last run of Latch left on the server rather than launching
     /// another. The record arrives ahead of the backlog, in `receive(.attached)`, which
@@ -449,8 +480,14 @@ public final class SessionModel {
         defer { resumeAttachWaiter() }
         let adopted = adopting
         adopting = false
+        if adopted, record.session == nil, record.lifecycle != .exited {
+            adoptionFoundNoSession = true
+            return
+        }
         // An adopted runtime's transcript starts empty, and all of it comes from the journal.
         showsReplayedHistory = adopted || binding.showsReplayedHistory == true
+        replayEndedMessage = false
+        replayedMessageID = nil
         if remoteTarget == nil { remoteTarget = (record.agent, record.workspace) }
         let afterLinkFailure = bindingKeptFromLink
         let interrupted = interruptedPrompt
@@ -467,7 +504,15 @@ public final class SessionModel {
             // Subtracted rather than added: a saved sequence came from the server, which could
             // have sent the largest there is.
             if attachment.backlogFrom > 0, attachment.backlogFrom - 1 > binding.applied {
-                history.appendNotice(adopted ? Self.outputLostNotice : Self.outputLostWhileClosed)
+                let notice = adopted ? Self.outputLostNotice : Self.outputLostWhileClosed
+                // A transcript of its own already has the history another client's load
+                // replayed: the first event left says whether only that was lost. With none
+                // left, nothing will say.
+                if showsReplayedHistory || attachment.backlogFrom > record.lastSequence {
+                    history.appendNotice(notice)
+                } else {
+                    lostBeforeNext = notice
+                }
             }
         } else {
             appliedSequence = min(binding.cursor, record.lastSequence)
@@ -631,7 +676,7 @@ public final class SessionModel {
         runtimeIsRemote = false
         replaced = nil
         lostPast = nil
-        lostBeforeNext = false
+        lostBeforeNext = nil
         attaching = nil
         adopting = false
         resumeAttachWaiter()
@@ -1070,12 +1115,12 @@ public final class SessionModel {
                 publishHistory()
             }
         }
-        if lostBeforeNext, let (id, _) = event.journalPosition, id == runtimeID {
-            lostBeforeNext = false
+        if let notice = lostBeforeNext, let (id, _) = event.journalPosition, id == runtimeID {
+            lostBeforeNext = nil
             // Replayed history is journaled before anything else of the runtime, all at once,
             // so what was lost before some of it was history too.
             if case .replayed = event {} else {
-                history.appendNotice(Self.outputLostNotice)
+                history.appendNotice(notice)
                 publishHistory()
             }
         }
@@ -1124,7 +1169,7 @@ public final class SessionModel {
             publishHistory()
         case let .outputLost(id, nil) where id == runtimeID && !showsReplayedHistory:
             // Evicted before this client read it: the next event says whether that matters.
-            lostBeforeNext = true
+            lostBeforeNext = Self.outputLostNotice
         case let .outputLost(id, sequence) where id == runtimeID:
             history.appendNotice(Self.outputLostNotice)
             publishHistory()
@@ -1181,18 +1226,35 @@ public final class SessionModel {
     /// History another client's load replayed, shown as the conversation so far: the user's
     /// messages as well as the agent's, since this session sent none of them. State updates
     /// are left out; the record carried the latest of each.
+    ///
+    /// A user message arrives in chunks, as the agent's do. One that follows another user
+    /// message with nothing between, such as a turn cancelled before any output, cannot be
+    /// told apart from more of it unless the agent names its messages, and is shown as part of
+    /// it; one that follows anything else, a thought or an image included, begins a message
+    /// of its own.
     private func showReplayed(_ notification: ACPSessionNotification) {
         guard notification.sessionId == sessionID else { return }
         switch notification.event {
-        case let .messageChunk(chunk) where chunk.role == .user:
-            guard let text = chunk.text else { return }
-            history.appendUserChunk(text)
-        case let .messageChunk(chunk) where chunk.role == .agent:
-            guard let text = chunk.text else { return }
-            history.appendAssistant(text)
+        case let .messageChunk(chunk) where chunk.role != .thought:
+            guard let text = chunk.text else {
+                replayEndedMessage = true
+                return
+            }
+            // A chunk that names a message other than the last one's, or names one where that
+            // did not, begins it.
+            let named = chunk.messageID != replayedMessageID
+            replayedMessageID = chunk.messageID
+            if chunk.role == .user {
+                history.appendUserChunk(text, newMessage: named || replayEndedMessage)
+            } else {
+                // As live, a thought between two chunks of the agent's does not part them.
+                history.appendAssistant(text, newMessage: named)
+            }
+            replayEndedMessage = false
         case let .toolCall(tool, _):
             history.updateTool(tool)
         default:
+            replayEndedMessage = true
             return
         }
         publishHistory()

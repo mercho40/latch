@@ -159,12 +159,13 @@ public struct ChatHistory: Sendable {
 
     /// A chunk of a user message the agent streams, as when it replays a loaded session;
     /// prompts sent from here go whole through `appendUser`.
-    mutating func appendUserChunk(_ text: String) {
-        append(text, role: .user)
+    /// `newMessage` when the chunk begins a message even after one of the same role.
+    mutating func appendUserChunk(_ text: String, newMessage: Bool = false) {
+        append(text, role: .user, newMessage: newMessage)
     }
 
-    mutating func appendAssistant(_ text: String) {
-        append(text, role: .assistant)
+    mutating func appendAssistant(_ text: String, newMessage: Bool = false) {
+        append(text, role: .assistant, newMessage: newMessage)
     }
 
     /// A line of Latch's own in the agent's column, such as for output that could not be

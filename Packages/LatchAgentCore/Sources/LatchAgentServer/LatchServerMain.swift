@@ -53,17 +53,27 @@ public enum LatchServerMain {
                 printError("\(error)")
                 return 1
             }
-        case let .pair(config, host, port):
+        case let .pair(config, host, port, qr):
             guard let tokens = tokenFile(config) else { return 1 }
+            let pairing: String
             do {
-                print(try LatchRemotePairing(host: host, port: port, token: tokens.readOrCreate()).string)
-                return 0
+                pairing = try LatchRemotePairing(host: host, port: port, token: tokens.readOrCreate()).string
             } catch let error as ServerTokenError {
                 printError("\(error)")
+                return 1
             } catch {
                 printError("--host \(host): expected a host name or a numeric address")
+                return 1
             }
-            return 1
+            print(pairing)
+            guard let qr else { return 0 }
+            do {
+                print("\n" + (try QRCode(pairing)).terminalText(invert: qr == .lightModulesDrawn), terminator: "")
+                return 0
+            } catch {
+                printError("--qr: the string is too long for a QR code (\(error)); paste it instead")
+                return 1
+            }
         case let .serve(options):
             return serve(options)
         }

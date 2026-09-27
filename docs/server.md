@@ -57,6 +57,8 @@ latch-server pair --host vps.example.ts.net
 
 prints a `latch://vps.example.ts.net:7428?token=…` string to paste into Latch. `--host` is the name or address your Mac will connect to; add `--port` if the server does not listen on 7428. The string contains the token. Treat it like the token: paste it straight into Latch, and do not send it through chat, mail or notes.
 
+Add `--qr` to print, below the string, a QR code of it for the iPhone's Camera, which opens it in Latch. The code holds the string exactly, token included, so the same care applies: scan it from your own screen, and do not photograph it, screenshot it or leave it in a shared terminal's scrollback. It is drawn with half-block characters in the terminal's text colour, so it shows dark on light in a light theme and light on dark in a dark one; Apple's QR detector reads it either way round. It is at most 65 columns wide, and reads best where the block characters leave no gaps between lines, so keep the terminal's line spacing at its default. If the Camera does not read it, add `--invert`, which draws the light modules and the margin around the code instead of the dark modules. A host name longer than about 140 characters does not fit in a code.
+
 `latch-server` refuses to run as root, because its agents would run as root too; `--allow-root` overrides that. Create an ordinary user for it instead, and do everything in this guide logged in as that user over SSH, not through `su` or `sudo -u`: those do not start the user's systemd instance, and `systemctl --user` then fails with "Failed to connect to bus".
 
 ## Run it as a systemd user service

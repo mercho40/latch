@@ -6,8 +6,8 @@ public enum ServerCommand: Equatable, Sendable {
     case serve(ServeOptions)
     /// Prints the token, creating it if absent, or a new one with `rotate`.
     case token(ConfigOptions, rotate: Bool)
-    /// Prints a `latch://` string for pasting into the app.
-    case pair(ConfigOptions, host: String, port: UInt16)
+    /// Prints a `latch://` string for pasting into the app, and with `qr` a QR code of it.
+    case pair(ConfigOptions, host: String, port: UInt16, qr: PairQRCode? = nil)
     case version
     case help
 }
@@ -20,6 +20,15 @@ public struct ConfigOptions: Equatable, Sendable {
         self.configDirectory = configDirectory
         self.allowRoot = allowRoot
     }
+}
+
+/// How `pair --qr` draws the code: which modules take the terminal's foreground colour.
+public enum PairQRCode: Equatable, Sendable {
+    /// Dark on a light background, and light on a dark one, which Apple's detector reads too.
+    case darkModulesDrawn
+    /// `--invert`: the light modules and the quiet zone, for scanners that need dark on light
+    /// from a terminal with a dark background.
+    case lightModulesDrawn
 }
 
 public struct ServeOptions: Equatable, Sendable {
@@ -50,7 +59,7 @@ public enum ServerCommandLine {
     public static let usage = """
     usage: latch-server [options]            serve until SIGTERM or SIGINT
            latch-server token [--rotate]      print the token, creating it if absent
-           latch-server pair --host NAME [--port N]
+           latch-server pair --host NAME [--port N] [--qr [--invert]]
                                               print a latch:// string for the Latch app
            latch-server --version | --help
 
@@ -64,6 +73,9 @@ public enum ServerCommandLine {
                                     such as 24h, 90m or 30s; 0 disables (default 24h)
       --log-agent-stderr            log agents' stderr, escaped and rate-limited
       --allow-root                  run as root
+      --qr                          with pair, also print the string as a QR code for the
+                                    iPhone's camera; it holds the token, so keep it private
+      --invert                      with --qr, draw the light modules instead of the dark
 
     SIGHUP re-reads the token file at once; a rotated token closes connections that used the old one.
     """
@@ -80,6 +92,8 @@ public enum ServerCommandLine {
         var rotate = false
         var host: String?
         var port: UInt16?
+        var qr = false
+        var invert = false
         var version = false
         var help = false
         var seen: Set<String> = []
@@ -150,6 +164,14 @@ public enum ServerCommandLine {
                     throw ServerCommandLineError("--port \(text): expected a number from 1 to 65535")
                 }
                 port = number
+            case "--qr":
+                try allowed(option, in: ["pair"])
+                try flag()
+                qr = true
+            case "--invert":
+                try allowed(option, in: ["pair"])
+                try flag()
+                invert = true
             case "--version":
                 try flag()
                 version = true
@@ -172,7 +194,9 @@ public enum ServerCommandLine {
             return .token(serve.config, rotate: rotate)
         case "pair":
             guard let host else { throw ServerCommandLineError("pair needs --host, the name or address clients reach this server at") }
-            return .pair(serve.config, host: host, port: port ?? LatchRemoteProtocol.defaultPort)
+            guard qr || !invert else { throw ServerCommandLineError("--invert needs --qr") }
+            let style: PairQRCode? = qr ? (invert ? .lightModulesDrawn : .darkModulesDrawn) : nil
+            return .pair(serve.config, host: host, port: port ?? LatchRemoteProtocol.defaultPort, qr: style)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }

@@ -81,6 +81,22 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertEqual(pairing.port, 9000)
         XCTAssertEqual(pairing.token.rawValue, token.output.trimmingCharacters(in: .newlines))
 
+        // The string, a blank line, then the code in half blocks; the string alone for a paste.
+        for arguments in [["--qr"], ["--qr", "--invert"]] {
+            let qr = try run(["pair", "--host", "vps.example.ts.net", "--config-dir", config] + arguments + rootArguments)
+            XCTAssertEqual(qr.status, 0, qr.error)
+            let lines = qr.output.split(separator: "\n", omittingEmptySubsequences: false)
+            XCTAssertEqual(try LatchRemotePairing(parsing: String(lines[0])).token, pairing.token)
+            XCTAssertEqual(lines[1], "")
+            let symbol = try QRCode(String(lines[0]))
+            XCTAssertEqual(lines[2...].joined(separator: "\n"), symbol.terminalText(invert: arguments.contains("--invert")))
+        }
+        let longHost = Array(repeating: String(repeating: "a", count: 50), count: 3).joined(separator: ".")
+        let tooLong = try run(["pair", "--host", longHost, "--qr", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(tooLong.status, 1)
+        XCTAssertTrue(tooLong.output.hasPrefix("latch://aaa"), tooLong.output)
+        XCTAssertTrue(tooLong.error.contains("too long for a QR code"), tooLong.error)
+
         let rotated = try run(["token", "--rotate", "--config-dir", config] + rootArguments)
         XCTAssertEqual(rotated.status, 0, rotated.error)
         XCTAssertNotEqual(rotated.output, token.output)

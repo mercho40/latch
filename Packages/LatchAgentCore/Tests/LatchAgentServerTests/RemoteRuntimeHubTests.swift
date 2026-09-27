@@ -262,7 +262,7 @@ final class RemoteRuntimeHubTests: XCTestCase {
         }
     }
 
-    func testLoadSessionIsIdempotentAndDropsReplayedHistory() async throws {
+    func testLoadSessionIsIdempotentAndJournalsItsHistoryAsReplay() async throws {
         try await withTestbed { bed in
             let id = AgentRuntimeID("load")
             try await bed.launch(id)
@@ -274,21 +274,33 @@ final class RemoteRuntimeHubTests: XCTestCase {
             try await bed.expect(.loadSession(runtimeID: id, sessionID: "other"), fails: .sessionAlreadyBound)
             try await bed.expect(.newSession(runtimeID: id), fails: .sessionAlreadyBound)
 
-            // History that arrives after the reply is dropped as well as what was journaled.
+            // A device that takes the runtime up from the start gets the whole conversation.
             try await Task.sleep(for: .milliseconds(300))
             let turnID = UUID()
             try await bed.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("go on")]))
             let viewer = bed.viewer()
             let attached = try await viewer.attach(id)
             XCTAssertFalse(attached.truncated)
+            XCTAssertEqual(attached.backlogFrom, 1)
             XCTAssertEqual(attached.record.sessionID, "saved-1")
             XCTAssertEqual(attached.record.session, .load(response))
             XCTAssertEqual(attached.record.loadedThrough, loadedThrough)
-            let frames = try await viewer.pull(until: "the turn") { $0.turnEnded != nil && $0.chunkTexts.count == 3 }
-            XCTAssertEqual(frames.chunkTexts, ["one", "two", "three"])
+            let frames = try await viewer.pull(until: "the turn") { $0.turnEnded != nil && $0.chunkTexts.count == 5 }
+            XCTAssertEqual(frames.map(\.sequence), Array(1...UInt64(frames.count)))
             XCTAssertFalse(frames.contains(where: \.gap))
-            if case .turnStarted = frames.first?.event {} else { XCTFail("Expected the turn first, not history: \(frames)") }
-            XCTAssertEqual(frames.first?.sequence, attached.backlogFrom)
+            let history = Array(frames.prefix(4))
+            XCTAssertEqual(history.map(\.updateSummary), [
+                "user_message_chunk: earlier question", "agent_message_chunk: history one", "tool_call",
+                "agent_message_chunk: history two",
+            ])
+            XCTAssertTrue(history.allSatisfy(\.isReplay))
+            for frame in history {
+                guard case let .sessionUpdate(notification, _) = frame.event else { continue }
+                XCTAssertLessThanOrEqual(try XCTUnwrap(notification.localSequence), loadedThrough)
+            }
+            if case .turnStarted = frames[4].event {} else { XCTFail("Expected the turn after the history: \(frames)") }
+            XCTAssertFalse(frames.dropFirst(4).contains(where: \.isReplay))
+            XCTAssertEqual(frames.dropFirst(4).chunkTexts, ["one", "two", "three"])
         }
     }
 
@@ -705,18 +717,58 @@ final class RemoteRuntimeHubTests: XCTestCase {
         }
     }
 
-    func testHistoryReplayedByALoadNeverReachesAnAttachedViewer() async throws {
+    func testHistoryReplayedByALoadReachesAnAttachedViewerMarkedAsReplay() async throws {
         try await withTestbed { bed in
             let id = AgentRuntimeID("replay")
             try await bed.launch(id)
+            // Attached before the load, as the client that loads it is.
             let viewer = bed.viewer()
             try await viewer.attach(id)
             try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-1"))
             try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("go on")]))
-            let frames = try await viewer.pull(until: "the turn") { $0.turnEnded != nil && $0.chunkTexts.count == 3 }
-            XCTAssertEqual(frames.chunkTexts, ["one", "two", "three"])
-            if case .turnStarted = frames.first?.event {} else { XCTFail("Expected the turn first, not history: \(frames)") }
+            let frames = try await viewer.pull(until: "the turn") { $0.turnEnded != nil && $0.chunkTexts.count == 5 }
+            XCTAssertEqual(frames.map(\.sequence), Array(1...UInt64(frames.count)))
+            XCTAssertEqual(frames.prefix(4).map(\.isReplay), [true, true, true, true])
+            XCTAssertEqual(frames.prefix(4).chunkTexts, ["history one", "history two"])
+            if case .turnStarted = frames[4].event {} else { XCTFail("Expected the turn after the history: \(frames)") }
+            XCTAssertFalse(frames.dropFirst(4).contains(where: \.isReplay))
+        }
+    }
+
+    func testHistoryHeldDuringALoadKeepsTheNewestWithinTheJournalsBudget() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.runtimeJournalBudget = 400
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("long-history")
+            try await bed.launch(id)
+            try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-1"))
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            let frames = try viewer.pull()
+            // What fits, newest last, without the oldest the journal would have evicted anyway.
+            XCTAssertFalse(frames.isEmpty)
+            XCTAssertLessThan(frames.count, 4)
+            XCTAssertTrue(frames.allSatisfy(\.isReplay))
+            XCTAssertEqual(frames.last?.chunkText, "history two")
             XCTAssertEqual(frames.first?.sequence, 1)
+        }
+    }
+
+    func testReplayedHistoryTooLargeForAFrameIsLeftOutNotOmitted() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.maxEncodedEventBytes = 150
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("large-history")
+            try await bed.launch(id)
+            try await bed.ok(.loadSession(runtimeID: id, sessionID: "saved-1"))
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("go on")]))
+            try await bed.waitForIdle(id, through: 5)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            let frames = try viewer.pull()
+            // Nothing before the turn; its own output that large is still accounted for.
+            XCTAssertEqual(frames.first?.event.kind, "turnStarted")
+            XCTAssertEqual(frames.map(\.event.kind).sorted(), ["omitted", "omitted", "omitted", "turnEnded", "turnStarted"])
         }
     }
 

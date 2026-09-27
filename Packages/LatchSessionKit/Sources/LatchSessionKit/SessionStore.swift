@@ -55,14 +55,19 @@ public struct SavedSession: Codable, Equatable, Sendable {
         /// evicted past `cursor` cannot replay the turn from its prompt, so the relaunch keeps
         /// the saved transcript and takes up only what comes after this.
         public var applied: UInt64
+        /// The transcript is what the runtime's journal replayed from its start, history an
+        /// agent replayed on another client's load included, as for a runtime adopted from
+        /// another device. Nil rather than false, so most bindings are saved without it.
+        public var showsReplayedHistory: Bool?
 
         public init(runtimeID: String, cursor: UInt64, boundaryMessageID: UUID? = nil, boundaryTurnID: UUID? = nil,
-                    applied: UInt64? = nil) {
+                    applied: UInt64? = nil, showsReplayedHistory: Bool? = nil) {
             self.runtimeID = runtimeID
             self.cursor = cursor
             self.boundaryMessageID = boundaryMessageID
             self.boundaryTurnID = boundaryTurnID
             self.applied = max(applied ?? cursor, cursor)
+            self.showsReplayedHistory = showsReplayedHistory
         }
     }
 }

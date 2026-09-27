@@ -157,6 +157,12 @@ public struct ChatHistory: Sendable {
         enforceBounds()
     }
 
+    /// A chunk of a user message the agent streams, as when it replays a loaded session;
+    /// prompts sent from here go whole through `appendUser`.
+    mutating func appendUserChunk(_ text: String) {
+        append(text, role: .user)
+    }
+
     mutating func appendAssistant(_ text: String) {
         append(text, role: .assistant)
     }

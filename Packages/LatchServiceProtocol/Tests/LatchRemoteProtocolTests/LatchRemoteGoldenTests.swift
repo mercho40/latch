@@ -112,6 +112,7 @@ final class LatchRemoteGoldenTests: XCTestCase {
     func testEvents() throws {
         let cases: [(LatchRemoteEvent, String)] = [
             (.sessionUpdate(notification: Sample.notification), #"{"kind":"sessionUpdate","notification":{"localSequence":5,"sessionId":"session-1","update":{"content":{"text":"a/b","type":"text"},"sessionUpdate":"agent_message_chunk"}}}"#),
+            (.sessionUpdate(notification: Sample.notification, replay: true), #"{"kind":"sessionUpdate","notification":{"localSequence":5,"sessionId":"session-1","update":{"content":{"text":"a/b","type":"text"},"sessionUpdate":"agent_message_chunk"}},"replay":true}"#),
             (.permissionRequested(requestID: Sample.requestID, request: Sample.permission), #"{"kind":"permissionRequested","request":{"options":[{"kind":"allow_once","name":"Allow","optionId":"allow-once"}],"sessionId":"session-1","toolCall":{"title":"Read file","toolCallId":"call-1"}},"requestID":"00000000-0000-0000-0000-00000000000B"}"#),
             (.permissionClosed(requestID: Sample.requestID), #"{"kind":"permissionClosed","requestID":"00000000-0000-0000-0000-00000000000B"}"#),
             (.turnStarted(turnID: Sample.turnID, text: "Look at this", attachments: [

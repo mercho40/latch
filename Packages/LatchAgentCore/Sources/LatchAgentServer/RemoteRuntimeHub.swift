@@ -372,7 +372,7 @@ public actor RemoteRuntimeHub {
         }
         state.pendingPermissions = []
         // History of a load that never finished.
-        state.heldUpdates = []
+        state.heldUpdates = HeldUpdates()
         state.lifecycle = .exited
         state.exit = exit
         state.launch = nil
@@ -456,8 +456,8 @@ public actor RemoteRuntimeHub {
                     runtimes[id]!.sessionID = response.sessionId
                 case let (.load(sessionID), .load(response)):
                     runtimes[id]!.sessionID = sessionID
-                    // The client already has the history the load replayed; publish only what
-                    // followed the reply.
+                    // The client that loaded it already has the history the load replayed; it
+                    // is journaled marked as replay, for viewers that do not.
                     runtimes[id]!.loadedThrough = response.localSequence
                     publishHeldUpdates(id, after: response.localSequence)
                 default:
@@ -591,12 +591,13 @@ public actor RemoteRuntimeHub {
             runtimes[id]!.remember(notification)
             if case .binding(.load, _, _) = runtimes[id]!.binding {
                 // Most likely history the load is replaying; `bindingResult` decides.
-                runtimes[id]!.hold(notification)
+                runtimes[id]!.hold(notification, as: Self.encodedReplay(of: notification), budget: configuration.runtimeJournalBudget)
                 return
             }
             // History that reached the hub after the load's reply did.
             if let loadedThrough = runtimes[id]!.loadedThrough, let sequence = notification.localSequence,
                sequence <= loadedThrough {
+                publishReplayed(Self.encodedReplay(of: notification), for: id)
                 return
             }
             publish(.sessionUpdate(notification: notification), for: id)
@@ -626,15 +627,30 @@ public actor RemoteRuntimeHub {
         }
     }
 
-    /// Publishes the updates held while a load ran that came after `loadedThrough`, or all of
-    /// them when the load failed or its reply had no sequence.
+    /// Publishes the updates held while a load ran, those up to `loadedThrough` marked as
+    /// replay, or all of them unmarked when the load failed or its reply had no sequence.
     private func publishHeldUpdates(_ id: AgentRuntimeID, after loadedThrough: UInt64?) {
         guard let held = runtimes[id]?.heldUpdates, !held.isEmpty else { return }
-        runtimes[id]!.heldUpdates = []
-        for notification in held {
-            if let loadedThrough, let sequence = notification.localSequence, sequence <= loadedThrough { continue }
-            publish(.sessionUpdate(notification: notification), for: id)
+        runtimes[id]!.heldUpdates = HeldUpdates()
+        for update in held.updates {
+            if let loadedThrough, let sequence = update.notification.localSequence, sequence <= loadedThrough {
+                publishReplayed(update.encodedReplay, for: id)
+            } else {
+                publish(.sessionUpdate(notification: update.notification), for: id)
+            }
         }
+    }
+
+    /// Journals history a load replayed. One update too large for a frame is left out rather
+    /// than journaled as `omitted`, which would tell the client that loaded it, and has it,
+    /// that output was lost.
+    private func publishReplayed(_ encoded: Data, for id: AgentRuntimeID) {
+        guard !encoded.isEmpty, encoded.count <= configuration.maxEncodedEventBytes else { return }
+        journal.append(encoded, to: id)
+    }
+
+    private static func encodedReplay(of notification: ACPSessionNotification) -> Data {
+        (try? LatchRemoteCoding.encodeEvent(.sessionUpdate(notification: notification, replay: true))) ?? Data()
     }
 
     /// Encodes once; every frame that carries the event splices these bytes.
@@ -825,7 +841,7 @@ private struct RuntimeState {
     var loadedThrough: UInt64?
     /// Session updates that arrived while a load ran, unpublished until its reply says which
     /// were replayed history.
-    var heldUpdates: [ACPSessionNotification] = []
+    var heldUpdates = HeldUpdates()
     /// The latest notification of each kind in `stateKinds`.
     var sessionState: [String: ACPSessionNotification] = [:]
     var configurationSets: [LatchRemoteConfigurationRoute: LatchRemoteConfigurationSet] = [:]
@@ -866,17 +882,50 @@ private struct RuntimeState {
         sessionState[kind] = notification
     }
 
-    /// Replayed history comes first and is dropped anyway; only the few updates that follow
-    /// the reply matter, so a long history cannot grow this without bound.
-    mutating func hold(_ notification: ACPSessionNotification) {
-        heldUpdates.append(notification)
-        if heldUpdates.count > 256 { heldUpdates.removeFirst(heldUpdates.count - 256) }
+    /// `encodedReplay` is how the update is journaled if it turns out to be history, as nearly
+    /// all of it is. Held to the journal's budget for one runtime, beyond which the journal
+    /// would evict the oldest anyway.
+    mutating func hold(_ notification: ACPSessionNotification, as encodedReplay: Data, budget: Int) {
+        heldUpdates.append(HeldUpdate(notification: notification, encodedReplay: encodedReplay), budget: budget)
     }
 
     mutating func endTurn(_ turnID: UUID, stopReason: String?, error: LatchRemoteError?) {
         activeTurnID = nil
         guard let index = turns.lastIndex(where: { $0.turnID == turnID }) else { return }
         turns[index] = LatchRemoteTurnRecord(turnID: turnID, state: .ended, stopReason: stopReason, error: error)
+    }
+}
+
+private struct HeldUpdate {
+    let notification: ACPSessionNotification
+    let encodedReplay: Data
+}
+
+/// Updates held while a load runs, the oldest dropped past a byte budget.
+private struct HeldUpdates {
+    /// Held updates are `storage[head...]`; dropped ones before `head` are nil until compacted.
+    private var storage: [HeldUpdate?] = []
+    private var head = 0
+    private var byteCount = 0
+
+    var isEmpty: Bool { head == storage.count }
+
+    var updates: [HeldUpdate] { storage[head...].compactMap { $0 } }
+
+    /// The newest always stays, even when it alone is over budget.
+    mutating func append(_ update: HeldUpdate, budget: Int) {
+        storage.append(update)
+        byteCount += update.encodedReplay.count
+        while byteCount > budget, storage.count - head > 1 {
+            byteCount -= storage[head]?.encodedReplay.count ?? 0
+            storage[head] = nil
+            head += 1
+        }
+        // Compact occasionally so dropping stays O(1) amortized.
+        if head >= 1024, head * 2 >= storage.count {
+            storage.removeFirst(head)
+            head = 0
+        }
     }
 }
 

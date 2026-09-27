@@ -135,7 +135,8 @@ public final class LoopbackServer {
 
 /// An ACP agent in `sh` for remote sessions. Every `case` matches one JSON key, never two:
 /// Latch's encoder orders keys differently in every process. The prompt's text picks the
-/// turn; `prompts.log`, `decisions.log` and `loads.log` count what reached the agent, and
+/// turn; a load replays `earlier question`, `earlier answer` and a tool row, as a saved
+/// conversation; `prompts.log`, `decisions.log` and `loads.log` count what reached the agent, and
 /// `slow.log`, `asked.log`, `tools.log`, `flood.log` and `deluge.log` when a turn got that far. A `fail-new`
 /// file fails session/new. The `tools` and `flood` turns hold after their first output until
 /// a `go` file appears, and exit with status 3 if a `die` file appears first; so does `deluge`,
@@ -151,6 +152,7 @@ public enum RemoteMockAgent {
     fail() { printf '{"jsonrpc":"2.0","id":%s,"error":{"code":%s,"message":"%s"}}\n' "$1" "$2" "$3"; }
     chunk() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1"; }
     tool() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"%s","toolCallId":"call-7","title":"Read notes","status":"%s"}}}\n' "$1" "$2"; }
+    said() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1"; }
     hold() { n=0; while [ ! -f go ]; do if [ -f die ] || ! kill -0 "$PPID" 2>/dev/null || [ $n -ge 1200 ]; then exit 3; fi; n=$((n+1)); sleep 0.05; done; }
     ask() {
       printf '%s\n' '{"jsonrpc":"2.0","id":900,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1","title":"Edit file"},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
@@ -165,6 +167,8 @@ public enum RemoteMockAgent {
           reply "$id" '{"sessionId":"session-1","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]},"models":{"currentModelId":"model-a","availableModels":[{"modelId":"model-a","name":"Model A"},{"modelId":"model-b","name":"Model B"}]}}' ;;
         *\"method\":\"session*/load\"*)
           echo load >> loads.log
+          said earlier; said " question"; chunk "earlier answer"
+          printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-h","title":"Read history","status":"completed"}}}'
           reply "$id" '{"modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]}}' ;;
         *\"method\":\"session*/set_mode\"*)
           reply "$id" '{}' ;;

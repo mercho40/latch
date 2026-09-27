@@ -31,6 +31,10 @@ public enum RemoteServiceEvent: Sendable {
     /// Anything this Mac's service would also report. No sequence for a permission request
     /// raised again from a re-attach's record, or closed because the record no longer has it.
     case agent(LatchAgentEvent, sequence: UInt64?)
+    /// History the agent replayed when a client loaded its session on the server. Only a
+    /// session whose transcript this runtime's journal has built from its start shows it; the
+    /// client that loaded it, and any other that has its transcript, already show it.
+    case replayed(runtimeID: AgentRuntimeID, ACPSessionNotification, sequence: UInt64)
     /// A set-* command succeeded, from this client or another.
     case configurationSet(runtimeID: AgentRuntimeID, LatchRemoteConfigurationSet, sequence: UInt64)
     /// A turn began, from this client or another; `text` and `attachments` are its prompt.

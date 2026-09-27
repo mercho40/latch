@@ -85,6 +85,23 @@ final class LatchRemoteToleranceTests: XCTestCase {
         XCTAssertThrowsError(try decoded(LatchRemoteEvent.self, #"{"requestID":"\#(id)"}"#))
     }
 
+    func testReplayIsAnOptionalMarkOnASessionUpdate() throws {
+        let live = #"{"kind":"sessionUpdate","notification":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk"}}}"#
+        XCTAssertEqual(try decoded(LatchRemoteEvent.self, live), .sessionUpdate(notification: ACPSessionNotification(
+            sessionId: "s", update: .object(["sessionUpdate": .string("agent_message_chunk")])
+        ), replay: false))
+        let explicit = live.replacingOccurrences(of: #""kind""#, with: #""replay":false,"kind""#)
+        XCTAssertEqual(try decoded(LatchRemoteEvent.self, explicit), try decoded(LatchRemoteEvent.self, live))
+        // As a client that predates the mark reads a replayed update: the notification, whose
+        // sequence the record's `loadedThrough` covers.
+        struct OlderEvent: Decodable, Equatable {
+            let kind: String
+            let notification: ACPSessionNotification
+        }
+        let replayed = try encodedString(LatchRemoteEvent.sessionUpdate(notification: Sample.notification, replay: true))
+        XCTAssertEqual(try decoded(OlderEvent.self, replayed), OlderEvent(kind: "sessionUpdate", notification: Sample.notification))
+    }
+
     func testEventFrameWithoutAKindStillCarriesItsSequence() throws {
         for event in [#"{"requestID":"\#(id)"}"#, "[]", "7", "null"] {
             XCTAssertEqual(

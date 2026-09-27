@@ -111,8 +111,9 @@ public struct LatchRemoteRuntimeRecord: Codable, Equatable, Sendable {
     /// In the order they were raised.
     public var pendingPermissions: [LatchRemotePendingPermission]
     public var lastSequence: UInt64
-    /// The ACP `localSequence` of the `loadSession` reply; replayed history at or below it
-    /// is not journaled.
+    /// The ACP `localSequence` of the `loadSession` reply. The history the load replayed is at
+    /// or below it, journaled as `sessionUpdate` marked `replay`; servers before that mark
+    /// did not journal it at all.
     public var loadedThrough: UInt64?
 
     public init(

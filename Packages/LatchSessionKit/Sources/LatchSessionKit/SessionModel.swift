@@ -138,6 +138,13 @@ public final class SessionModel {
     /// After `replaced` was put back: the next event says whether anything after `through`,
     /// which the transcript never had, was lost as well.
     private var lostPast: UInt64?
+    /// The transcript is what this runtime's journal replayed from its start, so it shows the
+    /// history an agent replayed when another client loaded its session. Otherwise that
+    /// history is already in the transcript, which is where the session loaded it from.
+    private var showsReplayedHistory = false
+    /// Output was lost just before the next event. Unless the transcript shows replayed
+    /// history, a loss that the next event shows to be only such history is not news.
+    private var lostBeforeNext = false
     public static let outputLostWhileClosed = "Some output from while Latch was closed could not be recovered."
     public static let outputLostWhileUnreachable = "Some output from while the server was out of reach could not be recovered."
     public static let promptNotSent = "This message was not sent before Latch quit."
@@ -153,10 +160,12 @@ public final class SessionModel {
         guard runtimeIsRemote, let runtimeID, phase == .ready || phase == .prompting else { return nil }
         if phase == .prompting, var turnBoundary {
             turnBoundary.applied = max(appliedSequence, turnBoundary.cursor)
+            turnBoundary.showsReplayedHistory = showsReplayedHistory ? true : nil
             return turnBoundary
         }
         return SavedSession.RemoteBinding(runtimeID: runtimeID.rawValue, cursor: appliedSequence,
-                                          boundaryMessageID: history.messages.last?.id)
+                                          boundaryMessageID: history.messages.last?.id,
+                                          showsReplayedHistory: showsReplayedHistory ? true : nil)
     }
     private var generation = UUID()
     private var promptGeneration = UUID()
@@ -440,6 +449,8 @@ public final class SessionModel {
         defer { resumeAttachWaiter() }
         let adopted = adopting
         adopting = false
+        // An adopted runtime's transcript starts empty, and all of it comes from the journal.
+        showsReplayedHistory = adopted || binding.showsReplayedHistory == true
         if remoteTarget == nil { remoteTarget = (record.agent, record.workspace) }
         let afterLinkFailure = bindingKeptFromLink
         let interrupted = interruptedPrompt
@@ -620,6 +631,7 @@ public final class SessionModel {
         runtimeIsRemote = false
         replaced = nil
         lostPast = nil
+        lostBeforeNext = false
         attaching = nil
         adopting = false
         resumeAttachWaiter()
@@ -683,6 +695,8 @@ public final class SessionModel {
         sessionID = resumingID
         loadedThroughSequence = nil
         appliedSequence = 0
+        // The transcript is this session's own, and a load replays what it already shows.
+        showsReplayedHistory = false
         forgetRemoteRuntime()
         linkState = .connected
         clearConfiguration()
@@ -1056,6 +1070,15 @@ public final class SessionModel {
                 publishHistory()
             }
         }
+        if lostBeforeNext, let (id, _) = event.journalPosition, id == runtimeID {
+            lostBeforeNext = false
+            // Replayed history is journaled before anything else of the runtime, all at once,
+            // so what was lost before some of it was history too.
+            if case .replayed = event {} else {
+                history.appendNotice(Self.outputLostNotice)
+                publishHistory()
+            }
+        }
         // Already in the transcript: a truncated attach's backlog can begin before what the
         // saved transcript shows.
         if let (id, sequence) = event.journalPosition, id == runtimeID, sequence <= appliedSequence { return }
@@ -1077,6 +1100,9 @@ public final class SessionModel {
         case let .agent(event, sequence):
             receive(event)
             if let sequence, event.runtimeID == runtimeID { appliedSequence = max(appliedSequence, sequence) }
+        case let .replayed(id, notification, sequence) where id == runtimeID:
+            if showsReplayedHistory { showReplayed(notification) }
+            appliedSequence = max(appliedSequence, sequence)
         case let .configurationSet(id, configuration, sequence) where id == runtimeID:
             apply(configuration)
             appliedSequence = max(appliedSequence, sequence)
@@ -1096,6 +1122,9 @@ public final class SessionModel {
                 history.appendNotice(Self.outputLostNotice)
             }
             publishHistory()
+        case let .outputLost(id, nil) where id == runtimeID && !showsReplayedHistory:
+            // Evicted before this client read it: the next event says whether that matters.
+            lostBeforeNext = true
         case let .outputLost(id, sequence) where id == runtimeID:
             history.appendNotice(Self.outputLostNotice)
             publishHistory()
@@ -1149,6 +1178,26 @@ public final class SessionModel {
         onChange?()
     }
 
+    /// History another client's load replayed, shown as the conversation so far: the user's
+    /// messages as well as the agent's, since this session sent none of them. State updates
+    /// are left out; the record carried the latest of each.
+    private func showReplayed(_ notification: ACPSessionNotification) {
+        guard notification.sessionId == sessionID else { return }
+        switch notification.event {
+        case let .messageChunk(chunk) where chunk.role == .user:
+            guard let text = chunk.text else { return }
+            history.appendUserChunk(text)
+        case let .messageChunk(chunk) where chunk.role == .agent:
+            guard let text = chunk.text else { return }
+            history.appendAssistant(text)
+        case let .toolCall(tool, _):
+            history.updateTool(tool)
+        default:
+            return
+        }
+        publishHistory()
+    }
+
     private func clearConfiguration() {
         configuration = SessionConfiguration()
         configurationSequence = 0
@@ -1200,7 +1249,7 @@ private extension RemoteServiceEvent {
     var journalPosition: (AgentRuntimeID, UInt64)? {
         switch self {
         case let .agent(event, sequence): sequence.map { (event.runtimeID, $0) }
-        case let .configurationSet(id, _, sequence), let .turnStarted(id, _, _, _, sequence),
+        case let .replayed(id, _, sequence), let .configurationSet(id, _, sequence), let .turnStarted(id, _, _, _, sequence),
              let .turnEnded(id, _, sequence), let .skipped(id, sequence): (id, sequence)
         case let .outputLost(id, sequence): sequence.map { (id, $0) }
         case let .stopped(id, _, sequence): (id, sequence)

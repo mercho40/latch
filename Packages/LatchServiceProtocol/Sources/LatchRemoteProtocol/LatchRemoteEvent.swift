@@ -72,7 +72,11 @@ public struct LatchRemoteExit: Codable, Equatable, Sendable {
 /// unknown kind, or a known kind whose body does not decode, becomes `.unknown` so a client
 /// still advances its cursor past it.
 public enum LatchRemoteEvent: Equatable, Sendable {
-    case sessionUpdate(notification: ACPSessionNotification)
+    /// `replay` marks history the agent replayed when a client loaded its session. The client
+    /// that loaded it already shows it; one that takes up the runtime without a transcript,
+    /// from the start of its journal, shows it as the conversation so far. Its `localSequence`
+    /// is at or below the record's `loadedThrough`, which is how older clients skip it.
+    case sessionUpdate(notification: ACPSessionNotification, replay: Bool = false)
     /// Clients answer with `resolvePermission`.
     case permissionRequested(requestID: UUID, request: ACPPermissionRequest)
     case permissionClosed(requestID: UUID)
@@ -103,7 +107,7 @@ public enum LatchRemoteEvent: Equatable, Sendable {
 
 extension LatchRemoteEvent: Codable {
     private enum CodingKeys: String, CodingKey {
-        case kind, notification, requestID, request, turnID, text, attachments, stopReason, error
+        case kind, notification, replay, requestID, request, turnID, text, attachments, stopReason, error
         case originalKind, byteCount
     }
 
@@ -124,7 +128,10 @@ extension LatchRemoteEvent: Codable {
     ) throws -> LatchRemoteEvent {
         switch kind {
         case "sessionUpdate":
-            return .sessionUpdate(notification: try container.decode(ACPSessionNotification.self, forKey: .notification))
+            return .sessionUpdate(
+                notification: try container.decode(ACPSessionNotification.self, forKey: .notification),
+                replay: try container.decodeIfPresent(Bool.self, forKey: .replay) ?? false
+            )
         case "permissionRequested":
             return .permissionRequested(
                 requestID: try container.decode(UUID.self, forKey: .requestID),
@@ -163,8 +170,10 @@ extension LatchRemoteEvent: Codable {
         try container.encode(kind, forKey: .kind)
 
         switch self {
-        case let .sessionUpdate(notification):
+        case let .sessionUpdate(notification, replay):
             try container.encode(notification, forKey: .notification)
+            // Left out unless set, so live updates keep the shape every client knows.
+            if replay { try container.encode(true, forKey: .replay) }
         case let .permissionRequested(requestID, request):
             try container.encode(requestID, forKey: .requestID)
             try container.encode(request, forKey: .request)

@@ -478,7 +478,9 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         case let .event(sequence, event):
             let skipped = RemoteServiceEvent.skipped(runtimeID: id, sequence: sequence)
             switch event {
-            case let .sessionUpdate(notification):
+            case let .sessionUpdate(notification, replay: true):
+                return [.replayed(runtimeID: id, notification, sequence: sequence)]
+            case let .sessionUpdate(notification, replay: false):
                 return [.agent(.sessionUpdate(runtimeID: id, notification: notification), sequence: sequence)]
             case let .permissionRequested(requestID, request):
                 guard permissions.raise(requestID, at: sequence) else { return [skipped] }

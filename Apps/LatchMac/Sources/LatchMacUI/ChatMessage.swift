@@ -130,6 +130,14 @@ struct ChatHistory: Sendable {
         }
     }
 
+    /// Keeps the messages up to and including `id` and drops the rest, as a journal is about
+    /// to replay them. A boundary no longer held was evicted, so it is older than every message
+    /// left, and none of them is kept; neither is any when there was no message at the boundary.
+    mutating func removeMessages(after id: UUID?) {
+        let kept = id.flatMap { id in messages.firstIndex { $0.id == id } }.map { $0 + 1 } ?? 0
+        restore(Array(messages.prefix(kept)))
+    }
+
     mutating func appendUser(_ text: String, attachments: [ChatAttachment] = []) {
         guard !attachments.isEmpty else {
             append(text, role: .user, newMessage: true)
@@ -145,6 +153,17 @@ struct ChatHistory: Sendable {
 
     mutating func appendAssistant(_ text: String) {
         append(text, role: .assistant)
+    }
+
+    /// A line of Latch's own in the agent's column, such as for output that could not be
+    /// shown. It stands alone, so the agent's next chunk starts a message of its own, and the
+    /// same notice twice in a row is written once.
+    mutating func appendNotice(_ text: String) {
+        let line = "_\(text)_"
+        guard messages.last?.text != line else { return }
+        append(line, role: .assistant, newMessage: true)
+        adjacentRole = nil
+        adjacentMessageID = nil
     }
 
     mutating func updateTool(_ event: ACPToolCallEvent) {

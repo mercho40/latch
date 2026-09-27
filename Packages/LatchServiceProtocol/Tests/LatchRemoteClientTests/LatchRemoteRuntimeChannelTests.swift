@@ -511,6 +511,18 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         _ = try await response
     }
 
+    func testOnlyACompletedHandshakeCountsAsConnected() async throws {
+        let channel = channel!
+        channel.start()
+        let peer = try await server.nextConnection()
+        XCTAssertFalse(channel.hasConnected)
+        _ = try await peer.acceptHello()
+        _ = try await observer.waitForLink { $0 == .connected }
+        XCTAssertTrue(channel.hasConnected)
+        channel.close()
+        XCTAssertTrue(channel.hasConnected, "Closing does not forget what may have been sent")
+    }
+
     func testAProbeReconnectsWithoutWaitingOutTheBackoff() async throws {
         var options = server.channelOptions()
         options.backoff = LatchRemoteBackoff(initial: .seconds(10), maximum: .seconds(30))

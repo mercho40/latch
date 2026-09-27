@@ -1,5 +1,6 @@
-import Foundation
+import AppKit
 import LatchAgentCore
+import LatchRemoteClient
 import LatchServiceProtocol
 
 /// The one place a remote-located session meets the network. A remote session's model gets
@@ -24,20 +25,78 @@ final class UnconnectedRemoteSessionConnector: RemoteSessionConnector {
     func makeClient(serverID: UUID) -> AgentServiceClient { UnconnectedAgentServiceClient() }
 }
 
+/// Connects remote sessions through `LatchRemoteRuntimeChannel`, reading each server from
+/// the store as its sessions launch, so a token changed in Settings is used from the next one.
+@MainActor
+final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnector {
+    let servers: any ServerStore
+    private let backoff: LatchRemoteBackoff
+    private let firstConnectionLimit: Duration
+    /// Every client handed out that is still alive, to wake them all at once.
+    private var clients: [WeakClient] = []
+
+    private struct WeakClient {
+        weak var client: RemoteAgentServiceClient?
+    }
+
+    /// `notificationCenter` is the one that posts `didWakeNotification`; tests pass their own.
+    init(servers: any ServerStore, backoff: LatchRemoteBackoff = LatchRemoteBackoff(),
+         firstConnectionLimit: Duration = .seconds(15),
+         notificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter) {
+        self.servers = servers
+        self.backoff = backoff
+        self.firstConnectionLimit = firstConnectionLimit
+        super.init()
+        notificationCenter.addObserver(self, selector: #selector(didWake),
+                                       name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    func makeClient(serverID: UUID) -> AgentServiceClient {
+        guard let server = servers.server(id: serverID) else {
+            return UnconnectedAgentServiceClient(failure: RemoteSessionNotConnected.serverRemoved)
+        }
+        let client = RemoteAgentServiceClient(server: server, backoff: backoff, firstConnectionLimit: firstConnectionLimit) { [weak self] in
+            self?.servers.server(id: serverID)
+        }
+        clients.removeAll { $0.client == nil }
+        clients.append(WeakClient(client: client))
+        return client
+    }
+
+    /// The clients still in use, for waking and for tests.
+    var liveClients: [RemoteAgentServiceClient] { clients.compactMap(\.client) }
+
+    /// A Mac that slept has usually lost its connections without hearing so. Checking each
+    /// link now reconnects at once rather than after a heartbeat or a backoff wait.
+    @objc private func didWake() {
+        for client in liveClients {
+            Task { await client.probe() }
+        }
+    }
+}
+
 /// A channel that reaches nothing. Its event stream stays open until it is closed, because
 /// a finished stream reads to `SessionModel` as a lost service and it would reopen one.
 final class UnconnectedAgentServiceClient: AgentServiceClient {
     let events: AsyncStream<LatchAgentEvent>
     private let continuation: AsyncStream<LatchAgentEvent>.Continuation
+    private let failure: RemoteSessionNotConnected
 
-    init() { (events, continuation) = AsyncStream.makeStream() }
+    init(failure: RemoteSessionNotConnected = RemoteSessionNotConnected()) {
+        self.failure = failure
+        (events, continuation) = AsyncStream.makeStream()
+    }
 
     func execute(_ command: LatchAgentCommand) async throws -> LatchAgentResponse {
-        throw RemoteSessionNotConnected()
+        throw failure
     }
 
     func launch(_ launch: AgentLaunch, id: AgentRuntimeID) async throws -> LatchAgentResponse {
-        throw RemoteSessionNotConnected()
+        throw failure
+    }
+
+    func attach(runtimeID: AgentRuntimeID, after cursor: UInt64) async throws -> LatchRemoteAttachment {
+        throw failure
     }
 
     func close() { continuation.finish() }
@@ -46,5 +105,11 @@ final class UnconnectedAgentServiceClient: AgentServiceClient {
 }
 
 struct RemoteSessionNotConnected: RemoteConnectionFailure, LocalizedError {
-    var errorDescription: String? { "Not connected." }
+    var message = "Not connected."
+    var errorDescription: String? { message }
+
+    static let serverRemoved = RemoteSessionNotConnected(message: "This session’s server is no longer in Settings.")
 }
+
+/// Every way a channel fails is a failure to reach its server.
+extension LatchRemoteClientError: RemoteConnectionFailure {}

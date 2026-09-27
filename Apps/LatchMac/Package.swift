@@ -29,6 +29,8 @@ let package = Package(
             "LatchMacUI", "LatchServiceProtocol",
             .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
             .product(name: "LatchRemoteClient", package: "LatchServiceProtocol"),
+            // A real latch-server in the test process, for remote sessions end to end.
+            .product(name: "LatchAgentServer", package: "LatchAgentCore"),
         ]),
     ]
 )

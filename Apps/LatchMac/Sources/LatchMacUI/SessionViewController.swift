@@ -31,7 +31,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                      messages: pendingNewContext ? [] : model.messages,
                      agentSessionID: pendingNewContext ? nil : model.savedAgentSessionID,
                      lastActiveAt: model.lastActiveAt,
-                     serverID: location.serverID)
+                     serverID: location.serverID,
+                     remote: pendingNewContext ? nil : model.remoteBinding)
     }
 
     /// The server's name for a remote session, even once the server has left Settings.
@@ -83,6 +84,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// end_turn" and "Connected ·" never reach the list.
     func sidebarRow(now: Date) -> (status: SessionCellView.Status, detail: String) {
         if model.permissions.current != nil { return (.waiting, "Waiting for a decision") }
+        // Ahead of a failure: a live session's error is an earlier prompt's or change's, and
+        // the lost link is what matters now.
+        if let reconnecting = reconnectingTitle { return (.working, reconnecting) }
         if model.errorMessage != nil {
             return (.failed, model.status == "Not connected" ? "Couldn’t connect" : model.status)
         }
@@ -113,7 +117,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     var menuBarRow: MenuBarSession {
-        MenuBarSession(id: id, title: sessionTitle, status: displayStatus,
+        MenuBarSession(id: id, title: sessionTitle, status: reconnectingTitle ?? displayStatus,
                        phase: model.phase, needsPermission: model.permissions.current != nil)
     }
 
@@ -193,6 +197,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// there must never reach the window's session-level undo.
     private let composerUndo = UndoManager()
     private var shuttingDown = false
+    /// Attached to a runtime left on a server before the view was ever loaded.
+    private var reattachedAtLaunch = false
     /// Connection problems and their remedies. Fixed-height chrome is gone: the banner
     /// appears above the transcript only while there is something to say. It is the
     /// session's whole error surface, so tests read it rather than a hidden label.
@@ -281,7 +287,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             sessionTitle = savedSession.title
             prompt.string = savedSession.draft
             model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID,
-                          lastActiveAt: savedSession.lastActiveAt)
+                          lastActiveAt: savedSession.lastActiveAt,
+                          remote: location.isRemote ? savedSession.remote : nil)
         } else {
             // A new session was last active when it was made, so it sorts and reads as "now".
             model.restore(messages: [], agentSessionID: nil, lastActiveAt: model.now())
@@ -311,7 +318,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         view = NSView()
         buildContent()
         updateAgentCommand()
-        initializeSelection()
+        // Already on its way back to its server's runtime; connecting again would stop it.
+        if reattachedAtLaunch { refresh() } else { initializeSelection() }
     }
 
     private func buildContent() {
@@ -617,10 +625,35 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         return catalog.status(for: preset).readiness.badge
     }
 
+    /// "Reconnecting to vps…" while a live remote session's server is out of reach. The
+    /// session stays as it was: the turn, the agent and any pending decision wait for it.
+    /// Named as Settings has the server now, in case it was renamed since the launch.
+    private var reconnectingTitle: String? {
+        guard case let .reconnecting(server, _) = model.linkState, model.phase != .disconnected else { return nil }
+        let name = serverName ?? server
+        return model.phase == .connecting ? "Connecting to \(name)…" : "Reconnecting to \(name)…"
+    }
+
     /// The single place a connection problem is reported. Keyed on the failure itself, so
     /// dismissing one keeps it dismissed while nothing has changed, and a different failure
     /// always gets its say.
     private func refreshBanner() {
+        // Waiting for a server is not a failure, but it explains why nothing is arriving, and
+        // it outranks an earlier prompt's error. Keyed on the outage, so a dismissed one stays
+        // dismissed. A server not yet reached may be misconfigured, so Settings is offered.
+        if let reconnecting = reconnectingTitle, case let .reconnecting(_, since) = model.linkState,
+           launchProblem == nil, !shuttingDown {
+            let message = switch model.phase {
+            case .connecting: "It has not answered yet. Latch keeps trying for a few seconds."
+            case .prompting: "The agent keeps working on the server. Latch catches up once it answers again."
+            default: "The agent is still running there. Latch reconnects on its own."
+            }
+            banner.update(key: "link\u{0}\(since.timeIntervalSinceReferenceDate)\u{0}\(message)", title: reconnecting,
+                          message: message, severity: .info,
+                          actions: model.phase == .connecting ? [serverSettingsAction] : [])
+            bannerRow.isHidden = banner.isHidden
+            return
+        }
         // A refused attachment is said once, and never over a failure, which has its own
         // remedy to offer.
         if let notice = attachmentNotice, model.errorMessage == nil, launchProblem == nil, !shuttingDown {
@@ -662,14 +695,18 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             actions: [
                 SessionBannerView.Action(title: "Retry") { [weak self] in self?.retryConnection() },
                 location.isRemote
-                    ? SessionBannerView.Action(title: "Server Settings…") {
-                        NSApp.sendAction(#selector(LatchApplicationDelegate.showServerSettings(_:)), to: nil, from: nil)
-                    }
+                    ? serverSettingsAction
                     : SessionBannerView.Action(title: "Agent Settings…") {
                         NSApp.sendAction(#selector(LatchApplicationDelegate.showAgentSettings(_:)), to: nil, from: nil)
                     },
             ])
         bannerRow.isHidden = banner.isHidden
+    }
+
+    private var serverSettingsAction: SessionBannerView.Action {
+        SessionBannerView.Action(title: "Server Settings…") {
+            NSApp.sendAction(#selector(LatchApplicationDelegate.showServerSettings(_:)), to: nil, from: nil)
+        }
     }
 
     /// Whose failure it is. A remote session names its server: an unreachable server is not
@@ -679,6 +716,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             return disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem"
         }
         if model.errorIsConnectionFailure { return "Can’t connect to \(serverName)" }
+        if disconnected, case .failed(_, _, runtimeGone: true) = model.linkState {
+            return "\(selectedAgent.title) stopped on \(serverName)"
+        }
         return disconnected ? "\(selectedAgent.title) can’t start on \(serverName)" : "\(selectedAgent.title) reported a problem"
     }
 
@@ -985,14 +1025,15 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     /// Serialize teardown, asking the model to unblock initialization BEFORE awaiting it.
-    private func drainConnection() -> Task<Void, Never> {
+    /// `detaching` leaves a remote runtime running rather than stopping it.
+    private func drainConnection(detaching: Bool = false) -> Task<Void, Never> {
         actionGeneration = UUID()
         let pending = operationTask
         pending?.cancel()
         let previousDrain = drainTask
         let drain = Task {
             await previousDrain?.value
-            await model.disconnect()
+            if detaching { await model.detach() } else { await model.disconnect() }
             await pending?.value
         }
         drainTask = drain
@@ -1058,6 +1099,17 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         refresh()
         onChange?()
+    }
+
+    /// Attaches, as Latch launches, to the runtime its last run left on a server, whether or
+    /// not this session is on screen: a turn that finished while Latch was closed, or a
+    /// decision the agent is waiting for, reaches the notifications, the Dock badge and the
+    /// menu bar now rather than when the session is next selected.
+    func reattachAtLaunch() {
+        guard location.isRemote, !isViewLoaded, !reattachedAtLaunch, model.remoteBinding != nil else { return }
+        reattachedAtLaunch = true
+        updateAgentCommand()
+        initializeSelection()
     }
 
     /// A server was renamed, removed, or given another custom command.
@@ -1208,13 +1260,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
     }
 
-    func shutdown() async {
+    /// Why a session is being taken down.
+    enum Teardown {
+        /// Closed, or its harness switched: its agent stops, wherever it runs.
+        case close
+        /// Latch is quitting. An agent on this Mac stops with it; one on a server keeps
+        /// running, and the next launch attaches to it again.
+        case quit
+    }
+
+    func shutdown(for teardown: Teardown = .close) async {
         shuttingDown = true
-        let drain = drainConnection()
+        let drain = drainConnection(detaching: teardown == .quit && location.isRemote)
         operation = nil
         operationTask = nil
         refresh()
         await drain.value
+        // A runtime left by the last run of Latch that this one never attached to.
+        if teardown == .close { await model.discardRemoteBinding() }
     }
 
     func shutdownInitialSmokeConnection() async {
@@ -1526,6 +1589,62 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             try await wait { self.model.phase == .ready && self.model.transcript.contains(result) && self.permissionAlert == nil }
             disconnect()
             try await wait { self.model.phase == .disconnected && self.operation == nil }
+        }
+    }
+
+    /// The remote smoke's conversation, through the real composer and sheet on a session whose
+    /// agent runs on a server: a streamed reply, a permission approved in its sheet, and a turn
+    /// that goes on through a dropped connection, runs once, and whose output from while the
+    /// link was down is replayed once it is back.
+    func smokeTestRemoteConversation(workspace: URL, dropConnection: () -> Void,
+                                     reconnect: () async -> Void) async throws {
+        try await wait { self.model.phase == .ready && self.operation == nil }
+        guard model.errorMessage == nil, bannerRow.isHidden, model.linkState == .connected else {
+            throw SmokeError.failed("The remote session did not connect cleanly: \(model.status)")
+        }
+        func submit(_ text: String) {
+            prompt.string = text
+            refresh()
+            send.performClick(nil)
+        }
+        submit("Say hello")
+        try await wait { self.model.phase == .ready && self.model.messages.last?.text == "one two three" }
+
+        submit("Ask permission")
+        try await wait { self.permissionAlert != nil }
+        // The sheet's first button cancels the request; the agent's own options follow it.
+        guard let alert = permissionAlert?.alert, alert.buttons.count == 3 else {
+            throw SmokeError.failed("The permission sheet did not offer the agent's two options")
+        }
+        alert.buttons[1].performClick(nil)
+        try await wait {
+            self.model.phase == .ready && self.permissionAlert == nil && self.model.messages.last?.text == "asking allowed"
+        }
+
+        submit("Go slow")
+        try await wait { self.model.phase == .prompting && self.model.messages.last?.text == "one " }
+        dropConnection()
+        try await wait { if case .reconnecting = self.model.linkState { true } else { false } }
+        guard banner.displayedTitle == "Reconnecting to \(serverName ?? "")…", model.phase == .prompting else {
+            throw SmokeError.failed("A dropped link did not read as reconnecting: \(banner.displayedTitle)")
+        }
+        // The agent finishes the turn on the server while the link is down.
+        try await wait { FileManager.default.fileExists(atPath: workspace.appendingPathComponent("slow.log").path) }
+        guard model.phase == .prompting, model.messages.last?.text == "one ", case .reconnecting = model.linkState else {
+            throw SmokeError.failed("The turn went on without the link: \(model.messages.map(\.text))")
+        }
+        await reconnect()
+        try await wait {
+            self.model.phase == .ready && self.model.linkState == .connected
+                && self.model.messages.last?.text == "one two three"
+        }
+        let prompts = (try? String(contentsOf: workspace.appendingPathComponent("prompts.log"), encoding: .utf8))?
+            .split(separator: "\n").count ?? 0
+        guard model.status == "Ready · end_turn", model.errorMessage == nil, bannerRow.isHidden, prompts == 3,
+              model.messages.map(\.text) == ["Say hello", "one two three", "Ask permission", "asking allowed",
+                                              "Go slow", "one two three"] else {
+            throw SmokeError.failed("The turn did not survive the dropped link exactly once "
+                + "(\(model.status), \(prompts) prompts, \(model.messages.map(\.text)))")
         }
     }
 

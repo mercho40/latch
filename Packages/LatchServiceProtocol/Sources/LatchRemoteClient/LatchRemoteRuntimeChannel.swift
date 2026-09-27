@@ -153,6 +153,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         var endedTurns: [UUID: LatchRemoteTurnOutcome] = [:]
         var endedTurnOrder: [UUID] = []
         var exited = false
+        var hasConnected = false
     }
 
     private struct RecordOutcomes {
@@ -191,6 +192,13 @@ public final class LatchRemoteRuntimeChannel: Sendable {
 
     public var linkState: LatchRemoteLinkState {
         core.withLock { $0.link }
+    }
+
+    /// Whether a connection has ever been made. Nothing is sent before the first one, so a
+    /// channel that never connected has told the server nothing; read after `close()`, which
+    /// stops it connecting, the answer is final.
+    public var hasConnected: Bool {
+        core.withLock { $0.hasConnected }
     }
 
     /// The last sequence delivered on `events`; 0 before the first.
@@ -516,6 +524,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
     }
 
     private func connected(_ core: inout Core) {
+        core.hasConnected = true
         core.failures = 0
         core.commandsReady = true
         core.lostAt = nil

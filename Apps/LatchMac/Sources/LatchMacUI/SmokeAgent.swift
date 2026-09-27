@@ -46,4 +46,46 @@ enum SmokeAgent {
       esac
     done
     """#
+
+    /// The remote smoke's agent, run by a real `latch-server` from a file in its workspace.
+    /// It writes its PID so the script can tell it outlived the app, and counts the prompts that
+    /// reached it. `slow` pauses mid-turn, and writes `slow.log` once the rest of its turn is out,
+    /// so the smoke can bring a dropped connection back only after that.
+    /// The app tests' `RemoteMockAgent` is the fuller version; keep the two matching the JSON Latch writes.
+    static let remoteScript = #"""
+    echo $$ > agent.pid
+    prompt_id=
+    reply() { printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$1" "$2"; }
+    chunk() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1"; }
+    while IFS= read -r line; do
+      id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      case "$line" in
+        *\"method\":\"initialize\"*)
+          reply "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":false},"agentInfo":{"name":"remote-smoke","version":"1.0.0"}}'
+          ;;
+        *\"method\":\"session*new\"*)
+          reply "$id" '{"sessionId":"session-1"}'
+          ;;
+        *\"method\":\"session*prompt\"*)
+          echo prompt >> prompts.log
+          prompt_id=$id
+          case "$line" in
+            *permission*)
+              chunk 'asking '
+              printf '%s\n' '{"jsonrpc":"2.0","id":900,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"edit-1","title":"Edit notes.txt"},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+              ;;
+            *slow*) chunk 'one '; sleep 1; chunk 'two '; chunk three; echo done >> slow.log; reply "$id" '{"stopReason":"end_turn"}' ;;
+            *) chunk 'one '; chunk 'two '; chunk three; reply "$id" '{"stopReason":"end_turn"}' ;;
+          esac
+          ;;
+        *\"id\":900[,}]*)
+          case "$line" in
+            *allow-once*) chunk allowed ;;
+            *) chunk refused ;;
+          esac
+          reply "$prompt_id" '{"stopReason":"end_turn"}'
+          ;;
+      esac
+    done
+    """#
 }

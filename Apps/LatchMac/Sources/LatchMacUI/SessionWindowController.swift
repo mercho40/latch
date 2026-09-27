@@ -241,12 +241,15 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// the session rather than an empty row.
     private func close(_ session: SessionViewController) {
         guard !shuttingDown, restoreFinished else { return }
-        let snapshot = session.savedSession
+        var snapshot = session.savedSession
+        // The close stops the runtime, so undo resumes the agent's context in a new one
+        // rather than attaching to one being stopped.
+        snapshot.remote = nil
         let environment = session.injectedEnvironment
         guard let slot = sidebar.remove(session) else { return }
         let token = UUID()
         closing[token] = Task { [weak self] in
-            await session.shutdown()
+            await session.shutdown(for: .close)
             self?.closing[token] = nil
         }
         sessionUndo.setActionName("Close Session")
@@ -401,7 +404,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         guard attention != nil || menuBar != nil else { return }
         var states: [UUID: AttentionCenter.State] = [:]
         for session in sidebar.allSessions { states[session.id] = session.attention }
-        attention?.update(states)
+        // Quitting ends a remote turn's wait here, not the turn: it must not read as finished.
+        if !shuttingDown { attention?.update(states) }
         menuBar?.refresh()
     }
 
@@ -419,6 +423,9 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
                 // Building the sidebar must not start every saved command.
                 sidebar.add(session, selecting: false)
             }
+            // Except the runtimes a quit left running on servers: those are attached to now,
+            // before selecting one loads its view, so nothing they did meanwhile waits for a click.
+            for session in sidebar.allSessions { session.reattachAtLaunch() }
             sidebar.select(sidebar.allSessions.first { $0.id == library.selectedSessionID })
             persistenceReady = true
         } catch {
@@ -491,8 +498,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         attention?.clear()
         await flushPersistence()
         for task in closing.values { await task.value }
-        for session in sidebar.allSessions { await session.shutdown() }
-        // Teardown may deliver a final chunk. IDs, drafts and history survive disconnect.
+        for session in sidebar.allSessions { await session.shutdown(for: .quit) }
+        // Teardown may deliver a final chunk. IDs, drafts and history survive disconnect, and
+        // a remote session's binding survives quitting, so this save is what the next launch
+        // attaches with.
         await flushPersistence()
     }
 
@@ -728,6 +737,38 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         try smokeTestFind(first)
         try smokeTestMenuBarListing()
         try smokeTestCloseAndUndo(second)
+    }
+
+    struct RemoteSmokeReport {
+        let transport: String
+        let runtimeID: String
+        let agentPID: String
+    }
+
+    /// The remote smoke, against a real `latch-server`: a session on it made through the window,
+    /// then its conversation. Quitting afterwards is the application's, through the real path.
+    func smokeTestRemote(serverID: UUID, workspace: URL) async throws -> RemoteSmokeReport {
+        guard let connector = remoteConnector as? ChannelRemoteSessionConnector,
+              let server = servers.server(id: serverID) else {
+            throw SmokeError.failed("The remote smoke has no server to reach")
+        }
+        let session = addRemoteSession(serverID: serverID, path: workspace.path, agent: .custom)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        guard sidebar.selectedSession === session, detail.children.first === session,
+              session.locationTitle == "\(server.name) · \(workspace.path)" else {
+            throw SmokeError.failed("The remote session was not added and selected under its server")
+        }
+        try await session.smokeTestRemoteConversation(workspace: workspace) {
+            for client in connector.liveClients { client.dropConnectionForTesting() }
+        } reconnect: {
+            for client in connector.liveClients { await client.probe() }
+        }
+        guard let runtimeID = session.model.remoteBinding?.runtimeID else {
+            throw SmokeError.failed("The remote session has no runtime to leave running")
+        }
+        let pid = (try? String(contentsOf: workspace.appendingPathComponent("agent.pid"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return RemoteSmokeReport(transport: session.model.serviceTransportDescription, runtimeID: runtimeID, agentPID: pid)
     }
 
     /// ⌘F over a real transcript: the bar takes its strip above the conversation, matches

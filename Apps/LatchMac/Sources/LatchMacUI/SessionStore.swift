@@ -18,6 +18,37 @@ struct SavedSession: Codable, Equatable, Sendable {
     /// The server the session runs on, or nil for this Mac. For a remote session
     /// `workspacePath` is a path on that server, never one on this Mac.
     var serverID: UUID? = nil
+    /// The runtime a remote session left running on its server when Latch quit, and how far
+    /// `messages` has followed its journal, so a relaunch attaches to it again. Saved in the
+    /// same snapshot as the messages, so the two always agree. Nil for a session on this Mac,
+    /// and for one that was closed: closing stops the runtime.
+    var remote: RemoteBinding? = nil
+
+    struct RemoteBinding: Codable, Equatable, Sendable {
+        var runtimeID: String
+        /// The last journal sequence `messages` reflects: the one before the running turn's
+        /// start, or the last one applied when no turn was running.
+        var cursor: UInt64
+        /// The last message that `cursor` accounts for. Anything after it is output of the
+        /// running turn, replayed from the journal on attach. IDs, not a count, because the
+        /// history evicts its oldest messages.
+        var boundaryMessageID: UUID?
+        /// The turn running at `cursor`, whose prompt is already the boundary message.
+        var boundaryTurnID: UUID?
+        /// The last journal sequence applied at all, past `cursor` while a turn runs. A journal
+        /// evicted past `cursor` cannot replay the turn from its prompt, so the relaunch keeps
+        /// the saved transcript and takes up only what comes after this.
+        var applied: UInt64
+
+        init(runtimeID: String, cursor: UInt64, boundaryMessageID: UUID? = nil, boundaryTurnID: UUID? = nil,
+             applied: UInt64? = nil) {
+            self.runtimeID = runtimeID
+            self.cursor = cursor
+            self.boundaryMessageID = boundaryMessageID
+            self.boundaryTurnID = boundaryTurnID
+            self.applied = max(applied ?? cursor, cursor)
+        }
+    }
 }
 
 struct SavedSessionLibrary: Codable, Equatable, Sendable {
@@ -128,7 +159,9 @@ actor SessionStore {
         for session in library.sessions {
             guard sessionIDs.insert(session.id).inserted,
                   AgentPreset(rawValue: session.agentID) != nil,
-                  session.messages.count <= ChatHistory.maximumMessageCount else {
+                  session.messages.count <= ChatHistory.maximumMessageCount,
+                  // Only a session on a server can have left a runtime running there.
+                  session.remote.map({ !$0.runtimeID.isEmpty && session.serverID != nil }) ?? true else {
                 throw StoreError.invalidLibrary
             }
             var remaining = ChatHistory.maximumTextCount

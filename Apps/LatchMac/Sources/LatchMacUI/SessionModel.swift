@@ -1,6 +1,7 @@
 import Foundation
 import LatchACP
 import LatchAgentCore
+import LatchRemoteClient
 import LatchRemoteProtocol
 import LatchServiceProtocol
 
@@ -31,21 +32,28 @@ final class SessionModel {
     /// History is already current; consumers may coalesce its rendering only.
     var onTranscriptChange: (() -> Void)?
     var serviceTransportDescription: String { client.transportDescription }
+    /// Whether a remote session's server can be reached. Always `.connected` on this Mac. A
+    /// lost link changes nothing else: the runtime, the turn in flight and any permission
+    /// sheet all wait for it to come back.
+    private(set) var linkState = SessionLinkState.connected
 
     let permissions = PermissionQueue()
     private var sessionID: String?
-    /// Agent-owned context identity survives runtime teardown. Never persist a runtime ID.
+    /// Agent-owned context identity survives runtime teardown. Local runtime IDs are never
+    /// persisted; remote ones are, in `remoteBinding`, because the server outlives the app.
     private(set) var savedAgentSessionID: String?
     /// History restored without the agent's session ID. It can be read, never continued: there is
     /// no context to resume, and prompting a fresh agent under an old transcript would misrepresent it.
     private(set) var archivedWithoutContext = false
     private var loadedThroughSequence: UInt64?
 
-    func restore(messages: [ChatMessage], agentSessionID: String?, lastActiveAt: Date? = nil) {
+    func restore(messages: [ChatMessage], agentSessionID: String?, lastActiveAt: Date? = nil,
+                 remote: SavedSession.RemoteBinding? = nil) {
         guard phase == .disconnected else { return }
         self.lastActiveAt = lastActiveAt
         history.restore(messages)
         savedAgentSessionID = agentSessionID
+        savedBinding = remote
         archivedWithoutContext = agentSessionID == nil && !messages.isEmpty
         status = Self.idleSavedStatus
         onChange?()
@@ -56,6 +64,48 @@ final class SessionModel {
     /// Brokered permission decisions in flight, keyed by the service's request ID.
     private var permissionTasks: [UUID: Task<Void, Never>] = [:]
     private var runtimeID: AgentRuntimeID?
+    /// The turn `send` is waiting for, or one an attach found running, under the ID a server
+    /// knows it by.
+    private(set) var turnID: UUID?
+    /// The last journal sequence of this runtime that has been taken in. Zero on this Mac.
+    private(set) var appliedSequence: UInt64 = 0
+    /// A remote runtime this session is not following yet, or no longer: restored with the
+    /// session, or kept when Latch quit. The next remote connection attaches to it rather than
+    /// launching another.
+    private var savedBinding: SavedSession.RemoteBinding?
+    /// The runtime was launched on, or attached to, a server, which keeps it when Latch quits.
+    private var runtimeIsRemote = false
+    /// The binding an attach in flight is for, until its record arrives.
+    private var attaching: (id: AgentRuntimeID, binding: SavedSession.RemoteBinding)?
+    /// The attach waiting for its record to be taken in, so it returns with the session ready.
+    private var attachWaiter: CheckedContinuation<Void, Never>?
+    /// Where the transcript stood when the running turn began; see `remoteBinding`.
+    private var turnBoundary: SavedSession.RemoteBinding?
+    /// Turns whose prompts the transcript already shows, so their `turnStarted` is not shown
+    /// again: sent from here, or the turn a saved binding was running.
+    private var knownTurns: [UUID] = []
+    /// An attach found the runtime exited. Its exit is shown once its last output is in.
+    private var pendingExit: (through: UInt64, status: Int32)?
+    /// The turn a saved binding was sending that the server's record does not know. Unless
+    /// the backlog up to `through` shows it starting, the prompt never left this Mac.
+    private var unsentTurn: (turn: UUID, through: UInt64)?
+    static let outputLostWhileClosed = "Some output from while Latch was closed could not be recovered."
+    static let promptNotSent = "This message was not sent before Latch quit."
+
+    /// What a relaunch needs to attach to this session's runtime again, saved in the same
+    /// snapshot as `messages`. While a turn runs, the transcript is cut back to its prompt and
+    /// the turn replayed from the journal, because a restored transcript never merges later
+    /// output into an earlier message; otherwise it continues from the last sequence applied.
+    var remoteBinding: SavedSession.RemoteBinding? {
+        if let savedBinding { return savedBinding }
+        guard runtimeIsRemote, let runtimeID, phase == .ready || phase == .prompting else { return nil }
+        if phase == .prompting, var turnBoundary {
+            turnBoundary.applied = max(appliedSequence, turnBoundary.cursor)
+            return turnBoundary
+        }
+        return SavedSession.RemoteBinding(runtimeID: runtimeID.rawValue, cursor: appliedSequence,
+                                          boundaryMessageID: history.messages.last?.id)
+    }
     private var generation = UUID()
     private var promptGeneration = UUID()
     private var authenticationStop: (token: UUID, task: Task<Void, Never>)?
@@ -103,6 +153,17 @@ final class SessionModel {
 
     private func startEventTask() {
         eventTask?.cancel()
+        if let remoteEvents = client.remoteEvents {
+            eventTask = Task { [weak self] in
+                for await event in remoteEvents {
+                    guard !Task.isCancelled else { return }
+                    self?.receive(event)
+                }
+                guard !Task.isCancelled else { return }
+                self?.serviceConnectionLost()
+            }
+            return
+        }
         eventTask = Task { [weak self, events = client.events] in
             for await event in events {
                 guard !Task.isCancelled else { return }
@@ -120,13 +181,21 @@ final class SessionModel {
         client = makeClient()
         startEventTask()
         guard phase != .disconnected else { return }
+        // A server that turned the session away for good said why, naming itself. One that
+        // answered but has lost the agent is reachable: the agent stopped, not the link.
+        if case let .failed(_, reason, runtimeGone) = linkState {
+            resetAfterLoss(status: runtimeGone ? "Agent stopped" : "Not connected", error: reason,
+                           connectionFailure: !runtimeGone)
+            return
+        }
         resetAfterLoss(status: "Agent service disconnected",
                        error: "Lost the connection to the Latch agent service. Select the agent again to reconnect.")
     }
 
-    private func resetAfterLoss(status: String, error: String) {
+    private func resetAfterLoss(status: String, error: String, connectionFailure: Bool = false) {
         generation = UUID()
         runtimeID = nil
+        forgetRemoteRuntime()
         sessionID = nil
         clearConfiguration()
         cancellationRequested = false
@@ -136,6 +205,7 @@ final class SessionModel {
         phase = .disconnected
         self.status = status
         errorMessage = error
+        errorIsConnectionFailure = connectionFailure
         onChange?()
     }
 
@@ -165,7 +235,234 @@ final class SessionModel {
     /// launch is the local path's.
     func connect(remote agent: LatchRemoteAgent, path: String, startNewSession: Bool = false) async {
         guard beginConnecting(startNewSession: startNewSession) else { return }
+        if let binding = savedBinding {
+            guard startNewSession else { return await reattach(binding, agent: agent, path: path) }
+            // A new context replaces the one that runtime holds, so nothing will attach to it again.
+            await discardRemoteBinding()
+        }
         await launch(.remote(agent: agent, path: path), cwd: path, startNewSession: startNewSession)
+    }
+
+    /// Attaches to the runtime the last run of Latch left on the server rather than launching
+    /// another. The record arrives ahead of the backlog, in `receive(.attached)`, which
+    /// rebuilds the session from it. A server that no longer has the runtime gets the resume
+    /// path, as after any lost runtime.
+    private func reattach(_ binding: SavedSession.RemoteBinding, agent: LatchRemoteAgent, path: String) async {
+        let token = UUID()
+        generation = token
+        let id = AgentRuntimeID(binding.runtimeID)
+        attaching = (id, binding)
+        runtimeID = nil
+        sessionID = nil
+        linkState = .connected
+        clearConfiguration()
+        phase = .connecting
+        status = "Resuming…"
+        onChange?()
+        do {
+            _ = try await client.attach(runtimeID: id, after: binding.cursor)
+            // The record comes with the events, which may not have been read yet.
+            if generation == token, attaching != nil {
+                await withCheckedContinuation { attachWaiter = $0 }
+            }
+        } catch is RemoteRuntimeGone {
+            guard generation == token else { return }
+            attaching = nil
+            savedBinding = nil
+            // Whatever the turn running at quit went on to say went with the runtime.
+            if binding.boundaryTurnID != nil {
+                history.appendNotice(Self.outputLostWhileClosed)
+                publishHistory()
+            }
+            phase = .disconnected
+            await launch(.remote(agent: agent, path: path), cwd: path, startNewSession: false)
+        } catch {
+            guard generation == token else { return }
+            // The runtime may well still be there: keep the binding, so Retry attaches again.
+            attaching = nil
+            phase = .disconnected
+            status = "Saved · Resume failed"
+            errorMessage = error.localizedDescription
+            errorIsConnectionFailure = error is RemoteConnectionFailure
+            errorAdvice = "Your saved history is unchanged. Retry, or start a new session."
+            onChange?()
+        }
+    }
+
+    /// Takes in the record of a runtime attached to again: the session as the server has it
+    /// now. Everything after the binding's boundary is about to arrive again in the backlog,
+    /// so it is dropped first, unless the journal no longer reaches back that far. When it does
+    /// not, the saved transcript stays whole, what it already shows is skipped as it arrives
+    /// again, and only output evicted from after it is reported lost.
+    private func rebuild(from attachment: LatchRemoteAttachment, binding: SavedSession.RemoteBinding, id: AgentRuntimeID) {
+        let record = attachment.record
+        attaching = nil
+        defer { resumeAttachWaiter() }
+        savedBinding = nil
+        runtimeIsRemote = true
+        runtimeID = id
+        if let bound = record.sessionID { savedAgentSessionID = bound }
+        sessionID = record.sessionID ?? savedAgentSessionID
+        loadedThroughSequence = record.loadedThrough
+        if attachment.truncated {
+            appliedSequence = min(binding.applied, record.lastSequence)
+            if attachment.backlogFrom > binding.applied + 1 { history.appendNotice(Self.outputLostWhileClosed) }
+        } else {
+            appliedSequence = min(binding.cursor, record.lastSequence)
+            history.removeMessages(after: binding.boundaryMessageID)
+        }
+        publishHistory()
+        if let turn = binding.boundaryTurnID { remember(turn) }
+        clearConfiguration()
+        let sequence: UInt64?
+        switch record.session {
+        case let .new(response):
+            configuration = SessionConfiguration(configOptions: response.configOptions, models: response.models, modes: response.modes)
+            sequence = response.localSequence
+        case let .load(response):
+            configuration = SessionConfiguration(configOptions: response.configOptions, models: response.models, modes: response.modes)
+            sequence = response.localSequence
+        case .unknown, nil:
+            sequence = nil
+        }
+        configurationSequence = sequence ?? 0
+        legacyModelSequence = sequence ?? 0
+        legacyModeSequence = sequence ?? 0
+        applyState(of: record)
+        acceptsImages = record.initialization?.agentCapabilities.acceptsImages ?? false
+        let title = record.initialization?.agentInfo?.title ?? record.initialization?.agentInfo?.name ?? record.agentTitle
+        status = "Connected · \(title)"
+        phase = .ready
+        if record.lifecycle == .exited {
+            pendingExit = (record.lastSequence, record.exit?.status ?? 0)
+        } else if let turn = record.activeTurnID {
+            awaitRecordedTurn(turn, runtimeID: id, boundary: binding.boundaryTurnID == turn ? binding : nil)
+        } else if let turn = binding.boundaryTurnID {
+            if record.turns.contains(where: { $0.turnID == turn && $0.state == .ended }) {
+                // It ended while Latch was closed. Followed to its end as the backlog replays
+                // it, it finishes here like any turn, so it is announced like one.
+                awaitRecordedTurn(turn, runtimeID: id, boundary: binding)
+            } else if !record.turns.contains(where: { $0.turnID == turn }) {
+                unsentTurn = (turn, record.lastSequence)
+            }
+        }
+        onChange?()
+        caughtUp()
+    }
+
+    /// The record's latest state notifications and set-* results, in the order the agent
+    /// produced them, through the same sequence guards as live ones. Those without a position
+    /// go first, so none of them replaces a change whose position is known.
+    private func applyState(of record: LatchRemoteRuntimeRecord) {
+        enum Change {
+            case notification(ACPSessionNotification)
+            case set(LatchRemoteConfigurationSet)
+        }
+        let changes: [(sequence: UInt64?, change: Change)] =
+            record.state.filter { $0.sessionId == sessionID }.map { ($0.localSequence, .notification($0)) }
+            + record.configurationSets.map { ($0.acpSequence, .set($0)) }
+        let ordered = changes.enumerated().sorted {
+            ($0.element.sequence ?? 0, $0.offset) < ($1.element.sequence ?? 0, $1.offset)
+        }
+        for (_, entry) in ordered {
+            switch entry.change {
+            case let .notification(notification): applyStateUpdate(notification)
+            case let .set(change): apply(change)
+            }
+        }
+    }
+
+    /// A turn the record shows running, from before Latch quit or from another client. No
+    /// `send` waits for it, so this does, and ends it the way `send` ends its own. `boundary`
+    /// is the saved binding when it is that binding's turn, whose prompt is already shown.
+    private func awaitRecordedTurn(_ turn: UUID, runtimeID id: AgentRuntimeID, boundary: SavedSession.RemoteBinding?) {
+        let token = generation
+        phase = .prompting
+        status = "Working…"
+        promptStartedAt = now()
+        promptGeneration = UUID()
+        cancellationRequested = false
+        turnID = turn
+        turnBoundary = boundary
+        let client = client
+        Task { [weak self] in
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep, reason: "Agent prompt in flight")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            let result: Result<LatchAgentResponse, any Error>
+            do { result = .success(try await client.awaitTurn(runtimeID: id, turnID: turn)) }
+            catch { result = .failure(error) }
+            await self?.finishTurn(turn, result, generation: token)
+        }
+    }
+
+    /// Quitting Latch: lets go of a remote session's runtime and leaves it running on the
+    /// server, with its binding kept for the next launch to attach to. Decision tasks are
+    /// cancelled before the queue, so taking a sheet down refuses nothing on the server.
+    func detach() async {
+        if let stop = authenticationStop { await stop.task.value }
+        guard phase != .stopping else { return }
+        let binding = remoteBinding
+        let id = runtimeIsRemote ? runtimeID : attaching?.id
+        generation = UUID()
+        permissionTasks.values.forEach { $0.cancel() }
+        permissionTasks.removeAll()
+        permissions.cancelAll()
+        runtimeID = nil
+        forgetRemoteRuntime()
+        savedBinding = binding
+        sessionID = nil
+        clearConfiguration()
+        cancellationRequested = false
+        phase = .disconnected
+        status = Self.idleSavedStatus
+        onChange?()
+        if let id { await client.detach(runtimeID: id) }
+    }
+
+    /// Closing a session: stops the runtime a saved binding left on its server, since no
+    /// session will attach to it again. The transcript and agent context stay, so reopening
+    /// the session resumes it instead.
+    func discardRemoteBinding() async {
+        guard let binding = savedBinding else { return }
+        savedBinding = nil
+        _ = try? await client.execute(.stopRuntime(id: AgentRuntimeID(binding.runtimeID)))
+    }
+
+    /// Clears what ties the session to a remote runtime it no longer follows. A saved binding
+    /// is kept: only a close or a new context gives that one up.
+    private func forgetRemoteRuntime() {
+        runtimeIsRemote = false
+        attaching = nil
+        resumeAttachWaiter()
+        turnBoundary = nil
+        pendingExit = nil
+        unsentTurn = nil
+    }
+
+    private func resumeAttachWaiter() {
+        attachWaiter?.resume()
+        attachWaiter = nil
+    }
+
+    private func remember(_ turn: UUID) {
+        guard !knownTurns.contains(turn) else { return }
+        knownTurns.append(turn)
+        if knownTurns.count > 64 { knownTurns.removeFirst() }
+    }
+
+    /// What an attach's record said that shows only once the backlog has delivered everything
+    /// before it: a prompt that never reached the server, and an exit. An `exited` event in the
+    /// backlog shows the exit first, and this finds nothing.
+    private func caughtUp() {
+        if let unsent = unsentTurn, appliedSequence >= unsent.through {
+            unsentTurn = nil
+            history.appendNotice(Self.promptNotSent)
+            publishHistory()
+        }
+        guard let exit = pendingExit, appliedSequence >= exit.through else { return }
+        resetAfterLoss(status: "Agent exited (\(exit.status))",
+                       error: "The agent process ended. Select the agent again to reconnect.")
     }
 
     private func beginConnecting(startNewSession: Bool) -> Bool {
@@ -194,6 +491,9 @@ final class SessionModel {
         else { history.restore(messages) }
         sessionID = resumingID
         loadedThroughSequence = nil
+        appliedSequence = 0
+        forgetRemoteRuntime()
+        linkState = .connected
         clearConfiguration()
         phase = .connecting
         status = resumingID == nil ? "Connecting…" : "Resuming…"
@@ -231,6 +531,7 @@ final class SessionModel {
             }
             pendingStateUpdates.removeAll()
             phase = .ready
+            if case .remote = launch { runtimeIsRemote = true }
             if case let .runtimeStarted(_, initialization) = result {
                 status = "Connected · \(initialization.agentInfo?.title ?? initialization.agentInfo?.name ?? "ACP agent")"
                 acceptsImages = initialization.agentCapabilities.acceptsImages
@@ -336,22 +637,40 @@ final class SessionModel {
         lastActiveAt = promptStartedAt
         promptGeneration = UUID()
         cancellationRequested = false
+        let turn = UUID()
+        turnID = turn
+        defer { if turnID == turn { turnID = nil } }
+        remember(turn)
         status = "Working…"
         history.appendUser(text, attachments: attachments.map(\.record))
+        if runtimeIsRemote {
+            turnBoundary = SavedSession.RemoteBinding(runtimeID: id.rawValue, cursor: appliedSequence,
+                                                      boundaryMessageID: history.messages.last?.id, boundaryTurnID: turn)
+        }
         publishHistory()
         onChange?()
-        do {
-            let result = try await client.execute(.prompt(runtimeID: id, blocks: blocks))
-            guard generation == token else { return }
-            if case let .promptCompleted(_, response) = result {
-                status = response.stopReason == "cancelled" ? "Cancelled" : "Ready · \(response.stopReason)"
-            }
-        } catch {
-            guard generation == token else { return }
+        let result: Result<LatchAgentResponse, any Error>
+        do { result = .success(try await client.prompt(runtimeID: id, turnID: turn, blocks: blocks)) }
+        catch { result = .failure(error) }
+        await finishTurn(turn, result, generation: token)
+    }
+
+    /// How a turn ends, whether `send` started it or an attach found it running. Nothing
+    /// changes once the session has moved on to another runtime or another turn.
+    private func finishTurn(_ turn: UUID, _ result: Result<LatchAgentResponse, any Error>, generation token: UUID) async {
+        guard generation == token, turnID == turn else { return }
+        switch result {
+        case let .success(.promptCompleted(_, response)):
+            status = response.stopReason == "cancelled" ? "Cancelled" : "Ready · \(response.stopReason)"
+        case .success:
+            break
+        case let .failure(error):
             if await handleAuthenticationFailure(error) { return }
             errorMessage = error.localizedDescription
             status = "Prompt failed"
         }
+        turnID = nil
+        turnBoundary = nil
         phase = .ready
         lastActiveAt = now()
         cancellationRequested = false
@@ -369,6 +688,7 @@ final class SessionModel {
         generation = token
         let id = runtimeID
         runtimeID = nil
+        forgetRemoteRuntime()
         sessionID = nil
         clearConfiguration()
         permissions.cancelAll()
@@ -416,6 +736,7 @@ final class SessionModel {
         generation = UUID()
         let id = runtimeID
         runtimeID = nil
+        forgetRemoteRuntime()
         sessionID = nil
         clearConfiguration()
         permissions.cancelAll()
@@ -426,12 +747,19 @@ final class SessionModel {
         if let id { _ = try? await client.execute(.stopRuntime(id: id)) }
         phase = .disconnected
         status = "Not connected"
+        linkState = .connected
         cancellationRequested = false
         onChange?()
     }
 
     /// The service holds the agent's request until Latch answers; the decision travels back as a command.
     private func handlePermissionRequest(_ request: ACPPermissionRequest, runtimeID: AgentRuntimeID, requestID: UUID) {
+        // A server raises a request again after a re-attach when it cannot tell whether this
+        // session saw it; the sheet already showing answers it.
+        guard permissionTasks[requestID] == nil else { return }
+        // Every client of a server's runtime sees its requests. One raised while this session
+        // runs no turn belongs to another client's, so it is theirs to answer, not to refuse.
+        if client.isRemote, phase != .prompting { return }
         let token = promptGeneration
         let task = Task { @MainActor [weak self] in
             var outcome = ACPPermissionOutcome.cancelled
@@ -497,6 +825,79 @@ final class SessionModel {
         }
     }
 
+    /// A server's journal: agent events as this Mac's service reports them, and what only a
+    /// server knows. Each is taken in at most once, so its sequence can be recorded as applied.
+    private func receive(_ event: RemoteServiceEvent) {
+        // Already in the transcript: a truncated attach's backlog can begin before what the
+        // saved transcript shows.
+        if let (id, sequence) = event.journalPosition, id == runtimeID, sequence <= appliedSequence { return }
+        switch event {
+        case let .link(state):
+            guard state != linkState else { return }
+            linkState = state
+            onChange?()
+        case let .attached(id, attachment):
+            guard let attaching, attaching.id == id else { return }
+            rebuild(from: attachment, binding: attaching.binding, id: id)
+            return
+        case let .agent(event, sequence):
+            receive(event)
+            if let sequence, event.runtimeID == runtimeID { appliedSequence = max(appliedSequence, sequence) }
+        case let .configurationSet(id, configuration, sequence) where id == runtimeID:
+            apply(configuration)
+            appliedSequence = max(appliedSequence, sequence)
+        case let .outputLost(id, sequence) where id == runtimeID:
+            history.appendNotice("Some output could not be shown.")
+            publishHistory()
+            if let sequence { appliedSequence = max(appliedSequence, sequence) }
+        case let .turnStarted(id, turn, text, attachments, sequence) where id == runtimeID:
+            appliedSequence = max(appliedSequence, sequence)
+            if unsentTurn?.turn == turn { unsentTurn = nil }
+            // A turn started elsewhere: by another client, or by one while Latch was closed.
+            guard !knownTurns.contains(turn) else { break }
+            remember(turn)
+            history.appendUser(text, attachments: attachments)
+            publishHistory()
+            // The turn an attach is waiting for: its prompt is the boundary from here on.
+            if turn == turnID, phase == .prompting, let runtimeID {
+                turnBoundary = SavedSession.RemoteBinding(runtimeID: runtimeID.rawValue, cursor: appliedSequence,
+                                                          boundaryMessageID: history.messages.last?.id, boundaryTurnID: turn)
+            }
+        case let .turnEnded(id, _, sequence) where id == runtimeID,
+             let .skipped(id, sequence) where id == runtimeID:
+            appliedSequence = max(appliedSequence, sequence)
+        default:
+            break
+        }
+        caughtUp()
+    }
+
+    /// A set-* another client made, or this one's own arriving after its reply. The same
+    /// sequence guards as a reply's keep an older value from replacing a newer one.
+    private func apply(_ change: LatchRemoteConfigurationSet) {
+        guard sessionID != nil else { return }
+        switch change.route {
+        case .config:
+            guard let options = change.configOptions,
+                  change.acpSequence.map({ $0 > configurationSequence }) ?? true else { return }
+            configuration.apply(configOptions: options)
+            configurationSequence = change.acpSequence ?? configurationSequence
+        case .model:
+            guard change.acpSequence.map({ $0 > legacyModelSequence }) ?? true,
+                  configuration.model?.route == .legacyModel else { return }
+            configuration.model?.currentValue = change.value
+            legacyModelSequence = change.acpSequence ?? legacyModelSequence
+        case .mode:
+            guard change.acpSequence.map({ $0 > legacyModeSequence }) ?? true,
+                  configuration.permissionMode?.route == .legacyMode else { return }
+            configuration.permissionMode?.currentValue = change.value
+            legacyModeSequence = change.acpSequence ?? legacyModeSequence
+        default:
+            return
+        }
+        onChange?()
+    }
+
     private func clearConfiguration() {
         configuration = SessionConfiguration()
         configurationSequence = 0
@@ -540,5 +941,27 @@ final class SessionModel {
 
     private func publishHistory() {
         onTranscriptChange?()
+    }
+}
+
+private extension RemoteServiceEvent {
+    /// The runtime and journal sequence of an event that has one.
+    var journalPosition: (AgentRuntimeID, UInt64)? {
+        switch self {
+        case let .agent(event, sequence): sequence.map { (event.runtimeID, $0) }
+        case let .configurationSet(id, _, sequence), let .turnStarted(id, _, _, _, sequence),
+             let .turnEnded(id, _, sequence), let .skipped(id, sequence): (id, sequence)
+        case let .outputLost(id, sequence): sequence.map { (id, $0) }
+        case .attached, .link: nil
+        }
+    }
+}
+
+private extension LatchAgentEvent {
+    var runtimeID: AgentRuntimeID {
+        switch self {
+        case let .sessionUpdate(id, _), let .standardError(id, _), let .processTerminated(id, _),
+             let .permissionRequested(id, _, _), let .permissionClosed(id, _): id
+        }
     }
 }

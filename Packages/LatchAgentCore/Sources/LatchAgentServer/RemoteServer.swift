@@ -17,8 +17,11 @@ public struct RemoteServerConfiguration: Sendable {
     public var silenceTimeout: Duration = .seconds(3 * LatchRemoteProtocol.heartbeatSeconds)
     /// From accept to a hello that checked out, whatever arrives in between.
     public var handshakeTimeout: Duration = .seconds(10)
-    /// Connections beyond this many that have not authenticated are closed at once.
-    public var maxUnauthenticatedConnections = 8
+    /// Connections that have not authenticated yet, across all peers. A new one past this
+    /// closes the oldest instead of being refused, so idle sockets cannot keep clients out.
+    public var maxUnauthenticatedConnections = 64
+    /// The same, per peer address. A peer past it loses its own oldest, never another's.
+    public var maxUnauthenticatedConnectionsPerPeer = 8
     /// Requests of one connection the hub is working on; more are answered `busy`.
     public var maxOutstandingRequests = 32
     /// How often the token file is checked for a rotation, besides every hello and SIGHUP.
@@ -87,8 +90,22 @@ public final class RemoteServer: Sendable {
         var listeners: [ServerListener] = []
         var nextSerial: UInt64 = 0
         var connections: [UInt64: RemoteServerConnection] = [:]
-        /// Serials of connections that have not authenticated yet.
-        var unauthenticated: Set<UInt64> = []
+        /// Connections that have not authenticated yet, by serial, with their peer's address.
+        /// Serials only grow, so the smallest is the oldest.
+        var unauthenticated: [UInt64: [UInt8]] = [:]
+        /// Closed to make room for a newer connection and not yet ended.
+        var evicted: Set<UInt64> = []
+    }
+
+    /// Of the connections that have not authenticated, by serial with their peer's address,
+    /// the one to close so one more from `peer` fits, if any must go: that peer's oldest when
+    /// it is at `perPeer`, so a peer only ever pushes out its own, or else the oldest of all
+    /// at `total`.
+    static func evictionVictim(among unauthenticated: [UInt64: [UInt8]], for peer: [UInt8], perPeer: Int, total: Int) -> UInt64? {
+        let fromPeer = unauthenticated.filter { $0.value == peer }.keys
+        if fromPeer.count >= perPeer { return fromPeer.min() }
+        if unauthenticated.count >= total { return unauthenticated.keys.min() }
+        return nil
     }
 
     public init(hub: RemoteRuntimeHub, tokens: ServerTokenFile, configuration: RemoteServerConfiguration, log: ServerLog) {
@@ -207,23 +224,40 @@ public final class RemoteServer: Sendable {
 
     private func acceptLoop(_ listener: ServerListener) {
         while let (descriptor, peer) = ServerSocket.accept(from: listener.descriptor, stop: stopPipe.read) {
-            admit(descriptor, peer: peer?.description ?? "unknown")
+            admit(descriptor, peer: peer)
         }
     }
 
-    private func admit(_ descriptor: Int32, peer: String) {
-        let connection: RemoteServerConnection? = state.withLock { state in
-            guard !state.stopping, state.unauthenticated.count < configuration.maxUnauthenticatedConnections else { return nil }
+    /// Past either limit on connections that have not authenticated, the oldest such
+    /// connection goes rather than the new one: a client sends its hello as soon as it
+    /// connects, so the connections that have waited longest are the likeliest to be idle,
+    /// and an idle socket held open cannot keep anyone out for longer than it takes a new
+    /// connection to arrive.
+    private func admit(_ descriptor: Int32, peer address: ServerSocketAddress?) {
+        let peer = address?.description ?? "unknown"
+        let key = address?.bytes ?? []
+        let perPeer = max(1, configuration.maxUnauthenticatedConnectionsPerPeer)
+        let total = max(1, configuration.maxUnauthenticatedConnections)
+        let admitted: (connection: RemoteServerConnection, evicted: RemoteServerConnection?)? = state.withLock { state in
+            guard !state.stopping else { return nil }
+            var evicted: RemoteServerConnection?
+            if let victim = Self.evictionVictim(among: state.unauthenticated, for: key, perPeer: perPeer, total: total) {
+                state.unauthenticated[victim] = nil
+                state.evicted.insert(victim)
+                evicted = state.connections[victim]
+            }
             state.nextSerial += 1
             let connection = RemoteServerConnection(serial: state.nextSerial, descriptor: descriptor, peer: peer, server: self)
             state.connections[connection.serial] = connection
-            state.unauthenticated.insert(connection.serial)
-            return connection
+            state.unauthenticated[connection.serial] = key
+            return (connection, evicted)
         }
-        guard let connection else {
+        guard let (connection, evicted) = admitted else {
             ServerSocket.close(descriptor)
-            logUnauthenticated("refused a connection from \(peer): too many connections have not authenticated")
             return
+        }
+        if let evicted {
+            evicted.close("closed to make room: too many connections have not authenticated")
         }
         logUnauthenticated("connection \(connection.serial) from \(peer) accepted")
         spawn("latch.server.read") { connection.runReader() }
@@ -234,18 +268,21 @@ public final class RemoteServer: Sendable {
 
     // MARK: Called by connections
 
-    /// False when the server is stopping and the connection must not go on.
+    /// False when the connection must not go on: the server is stopping, or the connection
+    /// was closed to make room for a newer one while its hello was being checked.
     func authenticated(_ connection: RemoteServerConnection) -> Bool {
         state.withLock { state in
-            state.unauthenticated.remove(connection.serial)
-            return !state.stopping
+            let waiting = state.unauthenticated.removeValue(forKey: connection.serial) != nil
+            return waiting && !state.stopping
         }
     }
 
     func ended(_ connection: RemoteServerConnection, reason: String) {
         let authenticated = state.withLock { state in
             state.connections[connection.serial] = nil
-            return state.unauthenticated.remove(connection.serial) == nil
+            let waiting = state.unauthenticated.removeValue(forKey: connection.serial) != nil
+            let evicted = state.evicted.remove(connection.serial) != nil
+            return !waiting && !evicted
         }
         let message = "connection \(connection.serial) from \(connection.peer) closed: \(reason)"
         if authenticated { log.log(message) } else { logUnauthenticated(message) }

@@ -48,7 +48,8 @@ public enum LatchRemoteDestinationPolicy {
     }
 }
 
-/// The wait before each reconnect: `initial`, doubling after every failed attempt, capped at `maximum`.
+/// The wait before each reconnect: `initial`, doubling after every failed attempt, capped at
+/// `maximum`, and jittered by the channel.
 public struct LatchRemoteBackoff: Equatable, Sendable {
     public var initial: Duration
     public var maximum: Duration
@@ -67,6 +68,13 @@ public struct LatchRemoteBackoff: Equatable, Sendable {
             if delay >= maximum { return maximum }
         }
         return delay
+    }
+
+    /// `delay(afterFailures:)` scaled by a random factor between one half and one, so the
+    /// clients of a server that dropped them all at once, or turned some of a burst away, do
+    /// not all come back together again.
+    public func jitteredDelay(afterFailures failures: Int, factor: Double = Double.random(in: 0.5...1)) -> Duration {
+        delay(afterFailures: failures) * min(max(factor, 0.5), 1)
     }
 }
 

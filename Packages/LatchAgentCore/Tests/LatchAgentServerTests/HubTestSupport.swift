@@ -131,7 +131,8 @@ final class HubTestbed {
     init(
         configuration: RemoteRuntimeHubConfiguration = RemoteRuntimeHubConfiguration(),
         launchEnvironment: (@Sendable () -> AgentLaunchEnvironment)? = nil,
-        homeDirectory: String? = nil
+        homeDirectory: String? = nil,
+        lifecycle: (@Sendable (AgentRuntimeID, RemoteRuntimeLifecycleEvent) -> Void)? = nil
     ) async throws {
         workspace = FileManager.default.temporaryDirectory
             .appendingPathComponent("latch-hub-\(UUID().uuidString)")
@@ -148,7 +149,8 @@ final class HubTestbed {
             configuration: configuration,
             launchEnvironment: launchEnvironment ?? { AgentLaunchEnvironment() },
             homeDirectory: homeDirectory ?? workspace.path,
-            clock: { clock.now }
+            clock: { clock.now },
+            lifecycle: lifecycle
         )
         control = hub.openConnection(wake: {})
         await hub.start()

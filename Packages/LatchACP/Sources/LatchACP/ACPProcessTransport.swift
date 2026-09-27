@@ -121,8 +121,9 @@ public final class ACPProcessTransport: Sendable {
     ///
     /// The group first receives SIGTERM. If the agent is still running after `gracePeriod`,
     /// the group receives SIGKILL; so does a tool child still in the group then, even if the
-    /// agent itself exited. This method returns only once the agent has exited, so a hung
-    /// agent cannot leave an orphaned subprocess behind.
+    /// agent itself exited. This method returns once the agent has exited, so a hung agent
+    /// cannot leave an orphaned subprocess behind, but not later: a tool child slow to leave
+    /// is killed at the deadline in the background rather than holding up the caller.
     public func stop(gracePeriod: Duration = ACPProcessTransport.defaultTerminationGracePeriod) async {
         writer.finish()
         guard isRunning else { return }
@@ -130,8 +131,12 @@ public final class ACPProcessTransport: Sendable {
         signalGroup(SIGTERM)
         if await wait(until: deadline, while: { isRunning }) {
             // Tool children that ignore SIGTERM get what is left of the grace period.
-            if !(await wait(until: deadline, while: { groupHasMembers })) {
-                signalGroup(SIGKILL)
+            if groupHasMembers {
+                Task.detached { [self] in
+                    if !(await wait(until: deadline, while: { groupHasMembers })) {
+                        signalGroup(SIGKILL)
+                    }
+                }
             }
             return
         }

@@ -3,6 +3,7 @@ import LatchACP
 import LatchAgentCore
 import LatchRemoteProtocol
 import LatchServiceProtocol
+import Synchronization
 import XCTest
 @testable import LatchAgentServer
 
@@ -349,6 +350,94 @@ final class RemoteRuntimeHubTests: XCTestCase {
         }
     }
 
+    func testAnOversizePermissionRequestIsJournaledAsItsSummary() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.maxEncodedEventBytes = 2048
+        try await withTestbed(configuration: configuration) { bed in
+            let script = MockAgent.script.replacingOccurrences(of: #""title":"Edit file""#, with: #""title":"Edit '"$(printf '%04000d' 0)"'","content":[{"type":"diff","path":"a","newText":"'"$(printf '%04000d' 0)"'"}]"#)
+            try script.write(to: bed.workspace.appendingPathComponent("big-ask.sh"), atomically: true, encoding: .utf8)
+            let id = AgentRuntimeID("big-ask")
+            _ = try await bed.ok(.launchAgent(runtimeID: id, agent: bed.script("big-ask.sh"), workspace: bed.workspace.path))
+            _ = try await bed.ok(.newSession(runtimeID: id))
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("permission please")]))
+            let frames = try await viewer.pull(until: "the request") { frames in
+                frames.contains { if case .permissionRequested = $0.event { true } else { false } }
+            }
+            guard case let .permissionRequested(requestID, request)? = frames.first(where: {
+                if case .permissionRequested = $0.event { true } else { false }
+            })?.event else { return XCTFail("Expected the request, not an omitted event") }
+            XCTAssertEqual(request.options.map(\.optionId), ["allow-once", "reject-once"], "Still answerable")
+            guard case let .object(toolCall) = request.toolCall else { return XCTFail("\(request.toolCall)") }
+            XCTAssertEqual(toolCall["toolCallId"], .string("call-1"))
+            XCTAssertNil(toolCall["content"])
+            guard case let .string(title)? = toolCall["title"] else { return XCTFail("no title") }
+            XCTAssertEqual(title.count, 1025)
+            let record = try await bed.record(id)
+            XCTAssertEqual(record.pendingPermissions.map(\.requestID), [requestID])
+            try await bed.expect(.resolvePermission(runtimeID: id, requestID: requestID, outcome: .selected(optionID: "allow-once")),
+                                 returns: .permissionResolved)
+        }
+    }
+
+    /// A record goes in one frame, so pending requests past a budget go as their summaries.
+    func testARecordCarriesLargePendingRequestsAsSummaries() throws {
+        func permission(_ size: Int) -> LatchRemotePendingPermission {
+            LatchRemotePendingPermission(requestID: UUID(), request: ACPPermissionRequest(
+                sessionId: "s",
+                toolCall: .object(["toolCallId": .string("c"), "title": .string("Edit"),
+                                   "rawInput": .string(String(repeating: "x", count: size))]),
+                options: [ACPPermissionOption(optionId: "allow", name: "Allow", kind: "allow_once")],
+                meta: .object(["big": .string(String(repeating: "y", count: size))])
+            ))
+        }
+        let pending = [permission(10), permission(3000), permission(10), permission(3000)]
+        let recorded = RemoteRuntimeHub.recorded(pending, budget: 10_000)
+        XCTAssertEqual(recorded.map(\.requestID), pending.map(\.requestID))
+        XCTAssertEqual(recorded[0], pending[0])
+        XCTAssertEqual(recorded[1], pending[1])
+        XCTAssertEqual(recorded[2], pending[2])
+        XCTAssertEqual(recorded[3].request, ACPPermissionRequest(
+            sessionId: "s", toolCall: .object(["toolCallId": .string("c"), "title": .string("Edit")]),
+            options: [ACPPermissionOption(optionId: "allow", name: "Allow", kind: "allow_once")]))
+        XCTAssertLessThan(try JSONEncoder().encode(recorded).count, 10_000)
+    }
+
+    func testAFailedLaunchIsReportedForTheLog() async throws {
+        let events = Mutex<[RemoteRuntimeLifecycleEvent]>([])
+        let bed = try await HubTestbed(lifecycle: { _, event in events.withLock { $0.append(event) } })
+        do {
+            try "echo \"SyntaxError: Unexpected token 'with'\" >&2\nexit 1\n"
+                .write(to: bed.workspace.appendingPathComponent("old-node.sh"), atomically: true, encoding: .utf8)
+            try await bed.expect(.launchAgent(runtimeID: AgentRuntimeID("old-node"), agent: bed.script("old-node.sh"),
+                                              workspace: bed.workspace.path), fails: .commandFailed)
+            try await bed.expect(.launchAgent(runtimeID: AgentRuntimeID("nobody"), agent: .preset("nobody"),
+                                              workspace: bed.workspace.path), fails: .unknownPreset)
+            let seen = events.withLock { $0 }
+            XCTAssertEqual(seen.count, 2, "\(seen)")
+            guard case let .failedToLaunch(title, executable, _, reason)? = seen.first else { return XCTFail("\(seen)") }
+            XCTAssertEqual(title, "sh")
+            XCTAssertEqual(executable, "/bin/sh")
+            XCTAssertFalse(reason.isEmpty)
+            XCTAssertEqual(seen.last, .failedToLaunch(agentTitle: nil, executable: nil, status: nil,
+                                                      reason: "This server does not know that agent."))
+        } catch {
+            await bed.close()
+            throw error
+        }
+        await bed.close()
+
+        let line = RemoteRuntimeLifecycleEvent.failedLaunchLine(
+            AgentRuntimeID("rt"), agentTitle: "Claude Code", executable: "/usr/bin/npx", status: 1,
+            reason: "closed", standardErrorLogged: false)
+        XCTAssertEqual(line, "runtime rt failed to launch Claude Code (/usr/bin/npx): the agent exited with status 1 while "
+            + "starting; closed; run latch-server with --log-agent-stderr to see what the agent printed")
+        XCTAssertFalse(RemoteRuntimeLifecycleEvent.failedLaunchLine(
+            AgentRuntimeID("rt"), agentTitle: nil, executable: "/bin/sh", status: nil, reason: "x", standardErrorLogged: true
+        ).contains("--log-agent-stderr"))
+    }
+
     func testCrashEndsTheTurnAndExitsLast() async throws {
         try await withTestbed { bed in
             let id = AgentRuntimeID("crash")
@@ -605,6 +694,7 @@ final class RemoteRuntimeHubTests: XCTestCase {
     func testReaperStopsOnlyIdleRuntimesNobodyCameBackFor() async throws {
         var configuration = RemoteRuntimeHubConfiguration()
         configuration.detachedTimeout = .seconds(60)
+        configuration.detachedPermissionTimeout = .seconds(300)
         configuration.reaperInterval = .seconds(3600)
         try await withTestbed(configuration: configuration) { bed in
             let idle = AgentRuntimeID("idle")
@@ -644,6 +734,12 @@ final class RemoteRuntimeHubTests: XCTestCase {
             await bed.hub.reapDetachedRuntimes(now: bed.clock.base + .seconds(161))
             try await bed.expect(.attach(runtimeID: watched, after: 0), fails: .runtimeNotFound)
             try await bed.expect(working, lifecycle: .ready)
+
+            // A turn held up by a request nobody came back to answer goes after the longer timeout.
+            await bed.hub.reapDetachedRuntimes(now: bed.clock.base + .seconds(299))
+            try await bed.expect(working, lifecycle: .ready)
+            await bed.hub.reapDetachedRuntimes(now: bed.clock.base + .seconds(301))
+            try await bed.expect(.attach(runtimeID: working, after: 0), fails: .runtimeNotFound)
         }
     }
 

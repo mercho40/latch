@@ -60,7 +60,8 @@ final class RemoteEventJournal: Sendable {
     func subscribe(_ connectionID: RemoteConnectionID, to runtimeID: AgentRuntimeID, after: UInt64)
         -> (backlogFrom: UInt64, truncated: Bool) {
         state.withLock { state in
-            guard let runtime = state.runtimes[runtimeID] else { return (after + 1, false) }
+            // Saturating: the cursor is whatever a client sent.
+            guard let runtime = state.runtimes[runtimeID] else { return (after == .max ? .max : after + 1, false) }
             // A cursor beyond what exists would silently skip future events.
             let cursor = max(min(after, runtime.lastSequence), runtime.evictedThrough)
             let truncated = after > runtime.lastSequence || after < runtime.evictedThrough

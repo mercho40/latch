@@ -54,6 +54,14 @@ final class TestSocketClient: Sendable {
         send((try? LatchRemoteCoding.encodeLine(frame)) ?? Data())
     }
 
+    /// False once the server has closed its end. Never blocks, and consumes nothing.
+    var isOpen: Bool {
+        var descriptors = [pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)]
+        guard poll(&descriptors, 1, 0) > 0 else { return true }
+        var byte: UInt8 = 0
+        return recv(descriptor, &byte, 1, Int32(MSG_PEEK | MSG_DONTWAIT)) > 0
+    }
+
     /// Shuts the socket down; the server sees the end of the stream.
     func disconnect() {
         ServerSocket.shutdownBoth(descriptor)

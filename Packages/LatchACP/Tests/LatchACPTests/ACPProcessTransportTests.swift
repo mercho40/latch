@@ -99,6 +99,27 @@ final class ACPProcessTransportTests: XCTestCase {
         try await waitUntilGone(child, within: started + .milliseconds(800) - ContinuousClock.now)
     }
 
+    /// The caller waits for the agent, not for the tool children it leaves: those are killed
+    /// at the deadline all the same.
+    func testStopReturnsOnceTheAgentExitsAndKillsItsToolChildAtTheDeadline() async throws {
+        let transport = try ACPProcessTransport(
+            configuration: ACPProcessConfiguration(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", #"sh -c 'trap "" TERM; echo $$; exec sleep 60' & wait"#],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp")
+            )
+        )
+        var incoming = transport.incoming.makeAsyncIterator()
+        let line = await incoming.next().map { String(decoding: $0, as: UTF8.self) }
+        let child = try XCTUnwrap(line.flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) })
+
+        let started = ContinuousClock.now
+        await transport.stop(gracePeriod: .seconds(3))
+        XCTAssertLessThan(ContinuousClock.now - started, .milliseconds(1500), "Waited for the tool child")
+        XCTAssertFalse(transport.wasForceKilled)
+        try await waitUntilGone(child, within: started + .seconds(4) - ContinuousClock.now)
+    }
+
     func testWriteToAnAgentThatClosedStandardInputThrows() async throws {
         let transport = try ACPProcessTransport(
             configuration: ACPProcessConfiguration(

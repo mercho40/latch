@@ -12,8 +12,13 @@ public struct RemoteRuntimeHubConfiguration: Sendable {
     public var globalJournalBudget = 128 * 1024 * 1024
     /// An event whose encoding is larger is journaled as `omitted`.
     public var maxEncodedEventBytes = LatchRemoteProtocol.maxEncodedEventBytes
-    /// An idle runtime nobody has been attached to for this long is stopped. Zero disables it.
+    /// An idle runtime nobody has been attached to for this long is stopped. Zero disables it,
+    /// and `detachedPermissionTimeout` with it.
     public var detachedTimeout: Duration = .seconds(24 * 60 * 60)
+    /// A runtime whose turn is held up by a permission request nobody has been attached to
+    /// answer for this long is stopped too: a client that stopped it while the server was out
+    /// of reach, and forgot it, would otherwise leave it running for good.
+    public var detachedPermissionTimeout: Duration = .seconds(7 * 24 * 60 * 60)
     public var reaperInterval: Duration = .seconds(60)
     /// Exited runtimes whose record stays attachable, and whose IDs cannot be reused.
     public var retainedExitedRuntimes = 8
@@ -28,6 +33,28 @@ public enum RemoteRuntimeLifecycleEvent: Equatable, Sendable {
     /// Stopped on request, by the detached reaper, or by shutdown.
     case stopped
     case exited(status: Int32?)
+    /// A launch that never got as far as `launched`: the agent could not be found, could not
+    /// start, or exited or failed while starting, with its status if it exited. `executable`
+    /// is the resolved path, when it got that far; `reason` is for the server's log only.
+    case failedToLaunch(agentTitle: String?, executable: String?, status: Int32?, reason: String)
+}
+
+extension RemoteRuntimeLifecycleEvent {
+    /// The log line for `failedToLaunch`: the one place a failed launch is explained, since
+    /// the client is told only that the agent command failed.
+    static func failedLaunchLine(_ id: AgentRuntimeID, agentTitle: String?, executable: String?, status: Int32?,
+                                 reason: String, standardErrorLogged: Bool) -> String {
+        var line = "runtime \(id.rawValue) failed to launch"
+        if let agentTitle { line += " " + ServerLog.escape(agentTitle) }
+        if let executable { line += " (" + ServerLog.escape(executable) + ")" }
+        if let status { line += ": the agent exited with status \(status) while starting" }
+        let reason = reason.count > 300 ? String(reason.prefix(300)) + "…" : reason
+        line += "; " + ServerLog.escape(reason)
+        if executable != nil, !standardErrorLogged {
+            line += "; run latch-server with --log-agent-stderr to see what the agent printed"
+        }
+        return line
+    }
 }
 
 /// The server's only consumer of `LatchAgentService.events`: it journals each runtime's events
@@ -220,17 +247,20 @@ public actor RemoteRuntimeHub {
         }
     }
 
-    /// Stops every runtime that is idle, has no pending permission, and has had no attached
-    /// connection for the configured timeout as of `now`. A reaped runtime is forgotten
-    /// rather than kept as exited, so a returning client's attach fails with `runtimeNotFound`
-    /// and it resumes the session instead.
+    /// Stops every runtime that has had no attached connection as of `now` for the configured
+    /// timeout and is idle, or for `detachedPermissionTimeout` and is waiting on a permission
+    /// request. One running a turn that waits on nothing is never stopped. A reaped runtime is
+    /// forgotten rather than kept as exited, so a returning client's attach fails with
+    /// `runtimeNotFound` and it resumes the session instead.
     public func reapDetachedRuntimes(now: ContinuousClock.Instant) async {
         let timeout = configuration.detachedTimeout
         guard timeout > .zero else { return }
+        let permissionTimeout = max(timeout, configuration.detachedPermissionTimeout)
         func isReapable(_ id: AgentRuntimeID) -> Bool {
-            guard let state = runtimes[id], state.lifecycle == .ready, state.activeTurnID == nil,
-                  state.pendingPermissions.isEmpty, let since = journal.detachedSince(id) else { return false }
-            return since.duration(to: now) >= timeout
+            guard let state = runtimes[id], state.lifecycle == .ready, let since = journal.detachedSince(id) else { return false }
+            let detached = since.duration(to: now)
+            if state.pendingPermissions.isEmpty { return state.activeTurnID == nil && detached >= timeout }
+            return detached >= permissionTimeout
         }
         for id in runtimes.keys.sorted(by: { $0.rawValue < $1.rawValue }) where isReapable(id) {
             // Earlier stops suspended; check again before this one.
@@ -261,6 +291,7 @@ public actor RemoteRuntimeHub {
                 agent: agent, workspace: workspace, environment: launchEnvironment(), homeDirectory: homeDirectory
             )
         } catch {
+            lifecycle?(id, .failedToLaunch(agentTitle: nil, executable: nil, status: nil, reason: error.message))
             return .failure(error)
         }
         let profile = resolved.profile
@@ -273,7 +304,8 @@ public actor RemoteRuntimeHub {
         nextIncarnation += 1
         runtimes[id] = RuntimeState(
             incarnation: nextIncarnation, agent: agent, agentTitle: resolved.agentTitle,
-            workspace: workspace, workingDirectory: resolved.workingDirectory, launch: task
+            workspace: workspace, workingDirectory: resolved.workingDirectory,
+            executablePath: profile.executablePath, launch: task
         )
         journal.createRuntime(id)
         return await launchResult(of: task, id: id, incarnation: nextIncarnation)
@@ -298,10 +330,13 @@ public actor RemoteRuntimeHub {
             }
             return .success(.launched(initialization: initialization))
         } catch {
-            // A failed launch leaves nothing behind, so the client can retry it.
-            if runtimes[id]?.incarnation == incarnation, runtimes[id]?.lifecycle == .starting {
+            // A failed launch leaves nothing behind, so the client can retry it. The client
+            // hears only that the command failed; the log says what happened.
+            if let state = runtimes[id], state.incarnation == incarnation, state.lifecycle == .starting {
                 runtimes[id] = nil
                 journal.removeRuntime(id)
+                lifecycle?(id, .failedToLaunch(agentTitle: state.agentTitle, executable: state.executablePath,
+                                               status: state.terminationWhileStarting, reason: String(describing: error)))
             }
             return .failure(Self.remoteError(for: error))
         }
@@ -604,8 +639,15 @@ public actor RemoteRuntimeHub {
     private func publish(_ event: LatchRemoteEvent, for id: AgentRuntimeID) {
         var encoded = (try? LatchRemoteCoding.encodeEvent(event)) ?? Data()
         if encoded.isEmpty || encoded.count > configuration.maxEncodedEventBytes {
-            let omitted = LatchRemoteEvent.omitted(originalKind: event.kind, byteCount: encoded.count)
-            encoded = (try? LatchRemoteCoding.encodeEvent(omitted)) ?? Data(#"{"kind":"omitted"}"#.utf8)
+            // A request left out could never be answered: it goes as its summary instead.
+            if case let .permissionRequested(requestID, request) = event,
+               let summary = try? LatchRemoteCoding.encodeEvent(.permissionRequested(requestID: requestID, request: Self.summary(of: request))),
+               summary.count <= configuration.maxEncodedEventBytes {
+                encoded = summary
+            } else {
+                let omitted = LatchRemoteEvent.omitted(originalKind: event.kind, byteCount: encoded.count)
+                encoded = (try? LatchRemoteCoding.encodeEvent(omitted)) ?? Data(#"{"kind":"omitted"}"#.utf8)
+            }
         }
         journal.append(encoded, to: id)
     }
@@ -629,11 +671,45 @@ public actor RemoteRuntimeHub {
             configurationSets: state.configurationSets.values.sorted { $0.route.rawValue < $1.route.rawValue },
             activeTurnID: state.activeTurnID,
             turns: state.turns,
-            pendingPermissions: state.pendingPermissions,
+            pendingPermissions: Self.recorded(state.pendingPermissions, budget: configuration.maxEncodedEventBytes / 2),
             lastSequence: journal.lastSequence(of: id),
             loadedThrough: state.loadedThrough
         )
     }
+
+    /// Pending requests as an attach's record carries them. A record goes in one frame, and a
+    /// runtime may have several requests of megabytes each, such as edits with large diffs:
+    /// past `budget` bytes, a request goes as its summary, which can still be shown and answered.
+    static func recorded(_ pending: [LatchRemotePendingPermission], budget: Int) -> [LatchRemotePendingPermission] {
+        let encoder = JSONEncoder()
+        var used = 0
+        return pending.map { permission in
+            let size = (try? encoder.encode(permission).count) ?? Int.max
+            if size <= budget - used {
+                used += size
+                return permission
+            }
+            let summarized = LatchRemotePendingPermission(requestID: permission.requestID, request: summary(of: permission.request))
+            used += (try? encoder.encode(summarized).count) ?? 0
+            return summarized
+        }
+    }
+
+    /// A request cut to what identifies it and what answering it needs: the tool call's ID,
+    /// kind, status and title, the title shortened, and the options. Its content, such as a
+    /// diff, and its raw input are left out.
+    static func summary(of request: ACPPermissionRequest) -> ACPPermissionRequest {
+        var toolCall: [String: ACPJSONValue] = [:]
+        if case let .object(fields) = request.toolCall {
+            for key in ["toolCallId", "kind", "status", "title"] {
+                guard case let .string(value)? = fields[key] else { continue }
+                toolCall[key] = .string(value.count > summaryFieldLength ? String(value.prefix(summaryFieldLength)) + "…" : value)
+            }
+        }
+        return ACPPermissionRequest(sessionId: request.sessionId, toolCall: .object(toolCall), options: request.options)
+    }
+
+    private static let summaryFieldLength = 1024
 
     private func summary(_ id: AgentRuntimeID, _ state: RuntimeState) -> LatchRemoteRuntimeSummary {
         LatchRemoteRuntimeSummary(
@@ -722,6 +798,7 @@ private struct RuntimeState {
     /// As the client sent it; retries compare against this.
     let workspace: String
     let workingDirectory: String
+    let executablePath: String
     var lifecycle = LatchRemoteLifecycle.starting
     var exit: LatchRemoteExit?
     var launch: Task<ACPInitializeResponse, any Error>?
@@ -746,6 +823,7 @@ private struct RuntimeState {
         agentTitle: String,
         workspace: String,
         workingDirectory: String,
+        executablePath: String,
         launch: Task<ACPInitializeResponse, any Error>
     ) {
         self.incarnation = incarnation
@@ -753,6 +831,7 @@ private struct RuntimeState {
         self.agentTitle = agentTitle
         self.workspace = workspace
         self.workingDirectory = workingDirectory
+        self.executablePath = executablePath
         self.launch = launch
     }
 

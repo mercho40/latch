@@ -337,6 +337,44 @@ final class LatchRemoteConnectionTests: XCTestCase {
         }
     }
 
+    /// A server offering frames larger than this client reads does not get to make it buffer them.
+    func testALineOverTheClientsOwnLimitIsAViolationWhateverTheWelcomeSays() async throws {
+        let server = try await FakeServer.start()
+        defer { server.stop() }
+        let connection = connect(server)
+        defer { connection.close() }
+        let peer = try await server.nextConnection()
+        try await peer.acceptHello(maxFrameBytes: 1 << 30)
+        _ = try await withTimeout { try await connection.waitUntilReady() }
+        peer.sendLine(Data(repeating: UInt8(ascii: "a"), count: LatchRemoteProtocol.maxFrameBytes + 1))
+        try await peer.waitForClose(timeout: 10)
+        guard case .closed(.protocolViolation) = connection.state else { return XCTFail("\(connection.state)") }
+    }
+
+    /// Only 127.0.0.1 is tried for `localhost`, as the server listens: whoever holds [::1] at
+    /// the same port, such as another local user, never receives the token.
+    func testLocalhostIsReachedAtIPv4LoopbackOnly() async throws {
+        XCTAssertEqual(LatchRemoteConnection.connectHost(for: "localhost"), "127.0.0.1")
+        XCTAssertEqual(LatchRemoteConnection.connectHost(for: "LocalHost."), "127.0.0.1")
+        XCTAssertEqual(LatchRemoteConnection.connectHost(for: "::1"), "::1")
+        XCTAssertEqual(LatchRemoteConnection.connectHost(for: "vps.example.ts.net"), "vps.example.ts.net")
+
+        let squatter = try await FakeServer.start(host: "::1")
+        defer { squatter.stop() }
+        let connection = LatchRemoteConnection(options: LatchRemoteConnectionOptions(
+            host: "localhost", port: squatter.port, token: Fixture.token, client: Fixture.client, handshakeTimeout: .seconds(3)))
+        connection.start()
+        defer { connection.close() }
+        do {
+            _ = try await withTimeout(5) { try await connection.waitUntilReady() }
+            XCTFail("Expected a failure")
+        } catch {}
+        do {
+            let peer = try await squatter.nextConnection(timeout: 0.5)
+            if let frame = try? await peer.nextFrame(timeout: 0.5) { XCTFail("[::1] received \(frame)") }
+        } catch is TestTimeout {}
+    }
+
     func testAllowingAnUnencryptedNetworkSendsTheHelloAnyway() async throws {
         let server = try await FakeServer.start()
         defer { server.stop() }

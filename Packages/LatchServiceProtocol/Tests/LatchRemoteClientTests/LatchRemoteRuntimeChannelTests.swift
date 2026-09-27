@@ -460,6 +460,41 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         _ = try await pending
     }
 
+    /// As when quitting while the server has stopped answering without the link having failed.
+    func testDetachWaitsBrieflyForAServerThatDoesNotAnswer() async throws {
+        var options = server.channelOptions()
+        options.probeTimeout = .seconds(30)
+        let channel = LatchRemoteRuntimeChannel(options: options)
+        defer { channel.close() }
+        async let attachment = withTimeout { try await channel.attach(after: 0) }
+        let first = try await server.nextConnection()
+        try await first.acceptAttach(after: 0)
+        _ = try await attachment
+        let started = ContinuousClock.now
+        async let detached: Void = withTimeout { await channel.detach() }
+        let request = try await first.nextRequest()
+        XCTAssertEqual(request.command, .detach(runtimeID: Fixture.runtimeID))
+        try await detached
+        let waited = ContinuousClock.now - started
+        XCTAssertGreaterThanOrEqual(waited, LatchRemoteRuntimeChannel.detachReplyLimit - .milliseconds(50))
+        XCTAssertLessThan(waited, LatchRemoteRuntimeChannel.detachReplyLimit + .seconds(1), "Not the probe timeout")
+    }
+
+    /// Sending the same attach again would get the same answer, forever.
+    func testAReattachTooLargeToSendFailsTheChannelRatherThanRetrying() async throws {
+        let channel = channel!
+        let first = try await attached()
+        first.drop()
+        let second = try await server.nextConnection()
+        try await second.acceptHello()
+        let attach = try await second.nextRequest()
+        second.reply(attach.id, failure: .payloadTooLarge)
+        let failed = try await observer.waitForLink { if case .failed = $0 { true } else { false } }
+        XCTAssertEqual(failed, .failed(.protocolViolation("The runtime's state is too large to send.")))
+        let reconnected = try? await server.nextConnection(timeout: 0.5)
+        XCTAssertNil(reconnected, "No reconnect")
+    }
+
     func testLaunchingAfterAFailedAttachStartsFromTheFirstEvent() async throws {
         let channel = channel!
         let turnID = UUID()
@@ -588,9 +623,10 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         peer = try await server.nextConnection()
         arrivals.append(.now)
         try await peer.acceptAttach(after: 0)
-        // 200 ms, then 400 and 800: a handshake alone does not reset the backoff.
-        XCTAssertGreaterThanOrEqual(arrivals[1] - arrivals[0], .milliseconds(350))
-        XCTAssertGreaterThanOrEqual(arrivals[2] - arrivals[1], .milliseconds(700))
+        // 200 ms, then 400 and 800, each jittered down by up to half: a handshake alone does
+        // not reset the backoff, so the last wait is longer than a reset one could be.
+        XCTAssertGreaterThanOrEqual(arrivals[1] - arrivals[0], .milliseconds(175))
+        XCTAssertGreaterThanOrEqual(arrivals[2] - arrivals[1], .milliseconds(350))
 
         try await Task.sleep(for: .milliseconds(100))
         peer.drop()

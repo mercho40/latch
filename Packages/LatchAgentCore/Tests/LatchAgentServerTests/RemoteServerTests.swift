@@ -3,6 +3,7 @@ import LatchACP
 import LatchAgentCore
 import LatchRemoteProtocol
 import LatchServiceProtocol
+import Synchronization
 import XCTest
 @testable import LatchAgentServer
 
@@ -91,23 +92,63 @@ final class RemoteServerTests: XCTestCase {
         }
     }
 
-    func testTheNinthUnauthenticatedConnectionIsClosedAtOnce() async throws {
+    func testANewConnectionPastThePeerLimitClosesThatPeersOldest() async throws {
         try await withServer { testbed in
             var waiting: [TestSocketClient] = []
             for _ in 0..<8 { waiting.append(try testbed.connect()) }
             try await eventually("eight connections accepted") { testbed.server.connectionCount == 8 }
 
+            // The ninth gets in; the first, which has sent nothing, makes room for it.
             let ninth = try testbed.connect()
-            try await ninth.expectClosed(timeout: .seconds(3))
-            try await testbed.waitForLog("too many connections")
+            try await waiting[0].expectClosed(timeout: .seconds(3))
+            try await testbed.waitForLog("too many connections have not authenticated")
 
-            // The first eight are still open and can authenticate, which frees their slots.
-            for client in waiting {
+            // The rest are still open and can authenticate, the ninth included.
+            for client in waiting.dropFirst() + [ninth] {
                 client.hello(token: testbed.token.rawValue)
                 guard case .welcome = try await client.readFrame() else { return XCTFail("expected a welcome") }
             }
             _ = try await testbed.authenticated()
         }
+    }
+
+    /// Sockets that never send a hello, opened again as fast as the server closes them,
+    /// cannot keep a client with the token out.
+    func testIdleConnectionsCannotLockAClientOut() async throws {
+        try await withServer({ $0.handshakeTimeout = .milliseconds(300) }) { testbed in
+            let stop = Atomic(false)
+            let port = testbed.port
+            // As many as the server lets one peer hold, each opened again once it is closed.
+            let squatter = Task.detached {
+                var held: [TestSocketClient] = []
+                while !stop.load(ordering: .relaxed) {
+                    held.removeAll { !$0.isOpen }
+                    while held.count < 8, let client = try? TestSocketClient(port: port) { held.append(client) }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                held.forEach { $0.disconnect() }
+            }
+            defer {
+                stop.store(true, ordering: .relaxed)
+                squatter.cancel()
+            }
+            try await eventually("the squatter holds every slot") { testbed.server.connectionCount >= 8 }
+            for _ in 0..<10 {
+                _ = try await testbed.authenticated()
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+
+    func testEvictionTakesThePeersOwnOldestOrElseTheOldestOfAll() {
+        let local: [UInt8] = [127, 0, 0, 1]
+        let other: [UInt8] = [100, 64, 0, 7]
+        let waiting: [UInt64: [UInt8]] = [3: other, 5: local, 9: local, 12: other]
+        XCTAssertNil(RemoteServer.evictionVictim(among: waiting, for: local, perPeer: 3, total: 5))
+        XCTAssertEqual(RemoteServer.evictionVictim(among: waiting, for: local, perPeer: 2, total: 5), 5)
+        XCTAssertEqual(RemoteServer.evictionVictim(among: waiting, for: other, perPeer: 2, total: 5), 3)
+        XCTAssertEqual(RemoteServer.evictionVictim(among: waiting, for: [10, 0, 0, 1], perPeer: 2, total: 4), 3)
+        XCTAssertEqual(RemoteServer.evictionVictim(among: [:], for: local, perPeer: 1, total: 1), nil)
     }
 
     func testTheHandshakeDeadlineSparesAuthenticatedConnections() async throws {
@@ -127,9 +168,11 @@ final class RemoteServerTests: XCTestCase {
             var waiting: [TestSocketClient] = []
             for _ in 0..<8 { waiting.append(try testbed.connect()) }
             try await eventually("eight connections accepted") { testbed.server.connectionCount == 8 }
+            // Each pushes out the oldest that has not authenticated, and each of those is logged.
             for _ in 0..<60 {
-                let refused = try testbed.connect()
-                try await refused.expectClosed(timeout: .seconds(3))
+                let newest = try testbed.connect()
+                try await waiting.removeFirst().expectClosed(timeout: .seconds(3))
+                waiting.append(newest)
             }
             testbed.server.log.flush()
             XCTAssertLessThanOrEqual(testbed.log.all.count, 30, "\(testbed.log.all)")

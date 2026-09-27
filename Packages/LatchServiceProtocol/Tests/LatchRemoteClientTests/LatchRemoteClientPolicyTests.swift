@@ -17,6 +17,16 @@ final class LatchRemoteClientPolicyTests: XCTestCase {
         XCTAssertEqual((0..<4).map { backoff.delay(afterFailures: $0) }, [50, 100, 150, 150].map { .milliseconds($0) })
     }
 
+    func testJitterSpreadsEachDelayOverItsUpperHalf() {
+        let backoff = LatchRemoteBackoff()
+        XCTAssertEqual(backoff.jitteredDelay(afterFailures: 2, factor: 0.5), .seconds(2))
+        XCTAssertEqual(backoff.jitteredDelay(afterFailures: 2, factor: 1), .seconds(4))
+        XCTAssertEqual(backoff.jitteredDelay(afterFailures: 2, factor: 7), .seconds(4))
+        let delays = Set((0..<50).map { _ in backoff.jitteredDelay(afterFailures: 0) })
+        XCTAssertGreaterThan(delays.count, 1, "Clients dropped together come back apart")
+        XCTAssertTrue(delays.allSatisfy { $0 >= .milliseconds(500) && $0 <= .seconds(1) })
+    }
+
     func testSequenceCursorAdmitsOnlyIncreasingSequencesAndAllowsGaps() {
         var cursor = LatchRemoteSequenceCursor()
         XCTAssertEqual([1, 2, 2, 1, 5, 4, 6].map { cursor.admit($0) }, [true, true, false, false, true, false, true])

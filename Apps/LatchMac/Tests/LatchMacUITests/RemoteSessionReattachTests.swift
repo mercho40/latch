@@ -618,7 +618,111 @@ final class RemoteSessionReattachTests: XCTestCase {
         }
     }
 
+    /// A sequence saved from a server can be anything it sent, the largest there is included,
+    /// and every launch attaches with it.
+    func testASavedCursorAtTheLargestSequenceAttachesWithoutCrashing() async throws {
+        try await LoopbackServer.run { server in
+            let first = try await observer(of: AgentRuntimeID("unused"), server)
+            let id = try await server.onlyRuntime()
+            await first.detach()
+            let connector = connector(server)
+            let model = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            model.restore(messages: [], agentSessionID: "session-1",
+                          remote: SavedSession.RemoteBinding(runtimeID: id.rawValue, cursor: .max))
+            await model.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(model.remoteBinding?.runtimeID, id.rawValue)
+            XCTAssertLessThan(model.appliedSequence, .max, "Clamped to what the server has")
+        }
+    }
+
+    /// An ACP agent for this Mac that answers what a session needs to connect. `prefix` runs
+    /// first; `suffix` once its input has ended.
+    private static func localAgent(prefix: String = "", suffix: String = "") -> String {
+        prefix + #"""
+        while IFS= read -r line; do
+          id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+          case "$line" in
+            *\"method\":\"initialize\"*)
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false},"agentInfo":{"name":"stubborn","version":"1"}}}\n' "$id" ;;
+            *\"method\":\"session*new\"*)
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"s1"}}\n' "$id" ;;
+          esac
+        done
+        """# + "\n" + suffix
+    }
+
+    /// Quitting waits for each agent to exit, never for tool children it leaves behind: those
+    /// are killed at the end of the grace period without holding the quit up.
+    func testQuittingDoesNotWaitForAToolChildThatIgnoresTermination() async throws {
+        try await WindowFixture.run { fixture in
+            let script = fixture.root.appendingPathComponent("agent.sh")
+            let pidFile = fixture.root.appendingPathComponent("child.pid")
+            try Self.localAgent(prefix: "sh -c 'trap \"\" TERM; echo $$ > " + AgentCommand.quotedArgument(pidFile.path)
+                                + "; while :; do sleep 1; done' &\n")
+                .write(to: script, atomically: true, encoding: .utf8)
+            var saved = fixture.session(1, messages: false)
+            saved.customCommand = "/bin/sh " + AgentCommand.quotedArgument(script.path)
+            let (window, sidebar) = try await fixture.restored(saved)
+            let session = try XCTUnwrap(sidebar.selectedSession)
+            try await fixture.settle({ session.model.phase == .ready }, timeout: 10)
+            try await fixture.settle({ (try? String(contentsOf: pidFile, encoding: .utf8)) != nil }, timeout: 5)
+            let child = try XCTUnwrap(pid_t(String(contentsOf: pidFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)))
+
+            let started = ContinuousClock.now
+            await window.shutdown()
+            XCTAssertLessThan(ContinuousClock.now - started, .seconds(3))
+            try await fixture.settle({ kill(child, 0) != 0 }, timeout: 10)
+        }
+    }
+
+    /// Two agents that each take the whole grace period to stop: quitting waits for the
+    /// slower, not for both in turn.
+    func testQuittingStopsEverySessionAtOnce() async throws {
+        try await WindowFixture.run { fixture in
+            let script = fixture.root.appendingPathComponent("stubborn.sh")
+            try Self.localAgent(prefix: "trap '' TERM\n", suffix: "while :; do sleep 1; done\n")
+                .write(to: script, atomically: true, encoding: .utf8)
+            var sessions = [fixture.session(1, messages: false), fixture.session(2, messages: false)]
+            for index in sessions.indices { sessions[index].customCommand = "/bin/sh " + AgentCommand.quotedArgument(script.path) }
+            let (window, sidebar) = try await fixture.restored(sessions[0], sessions[1])
+            for session in sidebar.allSessions {
+                sidebar.select(session)
+                try await fixture.settle({ session.model.phase == .ready }, timeout: 10)
+            }
+
+            let started = ContinuousClock.now
+            await window.shutdown()
+            let took = ContinuousClock.now - started
+            XCTAssertGreaterThanOrEqual(took, .seconds(4), "The agents did take their grace period")
+            XCTAssertLessThan(took, .seconds(8), "One grace period, not one per session")
+        }
+    }
+
     // MARK: The model alone
+
+    /// An attach that was not truncated drops the turn's saved output for the journal to replay;
+    /// eviction can still take part of it before it is read. What the Mac had saved stays.
+    func testAGapInTheReplayOfSavedOutputPutsTheSavedOutputBack() async throws {
+        for (next, lost) in [(UInt64(6), false), (7, true)] {
+            let client = ReplayingRemoteClient(after: [
+                .agent(.sessionUpdate(runtimeID: ReplayingRemoteClient.runtimeID, notification: Self.chunk("saved", 3)), sequence: 3),
+                .outputLost(runtimeID: ReplayingRemoteClient.runtimeID, sequence: nil),
+                .agent(.sessionUpdate(runtimeID: ReplayingRemoteClient.runtimeID, notification: Self.chunk("after", next)), sequence: next),
+            ], lastSequence: next)
+            let model = SessionModel(makeClient: { client })
+            let prompt = ChatMessage(role: .user, text: "go")
+            model.restore(messages: [prompt, ChatMessage(role: .assistant, text: "saved output")], agentSessionID: "remote-session",
+                          remote: SavedSession.RemoteBinding(runtimeID: ReplayingRemoteClient.runtimeID.rawValue, cursor: 2,
+                                                             boundaryMessageID: prompt.id, applied: 5))
+            await model.connect(remote: .custom("agent"), path: "/srv/app")
+            XCTAssertEqual(model.phase, .ready)
+            try await eventually("the event after the gap") { model.appliedSequence == next }
+            let expected = ["go", "saved output"] + (lost ? ["_Some output could not be shown._"] : []) + ["after"]
+            XCTAssertEqual(texts(model), expected, "next \(next)")
+        }
+    }
 
     func testARequestDeliveredTwiceIsShownAndAnsweredOnce() async throws {
         let client = DuplicatingRemoteClient()
@@ -639,6 +743,63 @@ final class RemoteSessionReattachTests: XCTestCase {
         XCTAssertEqual(client.resolutions.count, 1)
         XCTAssertEqual(model.status, "Ready · end_turn")
     }
+}
+
+extension RemoteSessionReattachTests {
+    static func chunk(_ text: String, _ sequence: UInt64) -> ACPSessionNotification {
+        ACPSessionNotification(sessionId: "remote-session", update: .object([
+            "sessionUpdate": .string("agent_message_chunk"),
+            "content": .object(["type": .string("text"), "text": .string(text)]),
+        ]), localSequence: sequence)
+    }
+}
+
+/// A runtime a saved binding points at: the attach answers not truncated, and `backlog`
+/// follows it, as the journal would deliver it.
+private final class ReplayingRemoteClient: AgentServiceClient {
+    static let runtimeID = AgentRuntimeID("replaying")
+    let events: AsyncStream<LatchAgentEvent>
+    let remoteEvents: AsyncStream<RemoteServiceEvent>?
+    var isRemote: Bool { true }
+    private let lifetime: AsyncStream<LatchAgentEvent>.Continuation
+    private let continuation: AsyncStream<RemoteServiceEvent>.Continuation
+    private let backlog: [RemoteServiceEvent]
+    private let lastSequence: UInt64
+
+    init(after backlog: [RemoteServiceEvent], lastSequence: UInt64) {
+        self.backlog = backlog
+        self.lastSequence = lastSequence
+        (events, lifetime) = AsyncStream.makeStream()
+        let (stream, continuation) = AsyncStream<RemoteServiceEvent>.makeStream()
+        remoteEvents = stream
+        self.continuation = continuation
+    }
+
+    func attach(runtimeID id: AgentRuntimeID, after cursor: UInt64) async throws -> LatchRemoteAttachment {
+        let record = LatchRemoteRuntimeRecord(
+            runtimeID: id, agent: .custom("agent"), agentTitle: "agent", workspace: "/srv/app", lifecycle: .ready,
+            initialization: ACPInitializeResponse(protocolVersion: 1, agentCapabilities: .init()),
+            sessionID: "remote-session", session: .new(ACPNewSessionResponse(sessionId: "remote-session")),
+            lastSequence: lastSequence)
+        let attachment = LatchRemoteAttachment(record: record, backlogFrom: cursor + 1, truncated: false)
+        continuation.yield(.attached(runtimeID: id, attachment, server: "fake"))
+        backlog.forEach { continuation.yield($0) }
+        return attachment
+    }
+
+    func execute(_ command: LatchAgentCommand) async throws -> LatchAgentResponse {
+        switch command {
+        case let .stopRuntime(id): return .runtimeStopped(runtimeID: id)
+        default: throw LatchAgentFailure(code: .commandFailed, message: "Unexpected command")
+        }
+    }
+
+    func close() {
+        continuation.finish()
+        lifetime.finish()
+    }
+
+    var transportDescription: String { "remote test double" }
 }
 
 /// Delivers the one permission request of each prompt twice, as a server can after a

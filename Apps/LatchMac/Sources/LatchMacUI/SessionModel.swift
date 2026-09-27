@@ -120,10 +120,18 @@ final class SessionModel {
     /// the backlog up to `through` shows it starting, the prompt never left this Mac.
     /// `atQuit` when the binding was saved at quit, rather than kept when the link failed.
     private var unsentTurn: (turn: UUID, through: UInt64, atQuit: Bool)?
+    /// What an attach took out of the transcript for the journal to replay, until the replay
+    /// has passed `through`. Put back if the journal turns out to have lost part of it: output
+    /// evicted after the attach answered, which a truncated attach would have said up front.
+    private var replaced: (boundary: UUID?, messages: [ChatMessage], through: UInt64)?
+    /// After `replaced` was put back: the next event says whether anything after `through`,
+    /// which the transcript never had, was lost as well.
+    private var lostPast: UInt64?
     static let outputLostWhileClosed = "Some output from while Latch was closed could not be recovered."
     static let outputLostWhileUnreachable = "Some output from while the server was out of reach could not be recovered."
     static let promptNotSent = "This message was not sent before Latch quit."
     static let promptNotSentOverLink = "This message was not sent: the server could not be reached."
+    static let outputLostNotice = "Some output could not be shown."
 
     /// What a relaunch needs to attach to this session's runtime again, saved in the same
     /// snapshot as `messages`. While a turn runs, the transcript is cut back to its prompt and
@@ -222,8 +230,16 @@ final class SessionModel {
         // it had got to, the turn in flight included, rather than starting another agent.
         if case let .failed(_, reason, runtimeGone) = linkState {
             let binding = runtimeGone ? nil : remoteBinding
+            if runtimeGone, phase == .prompting {
+                // What the turn said after the link failed went with the runtime.
+                history.appendNotice(Self.outputLostWhileUnreachable)
+                publishHistory()
+            }
+            // A runtime gone from its server, as after a restart, stopped there: a turn it was
+            // running did not finish, and is never announced as if it had.
             resetAfterLoss(status: runtimeGone ? "Agent stopped" : "Not connected", error: reason,
-                           advice: runtimeGone ? "Retry to start it again." : nil, connectionFailure: !runtimeGone)
+                           advice: runtimeGone ? "Retry to start it again." : nil, connectionFailure: !runtimeGone,
+                           turnStopped: runtimeGone)
             guard let binding else { return }
             savedBinding = binding
             bindingKeptFromLink = true
@@ -240,10 +256,12 @@ final class SessionModel {
                        error: "Lost the connection to the Latch agent service. Select the agent again to reconnect.")
     }
 
+    /// `turnStopped` says a running turn was stopped rather than ended, when the server did
+    /// not say so itself; `stoppedOnServer` implies it.
     private func resetAfterLoss(status: String, error: String, advice: String? = nil, connectionFailure: Bool = false,
-                                stoppedOnServer: Bool = false) {
+                                stoppedOnServer: Bool = false, turnStopped: Bool = false) {
         // The agent ending ends its turn; a failed link does not, since the turn runs on.
-        if phase == .prompting, !connectionFailure { noteTurnEnded(stopped: stoppedOnServer) }
+        if phase == .prompting, !connectionFailure { noteTurnEnded(stopped: stoppedOnServer || turnStopped) }
         generation = UUID()
         runtimeID = nil
         forgetRemoteRuntime()
@@ -392,10 +410,20 @@ final class SessionModel {
         loadedThroughSequence = record.loadedThrough
         if attachment.truncated {
             appliedSequence = min(binding.applied, record.lastSequence)
-            if attachment.backlogFrom > binding.applied + 1 { history.appendNotice(Self.outputLostWhileClosed) }
+            // Subtracted rather than added: a saved sequence came from the server, which could
+            // have sent the largest there is.
+            if attachment.backlogFrom > 0, attachment.backlogFrom - 1 > binding.applied {
+                history.appendNotice(Self.outputLostWhileClosed)
+            }
         } else {
             appliedSequence = min(binding.cursor, record.lastSequence)
+            let saved = history.messages
             history.removeMessages(after: binding.boundaryMessageID)
+            let cut = binding.boundaryMessageID.map { id in saved.firstIndex { $0.id == id }.map { $0 + 1 } ?? 0 } ?? 0
+            let through = min(binding.applied, record.lastSequence)
+            if through > appliedSequence, cut < saved.count {
+                replaced = (binding.boundaryMessageID, Array(saved[cut...]), through)
+            }
         }
         publishHistory()
         if let turn = binding.boundaryTurnID { remember(turn) }
@@ -547,6 +575,8 @@ final class SessionModel {
     /// is kept: only a close or a new context gives that one up.
     private func forgetRemoteRuntime() {
         runtimeIsRemote = false
+        replaced = nil
+        lostPast = nil
         attaching = nil
         resumeAttachWaiter()
         turnBoundary = nil
@@ -975,6 +1005,13 @@ final class SessionModel {
     /// A server's journal: agent events as this Mac's service reports them, and what only a
     /// server knows. Each is taken in at most once, so its sequence can be recorded as applied.
     private func receive(_ event: RemoteServiceEvent) {
+        if let limit = lostPast, let (id, sequence) = event.journalPosition, id == runtimeID {
+            lostPast = nil
+            if sequence > limit, sequence - limit > 1 {
+                history.appendNotice(Self.outputLostNotice)
+                publishHistory()
+            }
+        }
         // Already in the transcript: a truncated attach's backlog can begin before what the
         // saved transcript shows.
         if let (id, sequence) = event.journalPosition, id == runtimeID, sequence <= appliedSequence { return }
@@ -999,8 +1036,24 @@ final class SessionModel {
         case let .configurationSet(id, configuration, sequence) where id == runtimeID:
             apply(configuration)
             appliedSequence = max(appliedSequence, sequence)
+        case let .outputLost(id, nil) where id == runtimeID && replaced.map { appliedSequence < $0.through } == true:
+            // A gap in a replay of what the transcript had before the attach: that is shown
+            // again, as saved, and only what may have been lost after it is reported.
+            let replaced = replaced!
+            self.replaced = nil
+            let cut: Int? = if let boundary = replaced.boundary {
+                history.messages.firstIndex { $0.id == boundary }.map { $0 + 1 }
+            } else { 0 }
+            if let cut {
+                history.restore(Array(history.messages.prefix(cut)) + replaced.messages)
+                appliedSequence = max(appliedSequence, replaced.through)
+                lostPast = replaced.through
+            } else {
+                history.appendNotice(Self.outputLostNotice)
+            }
+            publishHistory()
         case let .outputLost(id, sequence) where id == runtimeID:
-            history.appendNotice("Some output could not be shown.")
+            history.appendNotice(Self.outputLostNotice)
             publishHistory()
             if let sequence { appliedSequence = max(appliedSequence, sequence) }
         case let .turnStarted(id, turn, text, attachments, sequence) where id == runtimeID:
@@ -1022,6 +1075,7 @@ final class SessionModel {
         default:
             break
         }
+        if let replaced, appliedSequence >= replaced.through { self.replaced = nil }
         caughtUp()
     }
 

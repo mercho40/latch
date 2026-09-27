@@ -121,9 +121,9 @@ final class FakeServer: Sendable {
         self.connections = connections
     }
 
-    static func start() async throws -> FakeServer {
+    static func start(host: NWEndpoint.Host = "127.0.0.1") async throws -> FakeServer {
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        parameters.requiredLocalEndpoint = .hostPort(host: host, port: .any)
         let listener = try NWListener(using: parameters)
         let ready = TestInbox<Result<UInt16, any Error>>("the listener")
         listener.stateUpdateHandler = { [weak listener] state in

@@ -8,6 +8,17 @@ final class RemoteEventJournalTests: XCTestCase {
     private let first = AgentRuntimeID("first")
     private let second = AgentRuntimeID("second")
 
+    func testTheLargestCursorAClientCanSendIsAnswered() {
+        let journal = RemoteEventJournal(runtimeBudget: 1000, globalBudget: 1000, clock: { .now })
+        let connection = journal.openConnection(wake: {})
+        XCTAssertEqual(journal.subscribe(connection, to: first, after: .max).backlogFrom, .max)
+        journal.createRuntime(first)
+        journal.append(event(100), to: first)
+        let known = journal.subscribe(connection, to: first, after: .max)
+        XCTAssertEqual(known.backlogFrom, 2)
+        XCTAssertTrue(known.truncated)
+    }
+
     func testGlobalBudgetEvictsTheOldestAcrossRuntimes() throws {
         let journal = RemoteEventJournal(runtimeBudget: 1000, globalBudget: 250, clock: { .now })
         journal.createRuntime(first)

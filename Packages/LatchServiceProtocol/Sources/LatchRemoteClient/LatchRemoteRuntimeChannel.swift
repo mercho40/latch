@@ -59,9 +59,10 @@ public enum LatchRemoteChannelEvent: Equatable, Sendable {
 /// reconnect can still overwrite a change another client made in between.
 ///
 /// The channel fails permanently, finishing both streams and every pending call, on
-/// `unauthorized`, `protocolMismatch`, `destinationNotAllowed`, `runtimeNotFound` when
-/// re-attaching, or `close()`. Anything else is retried with `backoff`. Until then,
-/// `reconnect(using:)` can point it at the server another way, such as a new address or token.
+/// `unauthorized`, `protocolMismatch`, `destinationNotAllowed`, `runtimeNotFound` or
+/// `payloadTooLarge` when re-attaching, or `close()`. Anything else is retried with `backoff`.
+/// Until then, `reconnect(using:)` can point it at the server another way, such as a new
+/// address or token.
 public final class LatchRemoteRuntimeChannel: Sendable {
     public struct Options: Sendable {
         public var connection: LatchRemoteConnectionOptions
@@ -292,8 +293,14 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         }
     }
 
+    /// How long `detach()` waits for the server's reply. Nothing depends on it: a connection
+    /// that closes drops its cursors on the server all the same, so a server that has stopped
+    /// answering must not hold up whoever is letting go, such as an app that is quitting.
+    public static let detachReplyLimit: Duration = .seconds(1)
+
     /// Stops following the runtime without stopping it. Best effort: sent once if the link is
-    /// up, never retried. Attaches still pending and turns being awaited fail with `notAttached`.
+    /// up, never retried, and its reply waited for no longer than `detachReplyLimit`. Attaches
+    /// still pending and turns being awaited fail with `notAttached`.
     public func detach() async {
         let connection: LatchRemoteConnection? = core.withLock { core in
             core.attached = false
@@ -311,7 +318,8 @@ public final class LatchRemoteRuntimeChannel: Sendable {
             core.turnWaiters = [:]
             return core.commandsReady ? core.connection : nil
         }
-        _ = try? await connection?.request(.detach(runtimeID: options.runtimeID), timeout: options.probeTimeout)
+        _ = try? await connection?.request(.detach(runtimeID: options.runtimeID),
+                                           timeout: min(options.probeTimeout, Self.detachReplyLimit))
     }
 
     // MARK: - Link
@@ -552,6 +560,9 @@ public final class LatchRemoteRuntimeChannel: Sendable {
                 connected(&core)
             case let .failure(error as LatchRemoteError) where error.code == .runtimeNotFound:
                 fail(&core, with: .runtimeNotFound(message: error.message))
+            case let .failure(error as LatchRemoteError) where error.code == .payloadTooLarge:
+                // The same attach gets the same answer however often it is sent.
+                fail(&core, with: .protocolViolation("The runtime's state is too large to send."))
             case let .failure(error as LatchRemoteClientError) where error.isLinkFailure:
                 // The connection closed; its state change reconnects.
                 break
@@ -585,7 +596,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         core.lostAt = lostAt
         setLink(.reconnecting(since: lostAt), &core)
 
-        let delay = core.reconnectImmediately ? .zero : options.backoff.delay(afterFailures: core.failures)
+        let delay = core.reconnectImmediately ? .zero : options.backoff.jitteredDelay(afterFailures: core.failures)
         core.reconnectImmediately = false
         core.failures += 1
         core.reconnectTimer += 1

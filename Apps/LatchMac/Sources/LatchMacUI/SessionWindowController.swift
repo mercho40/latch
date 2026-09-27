@@ -498,7 +498,13 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         attention?.clear()
         await flushPersistence()
         for task in closing.values { await task.value }
-        for session in sidebar.allSessions { await session.shutdown(for: .quit) }
+        // All at once: each may wait on an agent or a server, and quitting should wait for the
+        // slowest of them, not for their sum.
+        await withTaskGroup(of: Void.self) { group in
+            for session in sidebar.allSessions {
+                group.addTask { await session.shutdown(for: .quit) }
+            }
+        }
         // Teardown may deliver a final chunk. IDs, drafts and history survive disconnect, and
         // a remote session's binding survives quitting, so this save is what the next launch
         // attaches with.

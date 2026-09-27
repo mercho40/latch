@@ -450,6 +450,8 @@ final class RemoteSessionLiveTests: XCTestCase {
                 XCTAssertEqual(session.model.status, "Ready · end_turn")
                 XCTAssertNil(session.model.errorMessage)
                 XCTAssertTrue(session.banner.isHidden)
+                // The turn's outcome and its last events travel separately; wait for the events.
+                try await fixture.settle({ self.texts(session.model).last == "done" }, timeout: 5)
                 XCTAssertEqual(texts(session.model), ["tools please", "reading", "Read notes · completed", "done"])
                 let runtime = try await server.onlyRuntime()
                 XCTAssertEqual(runtime, id, "No second agent")
@@ -533,6 +535,8 @@ final class RemoteSessionLiveTests: XCTestCase {
             await sending.value
             XCTAssertEqual(model.status, "Ready · end_turn")
             XCTAssertNil(model.errorMessage)
+            // The turn's outcome and its last events travel separately; wait for the events.
+            try await eventually("the last chunk") { self.texts(model).last == "done" }
             XCTAssertEqual(texts(model), ["tools please", "reading", "Read notes · completed", "done"])
             let runtime = try await server.onlyRuntime()
             XCTAssertEqual(runtime, id)
@@ -634,6 +638,30 @@ final class RemoteSessionLiveTests: XCTestCase {
             XCTAssertNil(model.errorMessage)
             XCTAssertEqual(model.phase, .ready)
             XCTAssertEqual(server.lines(in: "loads.log"), 1, "Resumed in a new agent")
+        }
+    }
+
+    /// The server restarted while the link was down mid-turn, so the re-attach finds the
+    /// runtime gone. The turn did not finish: it went with the agent, and is announced so.
+    func testARestartWhileTheLinkIsDownIsNotAnnouncedAsTheTurnFinishing() async throws {
+        try await LoopbackServer.run { server in
+            let wake = NotificationCenter()
+            let connector = connector(server, backoff: LatchRemoteBackoff(initial: .seconds(120), maximum: .seconds(120)),
+                                      wake: wake)
+            let model = try await connectedModel(server, connector)
+            let sending = Task { await model.send("tools please") }
+            try await eventually("the first chunk") { self.texts(model).contains("reading") }
+            let ended = model.turnsEnded
+            try XCTUnwrap(connector.liveClients.first).dropConnectionForTesting()
+            try await eventually("the link lost") { if case .reconnecting = model.linkState { true } else { false } }
+            try await server.restart()
+            wake.post(name: NSWorkspace.didWakeNotification, object: nil)
+            try await eventually("the runtime gone") { model.phase == .disconnected }
+            await sending.value
+            XCTAssertEqual(model.status, "Agent stopped")
+            XCTAssertEqual(model.turnsEnded, ended + 1)
+            XCTAssertTrue(model.lastTurnEndedByStop, "Not announced as a finished turn")
+            XCTAssertEqual(texts(model).last, "_" + SessionModel.outputLostWhileUnreachable + "_")
         }
     }
 
@@ -894,7 +922,9 @@ final class LoopbackServer {
 /// `slow.log`, `asked.log`, `tools.log`, `flood.log` and `deluge.log` when a turn got that far. A `fail-new`
 /// file fails session/new. The `tools` and `flood` turns hold after their first output until
 /// a `go` file appears, and exit with status 3 if a `die` file appears first; so does `deluge`,
-/// which streams about 12 KB, a tool row and `mid` first. `SmokeAgent.remoteScript` is the
+/// which streams about 12 KB, a tool row and `mid` first. A hold also ends that way after a
+/// minute, or once the process that started the agent has gone, so a test run that dies
+/// mid-turn leaves no agent behind. `SmokeAgent.remoteScript` is the
 /// bundle smoke's cut-down copy: a change to the JSON Latch writes must keep both matching.
 enum RemoteMockAgent {
     static let script = #"""
@@ -904,7 +934,7 @@ enum RemoteMockAgent {
     fail() { printf '{"jsonrpc":"2.0","id":%s,"error":{"code":%s,"message":"%s"}}\n' "$1" "$2" "$3"; }
     chunk() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1"; }
     tool() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"%s","toolCallId":"call-7","title":"Read notes","status":"%s"}}}\n' "$1" "$2"; }
-    hold() { while [ ! -f go ]; do if [ -f die ]; then exit 3; fi; sleep 0.05; done; }
+    hold() { n=0; while [ ! -f go ]; do if [ -f die ] || ! kill -0 "$PPID" 2>/dev/null || [ $n -ge 1200 ]; then exit 3; fi; n=$((n+1)); sleep 0.05; done; }
     ask() {
       printf '%s\n' '{"jsonrpc":"2.0","id":900,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1","title":"Edit file"},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
     }

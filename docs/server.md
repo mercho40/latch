@@ -41,7 +41,7 @@ install -D -m 755 "$(swift build -c release --package-path Packages/LatchAgentCo
 
 This binary loads the Swift runtime from the toolchain, so keep the toolchain installed.
 
-Check it with `latch-server --version`; `latch-server --help` lists every option.
+Check it with `~/.local/bin/latch-server --version`; `--help` lists every option. The rest of this guide runs it as plain `latch-server`, which works once `~/.local/bin` is on your `PATH`. On Ubuntu and Debian the login profile adds it only if the directory existed when you logged in, so after creating it, log out and back in; elsewhere, add it to `PATH` yourself or use the full path.
 
 ## The token
 
@@ -57,9 +57,15 @@ latch-server pair --host vps.example.ts.net
 
 prints a `latch://vps.example.ts.net:7428?token=…` string to paste into Latch. `--host` is the name or address your Mac will connect to; add `--port` if the server does not listen on 7428. The string contains the token. Treat it like the token: paste it straight into Latch, and do not send it through chat, mail or notes.
 
-`latch-server` refuses to run as root, because its agents would run as root too; `--allow-root` overrides that. Create an ordinary user for it instead.
+`latch-server` refuses to run as root, because its agents would run as root too; `--allow-root` overrides that. Create an ordinary user for it instead, and do everything in this guide logged in as that user over SSH, not through `su` or `sudo -u`: those do not start the user's systemd instance, and `systemctl --user` then fails with "Failed to connect to bus".
 
 ## Run it as a systemd user service
+
+Create the directory for user units, which a new user does not have yet:
+
+```sh
+mkdir -p ~/.config/systemd/user
+```
 
 Save this as `~/.config/systemd/user/latch-server.service`:
 
@@ -139,7 +145,9 @@ journalctl --user -u latch-server -f
 
 If that shows nothing, the journal may be volatile, as on Debian without `/var/log/journal`: create that directory to keep logs, or read them as root with `journalctl _SYSTEMD_USER_UNIT=latch-server.service`. `systemctl --user status latch-server` shows the last lines either way.
 
-The server logs where it listens, each connection from its peer address, and each agent launched, stopped or exited. It never logs the token. Lines that a peer without the token can cause are limited to 30 a minute. Agents' stderr is logged only with `--log-agent-stderr`, one escaped line at a time, each prefixed with its runtime ID, cut at 1,000 characters and at most 100 lines per agent every ten seconds.
+The server logs where it listens, each connection from its peer address, and each agent launched, stopped or exited, and why an agent failed to launch. It never logs the token. Lines that a peer without the token can cause are limited to 30 a minute. Agents' stderr is logged only with `--log-agent-stderr`, one escaped line at a time, each prefixed with its runtime ID, cut at 1,000 characters and at most 100 lines per agent every ten seconds.
+
+When Latch says only "Agent command failed." for Claude Code or Codex, the log has a `failed to launch` line with the command that was run. The usual cause is a Node.js older than 22 found first on the server's `PATH` (see Requirements); run the server with `--log-agent-stderr` to see what the agent printed before it exited.
 
 ## When Latch quits or loses the connection
 
@@ -147,9 +155,9 @@ Losing the connection does not stop anything: turns run to their end and permiss
 
 Quitting Latch does not stop remote agents either. Each saved session remembers the agent it was following on the server and how far it had got. The next launch attaches to every such agent in the background, without waiting for you to select the session: it catches up on what the agent did meanwhile, raises any permission request still waiting, finishes following a turn still running, and announces the turn it left running, if that finished while Latch was closed, as it would any other. A permission request raised while Latch is closed waits on the server, unanswered, until then. If Latch is killed rather than quit, its remote agents keep running as well, and the next launch attaches from what Latch last saved. An agent left idle with no client for longer than the idle timeout below is stopped meanwhile, and its session resumes it as after a restart.
 
-Closing a remote session in Latch stops its agent, as Session → Disconnect does. If the server cannot be reached within ten seconds, the agent is left running there until the idle timeout below. Undoing the close starts the agent again and resumes its saved session, if the agent can load one.
+Closing a remote session in Latch stops its agent, as Session → Disconnect does. If the server cannot be reached within ten seconds, the agent is left running there until the idle timeout below; if it was waiting on a permission request, until the longer timeout for those. Undoing the close starts the agent again and resumes its saved session, if the agent can load one.
 
-Removing a server from Latch's Settings stops none of its agents. Close its sessions first: after Latch relaunches, a session on a removed server cannot reach its agent, and closing it leaves the agent running until the idle timeout below, which never stops one with a permission request waiting, or until it is stopped on the server.
+Removing a server from Latch's Settings stops none of its agents. Close its sessions first: after Latch relaunches, a session on a removed server cannot reach its agent, and closing it leaves the agent running until the idle timeouts below stop it, or until it is stopped on the server.
 
 ## When the server stops
 
@@ -161,12 +169,13 @@ A session that says its agent was stopped on the server means the agent is no lo
 
 ## Idle agents
 
-An agent nobody has been attached to for 24 hours, with no turn running and no permission request waiting, is stopped and forgotten; the server checks once a minute. Change the timeout with `--detached-timeout`, such as `12h`, `90m` or `1h30m`; `0` turns this off. A client that comes back later resumes the session as after a restart.
+An agent nobody has been attached to for 24 hours, with no turn running, is stopped and forgotten; the server checks once a minute. Change the timeout with `--detached-timeout`, such as `12h`, `90m` or `1h30m`; `0` turns this off. An agent whose turn is waiting on a permission request is given seven days, or the timeout if that is longer, so a request left waiting when Latch quit is still there the next day, but an agent whose session was closed while the server was out of reach does not run forever. An agent running a turn that waits on nothing is never stopped. A client that comes back later resumes the session as after a restart.
 
 ## Caveats
 
 - **One user per server.** Everyone who holds the token acts as the same user, with the same agents and logins. There are no per-device tokens: rotating the token disconnects every device.
 - **Not a sandbox.** Agents run with the server user's full permissions. Approval sheets relay what an agent asks; they do not confine it.
-- **Other users on the same machine.** While `latch-server` is down, another local user could listen on its port, loopback included, and read the token from the next client that connects. An SSH tunnel does not prevent this, since it connects to that port too. With an SSH tunnel the same applies on the Mac: while the tunnel is down, another user of the Mac could listen on its forwarded port. Prefer machines whose only user is you.
+- **Other users on the same machine.** While `latch-server` is down, another local user could listen on its port, loopback included, and read the token from the next client that connects. Latch connects to `localhost` at `127.0.0.1` only, where the server listens, never at `::1`. An SSH tunnel does not prevent this, since it connects to that port too. With an SSH tunnel the same applies on the Mac: while the tunnel is down, another user of the Mac could listen on its forwarded port. Prefer machines whose only user is you.
+- **Connections without the token.** Anyone who can reach the port can open connections that never send a hello. The server holds at most eight such connections per address and 64 in all, and a new one closes the oldest rather than being turned away, so idle sockets cannot keep Latch out; a peer that opens connections faster than Latch completes its handshake can still delay it.
 - **No TLS.** Latch relies on Tailscale or SSH for encryption. `--allow-unencrypted-network` on the server, or Allow unencrypted network in Latch, sends the token and every prompt and reply in the clear.
 - **No file attachments.** Remote sessions take images, for agents that accept them, but not files or folders, which live on the Mac.

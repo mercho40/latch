@@ -90,6 +90,75 @@ final class RemoteServerClientTests: XCTestCase {
             }
         }
     }
+
+    /// Two requests of several megabytes each, such as edits with large diffs, would make a
+    /// record too large for one frame, and every re-attach would be refused.
+    func testAChannelReattachesToARuntimeWithLargePendingRequests() async throws {
+        try await withServer { testbed in
+            let script = #"""
+            PATH=/usr/bin:/bin:$PATH
+            reply() { printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$1" "$2"; }
+            while IFS= read -r line; do
+              id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+              case "$line" in
+                *\"method\":\"initialize\"*)
+                  reply "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"agentInfo":{"name":"mock-agent","version":"1.0.0"}}' ;;
+                *\"method\":\"session*/new\"*)
+                  reply "$id" '{"sessionId":"session-1"}' ;;
+                *\"method\":\"session*/prompt\"*)
+                  big=$(printf '%04500000d' 0)
+                  for n in 900 901; do
+                    printf '{"jsonrpc":"2.0","id":%s,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-%s","title":"%s"},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"}]}}\n' "$n" "$n" "$big"
+                  done ;;
+              esac
+            done
+            """#
+            try script.write(to: testbed.bed.workspace.appendingPathComponent("big.sh"), atomically: true, encoding: .utf8)
+            let id = AgentRuntimeID("big")
+            let channel = LatchRemoteRuntimeChannel(options: LatchRemoteRuntimeChannel.Options(
+                host: "127.0.0.1", port: testbed.port, token: testbed.token,
+                client: LatchRemoteClientInfo(name: "tests", version: "1", platform: "macOS"),
+                runtimeID: id, backoff: LatchRemoteBackoff(initial: .milliseconds(50), maximum: .milliseconds(200))))
+            channel.start()
+            let events = ChannelRecorder(channel.events)
+            defer { channel.close() }
+            _ = try await channel.launch(agent: testbed.bed.script("big.sh"), workspace: testbed.bed.workspace.path)
+            _ = try await channel.send(.newSession(runtimeID: id))
+            let turn = Task { try? await channel.prompt(turnID: UUID(), blocks: [.text("big")]) }
+            defer { turn.cancel() }
+            try await eventually("both requests pending") { try await testbed.bed.summary(id).pendingPermissionCount == 2 }
+            try await events.wait("both requests delivered") { events in
+                events.count { if case .permissionRequested = $0 { true } else { false } } == 2
+            }
+
+            channel.dropConnectionForTesting()
+            let answered = try await channel.send(.listRuntimes)
+            guard case .runtimes = answered else { return XCTFail("\(answered)") }
+            XCTAssertEqual(channel.linkState, .connected)
+            XCTAssertTrue(events.reattached)
+            let record = try await testbed.bed.record(id)
+            XCTAssertEqual(record.pendingPermissions.count, 2)
+        }
+    }
+
+    /// As when Latch launches with many sessions on one server: each opens a connection of
+    /// its own at the same moment.
+    func testManyChannelsConnectingAtOnceAllGetIn() async throws {
+        try await withServer { testbed in
+            let channels = (0..<40).map { index in
+                LatchRemoteRuntimeChannel(options: LatchRemoteRuntimeChannel.Options(
+                    host: "127.0.0.1", port: testbed.port, token: testbed.token,
+                    client: LatchRemoteClientInfo(name: "tests", version: "1", platform: "macOS"),
+                    runtimeID: AgentRuntimeID("storm-\(index)")))
+            }
+            defer { channels.forEach { $0.close() } }
+            channels.forEach { $0.start() }
+            // Well inside the Mac app's 15-second limit on a first connection.
+            try await eventually("every channel connected", timeout: .seconds(8)) {
+                channels.allSatisfy(\.hasConnected)
+            }
+        }
+    }
 }
 
 /// Collects a channel's events as they arrive.

@@ -58,6 +58,15 @@ public final class LatchRemoteConnection: Sendable {
     static let heartbeatRange = 1...3600
     static let maxFrameRange = 1...(1 << 30)
 
+    /// The host to connect to for the one the user named. `localhost` is 127.0.0.1, as it is
+    /// to `latch-server --listen`: resolved, it would be tried as ::1 first, where the server
+    /// does not listen and any other local user could, and would receive the token.
+    static func connectHost(for host: String) -> String {
+        var name = host.lowercased()
+        if name.hasSuffix(".") { name.removeLast() }
+        return name == "localhost" ? "127.0.0.1" : host
+    }
+
     public let options: LatchRemoteConnectionOptions
     public let queue: DispatchQueue
     private let stateHandler: @Sendable (State) -> Void
@@ -109,7 +118,7 @@ public final class LatchRemoteConnection: Sendable {
             tcp.noDelay = true
             let parameters = NWParameters(tls: nil, tcp: tcp)
             parameters.preferNoProxies = true
-            let connection = NWConnection(host: NWEndpoint.Host(options.host), port: port, using: parameters)
+            let connection = NWConnection(host: NWEndpoint.Host(Self.connectHost(for: options.host)), port: port, using: parameters)
             core.connection = connection
             transition(&core, to: .connecting)
             return connection
@@ -354,7 +363,8 @@ public final class LatchRemoteConnection: Sendable {
                 close(&core, with: .protocolViolation("The welcome's limits are out of range."))
                 return
             }
-            core.decoder.maximumLineBytes = welcome.maxFrameBytes
+            // What this client reads is bounded by its own limit, whatever the server offers.
+            core.decoder.maximumLineBytes = min(welcome.maxFrameBytes, LatchRemoteProtocol.maxFrameBytes)
             core.lastReceived = .now
             startHeartbeat(&core, seconds: welcome.heartbeatSeconds)
             transition(&core, to: .ready(welcome))

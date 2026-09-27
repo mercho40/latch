@@ -114,6 +114,11 @@ public enum LatchServerMain {
             case let .exited(status):
                 standardErrorLog?.forget(id)
                 log.log("runtime \(id.rawValue) exited" + (status.map { " with status \($0)" } ?? ""))
+            case let .failedToLaunch(title, executable, status, reason):
+                standardErrorLog?.forget(id)
+                log.log(RemoteRuntimeLifecycleEvent.failedLaunchLine(
+                    id, agentTitle: title, executable: executable, status: status, reason: reason,
+                    standardErrorLogged: standardErrorLog != nil))
             }
         }
         let service = LatchAgentService(clientInfo: ACPImplementation(

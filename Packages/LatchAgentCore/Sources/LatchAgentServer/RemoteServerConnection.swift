@@ -181,7 +181,7 @@ final class RemoteServerConnection: Sendable {
             return true
         }
         guard proceed, server.authenticated(self) else {
-            close("the server is shutting down")
+            close("closed before the hello was accepted")
             return false
         }
         // A check that ran between reading the token and recording it skipped this

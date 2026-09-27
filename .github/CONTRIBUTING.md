@@ -24,7 +24,7 @@ swift test --package-path Apps/LatchMac
 bash Scripts/test-mac-app.sh
 ```
 
-None of these need network or model access. See [building and testing](../docs/building-and-testing.md) for the rest.
+None of these need network or model access. If you changed the packages or `latch-server`, also run `bash Scripts/test-linux.sh`, which needs Apple's container tool and downloads the Swift image on first use. See [building and testing](../docs/building-and-testing.md) for the rest.
 
 ## License
 

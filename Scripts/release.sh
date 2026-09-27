@@ -29,6 +29,11 @@ for config in Apps/LatchMac/Configuration/App.xcconfig Apps/LatchMac/Configurati
     configured="$(sed -n 's/^MARKETING_VERSION = //p' "$config")"
     [[ "$configured" == "$version" ]] || fail "$config has MARKETING_VERSION = $configured, not $version; commit the bump first"
 done
+# latch-server reports its own version in the welcome; a server and the app from one release must agree.
+server_version_file=Packages/LatchAgentCore/Sources/LatchAgentServer/LatchServerVersion.swift
+server_version="$(sed -n 's/^ *public static let current = "\(.*\)"$/\1/p' "$server_version_file")"
+[[ "$server_version" == "$version" ]] ||
+    fail "$server_version_file has LatchServerVersion.current = \"$server_version\", not $version; commit the bump first"
 
 bash Scripts/test-mac-app.sh --release
 

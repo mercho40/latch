@@ -9,17 +9,20 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../Packages/LatchACP"),
+        .package(path: "../../Packages/LatchAgentCore"),
         .package(path: "../../Packages/LatchServiceProtocol"),
+        .package(path: "../../Packages/LatchSessionKit"),
     ],
     targets: [
         .target(name: "LatchiOSUI", dependencies: [
-            "LatchACP", "LatchServiceProtocol",
+            "LatchACP", "LatchServiceProtocol", "LatchSessionKit",
+            .product(name: "LatchAgentCore", package: "LatchAgentCore"),
             .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
             .product(name: "LatchRemoteClient", package: "LatchServiceProtocol"),
         ]),
         // UIKit tests: they run in the iOS Simulator through the `Latch iOS` scheme, not `swift test`.
         .testTarget(name: "LatchiOSUITests", dependencies: [
-            "LatchiOSUI",
+            "LatchiOSUI", "LatchSessionKit",
             .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
         ]),
     ]

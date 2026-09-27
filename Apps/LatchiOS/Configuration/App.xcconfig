@@ -1,0 +1,45 @@
+// The iOS app: a control surface for agents on a latch-server. It never runs an agent itself.
+PRODUCT_NAME = Latch
+PRODUCT_BUNDLE_IDENTIFIER = dev.latchapp.ios
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+IPHONEOS_DEPLOYMENT_TARGET = 18.0
+SDKROOT = iphoneos
+SUPPORTED_PLATFORMS = iphoneos iphonesimulator
+SUPPORTS_MACCATALYST = NO
+SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO
+SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO
+TARGETED_DEVICE_FAMILY = 1,2
+SWIFT_VERSION = 6.0
+
+// Automatic signing with no team committed. To run on a device, put your team ID in
+// Configuration/Local.xcconfig (git-ignored) as `DEVELOPMENT_TEAM = ABCDE12345`; a free
+// personal team works. A bundle ID belongs to one team, so unless yours owns dev.latchapp.ios
+// also set `PRODUCT_BUNDLE_IDENTIFIER = <your reverse-DNS>.latch` there. Simulator builds need
+// no team: pass CODE_SIGNING_ALLOWED=NO.
+CODE_SIGN_STYLE = Automatic
+#include? "Local.xcconfig"
+
+// Icon Composer icon shared with the Mac app; actool renders it for iOS too.
+ASSETCATALOG_COMPILER_APPICON_NAME = Latch
+ASSETCATALOG_COMPILER_OPTIMIZATION = space
+
+// The generated Info.plist, merged with Configuration/Info.plist for what has no
+// INFOPLIST_KEY_ setting: the latch:// URL scheme a pairing link opens the app with, and a
+// scene manifest with one window. A generated manifest would allow several, and a link
+// opened while two windows show must land in one place; LatchAppDelegate names the
+// scene's delegate class.
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_FILE = Configuration/Info.plist
+INFOPLIST_KEY_CFBundleDisplayName = Latch
+INFOPLIST_KEY_LSApplicationCategoryType = public.app-category.developer-tools
+INFOPLIST_KEY_NSHumanReadableCopyright = Copyright © 2026 Latch contributors
+INFOPLIST_KEY_NSLocalNetworkUsageDescription = Latch connects to a latch-server on your network or tailnet, where your agents run.
+INFOPLIST_KEY_UILaunchScreen_Generation = YES
+INFOPLIST_KEY_UIApplicationSceneManifest_Generation = NO
+INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES
+INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+
+ALWAYS_SEARCH_USER_PATHS = NO
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks

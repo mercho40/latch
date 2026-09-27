@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [Packages/LatchACP, Packages/LatchServiceProtocol, Packages/LatchAgentCore]
+        package: [Packages/LatchACP, Packages/LatchServiceProtocol, Packages/LatchAgentCore, Packages/LatchSessionKit]
     steps:
       - uses: actions/checkout@v5
       - run: swift --version
@@ -52,6 +52,32 @@ jobs:
       - run: >-
           swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteClient
           --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+
+  ios-app:
+    name: iOS app build, tests and smoke
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      # The app compiles Latch.icon, and actool before Xcode 27 throws on it (see the app job).
+      # Select an installed Xcode 27 or newer, and skip the script with a note when there is none.
+      - id: xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_2[7-9]*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -n "$xcode" ]]; then sudo xcode-select -s "$xcode"; fi
+          xcodebuild -version
+          major="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
+          if (( ${major:-0} >= 27 )); then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::iOS app not built: Xcode $major is the newest here, and its actool cannot compile Latch.icon."
+          fi
+      - if: steps.xcode.outputs.ready == 'true'
+        run: xcrun simctl list runtimes
+      # Builds the app and its tests for the Simulator; runs the tests and the in-app smoke only
+      # when the runner has an iOS Simulator runtime, and says so when it does not.
+      - if: steps.xcode.outputs.ready == 'true'
+        run: bash Scripts/test-ios-app.sh
 
   linux:
     name: Linux package tests

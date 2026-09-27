@@ -1,0 +1,2 @@
+# Your signing team, for running on a device. See Configuration/App.xcconfig.
+Configuration/Local.xcconfig

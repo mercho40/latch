@@ -80,9 +80,15 @@ jobs:
           swift sdk install
           https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
           --checksum 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
-      # Builds the LatchAgentCore target until the latch-server product exists; then build that product.
-      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk x86_64-swift-linux-musl -c release --target LatchAgentCore
-      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk aarch64-swift-linux-musl -c release --target LatchAgentCore
+      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk x86_64-swift-linux-musl -c release --product latch-server
+      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk aarch64-swift-linux-musl -c release --product latch-server
+      # The runner is x86_64, so the x86_64 binary must start and serve.
+      - run: >-
+          "$(swift build --package-path Packages/LatchAgentCore --swift-sdk x86_64-swift-linux-musl -c release --show-bin-path)/latch-server"
+          --version
+      - run: >-
+          LATCH_SERVER_BINARY="$(swift build --package-path Packages/LatchAgentCore --swift-sdk x86_64-swift-linux-musl -c release --show-bin-path)/latch-server"
+          swift test --package-path Packages/LatchAgentCore --filter LatchServerExecutableTests
 
   site:
     name: Site budget

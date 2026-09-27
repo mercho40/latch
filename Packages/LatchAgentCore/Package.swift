@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "LatchAgentXPC", targets: ["LatchAgentXPC"]),
         .library(name: "LatchAgentServer", targets: ["LatchAgentServer"]),
         .executable(name: "LatchXPCProcessProbe", targets: ["LatchXPCProcessProbe"]),
+        .executable(name: "latch-server", targets: ["latch-server"]),
     ],
     dependencies: [
         .package(path: "../LatchACP"),
@@ -46,6 +47,17 @@ let package = Package(
             dependencies: [
                 "LatchAgentServer", "LatchAgentCore", "LatchACP", "LatchServiceProtocol",
                 .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
+                // The client against the real server; its sources are Apple-only.
+                .product(name: "LatchRemoteClient", package: "LatchServiceProtocol", condition: .when(platforms: [.macOS])),
+            ]
+        ),
+        .executableTarget(
+            name: "latch-server",
+            dependencies: ["LatchAgentServer"],
+            linkerSettings: [
+                // musl gives every thread 128 KiB of stack unless PT_GNU_STACK asks for more,
+                // and decoding deeply nested JSON needs more; glibc already gives 8 MiB.
+                .unsafeFlags(["-Xlinker", "-z", "-Xlinker", "stack-size=8388608"], .when(platforms: [.linux])),
             ]
         ),
         .executableTarget(

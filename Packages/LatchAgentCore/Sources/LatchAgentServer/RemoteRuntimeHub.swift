@@ -22,6 +22,14 @@ public struct RemoteRuntimeHubConfiguration: Sendable {
     public init() {}
 }
 
+/// What the hub reports for the server's log.
+public enum RemoteRuntimeLifecycleEvent: Equatable, Sendable {
+    case launched(agentTitle: String)
+    /// Stopped on request, by the detached reaper, or by shutdown.
+    case stopped
+    case exited(status: Int32?)
+}
+
 /// The server's only consumer of `LatchAgentService.events`: it journals each runtime's events
 /// for replay, remembers what a reattaching client needs, and gives network retries their
 /// idempotent meaning. Transport-agnostic; a connection layer drives it:
@@ -46,6 +54,7 @@ public actor RemoteRuntimeHub {
     private let homeDirectory: String
     private let clock: @Sendable () -> ContinuousClock.Instant
     private let standardError: (@Sendable (AgentRuntimeID, Data) -> Void)?
+    private let lifecycle: (@Sendable (AgentRuntimeID, RemoteRuntimeLifecycleEvent) -> Void)?
     private let journal: RemoteEventJournal
 
     private var runtimes: [AgentRuntimeID: RuntimeState] = [:]
@@ -63,13 +72,15 @@ public actor RemoteRuntimeHub {
     ///   - homeDirectory: Where a `~/` workspace points.
     ///   - standardError: Agent stderr, which is never journaled or sent. Dropped when nil;
     ///     otherwise called on the hub's actor, so it must not block.
+    ///   - lifecycle: Launches, stops and exits, for logging. Called on the hub's actor.
     public init(
         service: LatchAgentService,
         configuration: RemoteRuntimeHubConfiguration = RemoteRuntimeHubConfiguration(),
         launchEnvironment: @escaping @Sendable () -> AgentLaunchEnvironment = { AgentLaunchEnvironment() },
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
         clock: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
-        standardError: (@Sendable (AgentRuntimeID, Data) -> Void)? = nil
+        standardError: (@Sendable (AgentRuntimeID, Data) -> Void)? = nil,
+        lifecycle: (@Sendable (AgentRuntimeID, RemoteRuntimeLifecycleEvent) -> Void)? = nil
     ) {
         self.service = service
         self.configuration = configuration
@@ -77,6 +88,7 @@ public actor RemoteRuntimeHub {
         self.homeDirectory = homeDirectory
         self.clock = clock
         self.standardError = standardError
+        self.lifecycle = lifecycle
         journal = RemoteEventJournal(
             runtimeBudget: configuration.runtimeJournalBudget,
             globalBudget: configuration.globalJournalBudget,
@@ -278,6 +290,7 @@ public actor RemoteRuntimeHub {
                 runtimes[id]!.lifecycle = .ready
                 runtimes[id]!.initialization = initialization
                 runtimes[id]!.launch = nil
+                lifecycle?(id, .launched(agentTitle: runtimes[id]!.agentTitle))
                 // The agent may have exited before this continuation ran.
                 if let status = runtimes[id]!.terminationWhileStarting {
                     finish(id, exit: LatchRemoteExit(status: status, stopped: false), keepJournal: true)
@@ -330,6 +343,7 @@ public actor RemoteRuntimeHub {
         state.launch = nil
         runtimes[id] = state
         publish(.exited(exit), for: id)
+        lifecycle?(id, exit.stopped ? .stopped : .exited(status: exit.status))
         // A crash keeps its journal for whoever reattaches. A stop keeps only the closing
         // events above, once viewers still attached have been sent what came before them.
         if !keepJournal { journal.retire(id, through: before) }

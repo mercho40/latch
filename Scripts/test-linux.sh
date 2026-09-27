@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run the package tests on Linux in Apple's container: bash Scripts/test-linux.sh [--static] [package...]
-# --static also builds LatchAgentCore for x86_64 and aarch64 musl with the Static Linux SDK.
+# --static also builds latch-server for x86_64 and aarch64 musl with the Static Linux SDK and runs
+# the executable tests against the one for this machine.
 set -euo pipefail
 
 usage() {
@@ -14,6 +15,7 @@ sdk_url=https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RE
 sdk_checksum=47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
 sdk_bundle=swift-6.4.0-RELEASE_static-linux-0.1.0
 # The SDK is large; keep it in a volume rather than downloading it on every run or onto the Mac.
+# Scripts/build-linux-server.sh pins the same image and SDK; change both together.
 sdk_volume=latch-swiftpm
 
 static=0
@@ -54,9 +56,15 @@ container run --rm --memory 4g --cpus 4 "${mounts[@]}" -w /src "$image" bash -c 
             swift sdk install "$sdk_url" --checksum "$sdk_checksum"
         fi
         for arch in x86_64 aarch64; do
-            echo "== static build LatchAgentCore for $arch"
+            echo "== static build latch-server for $arch"
             swift build --package-path Packages/LatchAgentCore --scratch-path .build/linux/static \
-                --swift-sdk "$arch-swift-linux-musl" -c release --target LatchAgentCore
+                --swift-sdk "$arch-swift-linux-musl" -c release --product latch-server
         done
+        # musl threads have other stacks than glibc ones; run the binary itself.
+        echo "== swift test LatchServerExecutableTests against the static $(uname -m) latch-server"
+        LATCH_SERVER_BINARY="$(swift build --package-path Packages/LatchAgentCore --scratch-path .build/linux/static \
+            --swift-sdk "$(uname -m)-swift-linux-musl" -c release --show-bin-path)/latch-server" \
+            swift test --package-path Packages/LatchAgentCore --scratch-path .build/linux/LatchAgentCore \
+            --filter LatchServerExecutableTests
     fi
 ' bash "$static" "$sdk_url" "$sdk_checksum" "$sdk_bundle" "${packages[@]}"

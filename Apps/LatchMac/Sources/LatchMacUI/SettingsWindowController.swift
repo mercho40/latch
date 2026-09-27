@@ -4,6 +4,7 @@ import AppKit
 @MainActor
 final class SettingsWindowController: NSWindowController {
     private let tabs = SettingsTabViewController()
+    private let serversPane: ServersSettingsViewController
 
     init(settings: AgentSettings = .shared, servers: (any ServerStore)? = nil, serverCheck: ServerCheck? = nil) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
@@ -12,6 +13,8 @@ final class SettingsWindowController: NSWindowController {
         // The tab controller supplies the toolbar; this is what makes macOS lay it out as
         // a Settings window rather than a document one.
         window.toolbarStyle = .preference
+        serversPane = ServersSettingsViewController(store: servers ?? FileServerStore.shared,
+                                                    check: serverCheck ?? ServerCheckText.live)
         super.init(window: window)
         tabs.tabStyle = .toolbar
         let agents = AgentsSettingsViewController(settings: settings)
@@ -20,8 +23,6 @@ final class SettingsWindowController: NSWindowController {
         item.label = "Agents"
         item.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: "Agents")
         tabs.addTabViewItem(item)
-        let serversPane = ServersSettingsViewController(store: servers ?? FileServerStore.shared,
-                                                        check: serverCheck ?? ServerCheckText.live)
         let serversItem = NSTabViewItem(viewController: serversPane)
         serversItem.label = "Servers"
         serversItem.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "Servers")
@@ -44,6 +45,12 @@ final class SettingsWindowController: NSWindowController {
         tabs.selectedTabViewItemIndex = index
     }
 
+    /// The Servers pane, with `id` selected, so what the user does next is about that server.
+    func select(server id: UUID) {
+        select(pane: "Servers")
+        serversPane.select(serverID: id)
+    }
+
     var selectedPane: String? {
         tabs.tabViewItems.indices.contains(tabs.selectedTabViewItemIndex)
             ? tabs.tabViewItems[tabs.selectedTabViewItemIndex].label : nil
@@ -55,6 +62,15 @@ final class SettingsWindowController: NSWindowController {
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate()
+    }
+}
+
+/// Names a server to `showServerSettings(_:)` as the action's sender.
+final class ServerReference: NSObject {
+    let serverID: UUID
+
+    init(_ serverID: UUID) {
+        self.serverID = serverID
     }
 }
 

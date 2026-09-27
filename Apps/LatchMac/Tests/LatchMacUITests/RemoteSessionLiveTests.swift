@@ -226,7 +226,7 @@ final class RemoteSessionLiveTests: XCTestCase {
         XCTAssertLessThan(ContinuousClock.now - started, .seconds(5), "Stopping what never reached the server takes no wait")
         XCTAssertEqual(model.phase, .disconnected)
         XCTAssertEqual(model.errorMessage, "nowhere is not answering at 127.0.0.1:1. "
-            + "Check that latch-server is running there and that Settings ▸ Servers has its address right.")
+            + "Check that latch-server is running there and that Settings → Servers has its address right.")
         XCTAssertTrue(model.errorIsConnectionFailure)
     }
 
@@ -374,34 +374,326 @@ final class RemoteSessionLiveTests: XCTestCase {
         }
     }
 
-    func testARotatedTokenEndsTheSessionNamingTheServer() async throws {
+    /// This used to end the session and drop its runtime, so fixing the token started a second
+    /// agent that resumed the conversation while the first ran on until the server's reaper.
+    /// A refused token says nothing about the agent, though: the session keeps its runtime, and
+    /// the new token, saved through the Edit sheet that keeps the server's ID, attaches to it
+    /// again, where the turn that was running finishes.
+    func testARotatedTokenKeepsTheRuntimeUntilTheEditedServerAttachesToItAgain() async throws {
         try await LoopbackServer.run { server in
             try await WindowFixture.run { fixture in
-                let (_, sidebar) = try await fixture.restored(saved(fixture, on: server), servers: server.store,
+                let notifications = NotificationRecorder()
+                let attention = AttentionCenter(presenter: notifications)
+                let (_, sidebar) = try await fixture.restored(saved(fixture, on: server), fixture.session(2),
+                                                              attention: attention, servers: server.store,
                                                               remoteConnector: connector(server))
+                attention.isSessionVisible = { _ in false }
                 let session = try XCTUnwrap(sidebar.selectedSession)
+                let local = try XCTUnwrap(sidebar.allSessions.first { !$0.location.isRemote })
                 try await fixture.settle({ session.model.phase == .ready }, timeout: 15)
+                let id = try await server.onlyRuntime()
+                let sending = Task { await session.model.send("tools please") }
+                try await fixture.settle({ self.texts(session.model).last == "Read notes · pending" }, timeout: 10)
 
                 let token = try server.rotateToken()
                 try await fixture.settle({ session.model.errorMessage != nil }, timeout: 15)
+                await sending.value
                 XCTAssertEqual(session.model.phase, .disconnected)
-                XCTAssertEqual(session.model.errorMessage, "loopback refused the token. Update it in Settings ▸ Servers.")
+                XCTAssertEqual(session.model.errorMessage, "loopback refused the token. Update its token in Settings → Servers.")
                 XCTAssertTrue(session.model.errorIsConnectionFailure)
                 XCTAssertEqual(session.banner.displayedTitle, "Can’t connect to loopback")
                 XCTAssertEqual(session.banner.displayedActions, ["Retry", "Server Settings…"])
                 XCTAssertEqual(session.sidebarRow(now: Date()).detail, "Couldn’t connect")
+                XCTAssertEqual(session.model.remoteBinding?.runtimeID, id.rawValue, "The runtime is kept")
+                let running = try await server.summary(id)
+                XCTAssertNotNil(running?.activeTurnID, "The turn runs on without the link")
+                XCTAssertEqual(notifications.posts.map(\.body), [], "The turn has not finished")
+                let localStatus = local.model.status
 
-                // The next launch reads the server again, so the token fixed in Settings is used.
-                var fixed = server.profile
-                fixed.token = token
-                try server.store.save(fixed)
-                session.chooseHarness(.custom)
-                try await fixture.settle { session.model.errorMessage == nil }
-                try await fixture.settle({ session.model.phase == .ready || session.model.errorMessage != nil }, timeout: 15)
+                // A save that still does not reach the server fails as the link did, and says so
+                // again even after the last failure was dismissed.
+                session.banner.performDismissForSmokeTest()
+                let attempts = session.model.connectionAttempts
+                var wrong = server.profile
+                wrong.token = LatchRemoteToken.generate()
+                try server.store.save(wrong)
+                try await fixture.settle({
+                    session.model.connectionAttempts > attempts && session.model.phase == .disconnected
+                        && session.model.errorMessage != nil
+                }, timeout: 15)
+                XCTAssertEqual(session.model.status, "Not connected", "Not the wording of a relaunch's resume")
+                XCTAssertNil(session.model.errorAdvice)
+                XCTAssertEqual(session.model.errorMessage, "loopback refused the token. Update its token in Settings → Servers.")
+                XCTAssertFalse(session.banner.isHidden)
+                XCTAssertEqual(session.banner.displayedTitle, "Can’t connect to loopback")
+                XCTAssertEqual(session.sidebarRow(now: Date()).detail, "Couldn’t connect")
+                XCTAssertEqual(session.model.remoteBinding?.runtimeID, id.rawValue)
+
+                // Edited rather than removed and added again, so the session is still on it.
+                let pane = ServersSettingsViewController(store: server.store)
+                let settings = NSWindow(contentViewController: pane)
+                defer { settings.close() }
+                pane.editServer()
+                let sheet = try XCTUnwrap(pane.serverSheet)
+                sheet.pairingField.stringValue = "latch://127.0.0.1:\(server.port)?token=\(token.rawValue)"
+                sheet.pairingChanged()
+                sheet.add()
+                XCTAssertEqual(server.store.servers.count, 1)
+                XCTAssertEqual(server.profile.token, token)
+                XCTAssertEqual(session.serverName, "loopback")
+
+                try await fixture.settle({ session.model.phase == .prompting }, timeout: 15)
                 XCTAssertNil(session.model.errorMessage)
-                XCTAssertEqual(session.model.phase, .ready, session.model.status)
-                XCTAssertEqual(session.model.savedAgentSessionID, "session-1", "The agent's context carried over")
-                XCTAssertEqual(server.lines(in: "loads.log"), 1)
+                XCTAssertEqual(session.model.remoteBinding?.runtimeID, id.rawValue)
+                try Data().write(to: server.workspace.appendingPathComponent("go"))
+                try await fixture.settle({ session.model.phase == .ready }, timeout: 15)
+                XCTAssertEqual(session.model.status, "Ready · end_turn")
+                XCTAssertNil(session.model.errorMessage)
+                XCTAssertTrue(session.banner.isHidden)
+                XCTAssertEqual(texts(session.model), ["tools please", "reading", "Read notes · completed", "done"])
+                let runtime = try await server.onlyRuntime()
+                XCTAssertEqual(runtime, id, "No second agent")
+                XCTAssertEqual(server.lines(in: "prompts.log"), 1)
+                XCTAssertEqual(server.lines(in: "loads.log"), 0, "Attached, not resumed")
+                XCTAssertEqual(local.model.status, localStatus, "A session on this Mac is left alone")
+                XCTAssertEqual(notifications.posts.map(\.body), ["The agent finished its turn."], "Once, when it did")
+            }
+        }
+    }
+
+    func testRetryAfterARefusedTokenAttachesToTheSameRuntime() async throws {
+        try await LoopbackServer.run { server in
+            // Not through a connector, which would attach again on its own once the token is saved.
+            let store = server.store
+            let backoff = quickBackoff
+            let model = SessionModel(makeClient: {
+                RemoteAgentServiceClient(server: store.servers[0], backoff: backoff) { store.servers.first }
+            })
+            await model.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertEqual(model.phase, .ready)
+            let id = try await server.onlyRuntime()
+            await model.send("hello")
+            try await eventually("the reply") { self.texts(model) == ["hello", "onetwothree"] }
+
+            let token = try server.rotateToken()
+            try await eventually("the refusal") { model.errorMessage != nil }
+            XCTAssertEqual(model.status, "Not connected")
+            XCTAssertEqual(model.remoteBinding?.runtimeID, id.rawValue)
+            var fixed = server.profile
+            fixed.token = token
+            try store.save(fixed)
+            XCTAssertEqual(model.phase, .disconnected, "Nothing but Retry or the connector attaches again")
+
+            // What Retry does.
+            await model.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(model.status, "Connected · mock-agent")
+            XCTAssertEqual(texts(model), ["hello", "onetwothree"], "Nothing shown twice")
+            await model.send("again")
+            XCTAssertEqual(model.status, "Ready · end_turn")
+            try await eventually("the second reply") { self.texts(model).count == 4 }
+            let runtime = try await server.onlyRuntime()
+            XCTAssertEqual(runtime, id)
+            XCTAssertEqual(server.lines(in: "loads.log"), 0)
+        }
+    }
+
+    func testChangingTheServersAddressRePointsALiveSessionAtItsRuntime() async throws {
+        try await LoopbackServer.run { server in
+            let connector = connector(server)
+            let model = try await connectedModel(server, connector)
+            let id = try await server.onlyRuntime()
+            var phases: [SessionModel.Phase] = []
+            model.onChange = { [weak model] in
+                guard let phase = model?.phase, phases.last != phase else { return }
+                phases.append(phase)
+            }
+            let sending = Task { await model.send("tools please") }
+            try await eventually("the turn holding") { self.texts(model).last == "Read notes · pending" }
+
+            // A new name or command is not a new way to reach the server.
+            var renamed = server.profile
+            renamed.name = "renamed"
+            renamed.customCommand += " "
+            try server.store.save(renamed)
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(phases, [.prompting])
+
+            let port = try server.listenOnAnotherPort()
+            var moved = server.profile
+            moved.port = port
+            try server.store.save(moved)
+            XCTAssertEqual(model.serviceTransportDescription, "remote 127.0.0.1:\(port)")
+            try await eventually("the link back") { model.linkState == .connected }
+            try await Task.sleep(for: .milliseconds(200))
+            // Pointed at the server the new way in place: the prompt it sent is still awaited.
+            XCTAssertEqual(phases, [.prompting])
+            try Data().write(to: server.workspace.appendingPathComponent("go"))
+            await sending.value
+            XCTAssertEqual(model.status, "Ready · end_turn")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(texts(model), ["tools please", "reading", "Read notes · completed", "done"])
+            let runtime = try await server.onlyRuntime()
+            XCTAssertEqual(runtime, id)
+            XCTAssertEqual(server.lines(in: "prompts.log"), 1)
+            XCTAssertEqual(server.lines(in: "loads.log"), 0)
+        }
+    }
+
+    /// The usual reason to change a server's address is that the old one stopped answering,
+    /// so a prompt sent meanwhile is still waiting for the link. It goes to the new address.
+    func testAPromptWaitingForTheLinkIsSentOnceTheAddressIsFixed() async throws {
+        try await LoopbackServer.run { server in
+            // Long enough that only the new address brings the link back.
+            let connector = connector(server, backoff: LatchRemoteBackoff(initial: .seconds(120), maximum: .seconds(120)))
+            let model = try await connectedModel(server, connector)
+            let id = try await server.onlyRuntime()
+            try XCTUnwrap(connector.liveClients.first).dropConnectionForTesting()
+            try await eventually("the link lost") { if case .reconnecting = model.linkState { true } else { false } }
+            let sending = Task { await model.send("hello") }
+            try await eventually("the prompt shown") { self.texts(model) == ["hello"] }
+            XCTAssertEqual(server.lines(in: "prompts.log"), 0)
+
+            var moved = server.profile
+            moved.port = try server.listenOnAnotherPort()
+            try server.store.save(moved)
+            try await eventually("the reply") { self.texts(model) == ["hello", "onetwothree"] }
+            await sending.value
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.status, "Ready · end_turn")
+            XCTAssertEqual(model.linkState, .connected)
+            XCTAssertEqual(server.lines(in: "prompts.log"), 1)
+            let runtime = try await server.onlyRuntime()
+            XCTAssertEqual(runtime, id)
+        }
+    }
+
+    /// A save that lands while the session is still attaching, as when Latch relaunches after
+    /// the server's address changed and the address is fixed while it says "Resuming…".
+    func testAFixSavedWhileAttachingIsUsedByThatAttach() async throws {
+        try await LoopbackServer.run { server in
+            let connector = ChannelRemoteSessionConnector(servers: server.store, backoff: quickBackoff,
+                                                          firstConnectionLimit: .seconds(4),
+                                                          notificationCenter: NotificationCenter())
+            let model = try await connectedModel(server, connector)
+            let id = try await server.onlyRuntime()
+            await model.send("hello")
+            try await eventually("the reply") { self.texts(model) == ["hello", "onetwothree"] }
+            await model.detach()
+            let reachable = server.profile
+            var unreachable = reachable
+            unreachable.port = 1
+            try server.store.save(unreachable)
+
+            let attaching = Task { await model.connect(remote: .custom(server.agentCommand), path: server.workspace.path) }
+            try await eventually("the attach under way") { model.phase == .connecting }
+            try await Task.sleep(for: .milliseconds(300))
+            try server.store.save(reachable)
+            await attaching.value
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(model.status, "Connected · mock-agent")
+            XCTAssertEqual(texts(model), ["hello", "onetwothree"])
+            let runtime = try await server.onlyRuntime()
+            XCTAssertEqual(runtime, id)
+            XCTAssertEqual(server.lines(in: "loads.log"), 0)
+        }
+    }
+
+    /// The one link failure that gives the runtime up: the server answered, and no longer has
+    /// it. A change in Settings then starts nothing; Retry starts the agent again and resumes.
+    func testARuntimeTheServerNoLongerHasIsDroppedAndRetryResumesIt() async throws {
+        try await LoopbackServer.run { server in
+            let wake = NotificationCenter()
+            let connector = connector(server, backoff: LatchRemoteBackoff(initial: .seconds(120), maximum: .seconds(120)),
+                                      wake: wake)
+            let model = try await connectedModel(server, connector)
+            await model.send("hello")
+            // Away while the server restarts, so the first it hears of it is the re-attach.
+            try XCTUnwrap(connector.liveClients.first).dropConnectionForTesting()
+            try await eventually("the link lost") { if case .reconnecting = model.linkState { true } else { false } }
+            try await server.restart()
+            wake.post(name: NSWorkspace.didWakeNotification, object: nil)
+
+            try await eventually("the runtime gone") { model.phase == .disconnected }
+            XCTAssertEqual(model.status, "Agent stopped")
+            XCTAssertEqual(model.errorMessage, "The agent is no longer running on loopback; the server may have restarted.")
+            XCTAssertEqual(model.errorAdvice, "Retry to start it again.")
+            XCTAssertFalse(model.errorIsConnectionFailure)
+            XCTAssertNil(model.remoteBinding, "Nothing is left to attach to")
+
+            var changed = server.profile
+            changed.allowUnencryptedNetwork.toggle()
+            try server.store.save(changed)
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(model.phase, .disconnected, "Settings reattaches only a runtime the session kept")
+
+            // What Retry does.
+            await model.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(server.lines(in: "loads.log"), 1, "Resumed in a new agent")
+        }
+    }
+
+    // MARK: Stopped on the server
+
+    func testAnAgentStoppedByAnotherClientIsNotReportedAsAnExit() async throws {
+        try await LoopbackServer.run { server in
+            let connector = connector(server)
+            let model = try await connectedModel(server, connector)
+            let client = try XCTUnwrap(connector.liveClients.first)
+            let id = try await server.onlyRuntime()
+            let other = LatchRemoteRuntimeChannel(options: LatchRemoteRuntimeChannel.Options(
+                connection: server.profile.connectionOptions, runtimeID: id, backoff: quickBackoff))
+            defer { other.close() }
+            _ = try await other.send(.stopRuntime(runtimeID: id))
+
+            try await eventually("the stop") { model.phase == .disconnected }
+            XCTAssertEqual(model.status, "Stopped on loopback")
+            XCTAssertEqual(model.errorMessage, "The agent was stopped on loopback.")
+            XCTAssertEqual(model.errorAdvice, "Retry to start it again.")
+            XCTAssertTrue(model.stoppedOnServer)
+            XCTAssertFalse(model.errorIsConnectionFailure)
+            XCTAssertNil(model.remoteBinding)
+            try await eventually("the channel released") { client.followedRuntimeID == nil }
+
+            // Retry starts the agent again and resumes its conversation there.
+            await model.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.stoppedOnServer)
+            XCTAssertEqual(server.lines(in: "loads.log"), 1)
+        }
+    }
+
+    func testAServerShuttingDownSaysItStoppedTheAgent() async throws {
+        try await LoopbackServer.run { server in
+            try await WindowFixture.run { fixture in
+                let notifications = NotificationRecorder()
+                let attention = AttentionCenter(presenter: notifications)
+                let (_, sidebar) = try await fixture.restored(saved(fixture, on: server), attention: attention,
+                                                              servers: server.store, remoteConnector: connector(server))
+                attention.isSessionVisible = { _ in false }
+                let session = try XCTUnwrap(sidebar.selectedSession)
+                try await fixture.settle({ session.model.phase == .ready }, timeout: 15)
+                let sending = Task { await session.model.send("tools please") }
+                try await fixture.settle({ self.texts(session.model).last == "Read notes · pending" }, timeout: 10)
+
+                await server.shutdown()
+                try await fixture.settle({ session.model.phase == .disconnected }, timeout: 15)
+                await sending.value
+                XCTAssertEqual(session.model.status, "Stopped on loopback")
+                XCTAssertEqual(session.model.errorMessage, "The agent was stopped on loopback.")
+                XCTAssertEqual(session.banner.displayedTitle, "\(AgentPreset.custom.title) stopped on loopback")
+                XCTAssertEqual(session.banner.displayedDetail, "The agent was stopped on loopback.")
+                XCTAssertEqual(session.banner.displayedMessage, "Retry to start it again.")
+                XCTAssertEqual(session.banner.displayedActions, ["Retry", "Server Settings…"])
+                XCTAssertEqual(session.sidebarRow(now: Date()).detail, "Stopped on loopback")
+                XCTAssertEqual(session.model.linkState, .connected, "Not left reconnecting to a server that has gone")
+                XCTAssertNil(session.model.remoteBinding)
+                XCTAssertEqual(notifications.posts.map(\.body), ["The agent was stopped on its server."])
             }
         }
     }
@@ -482,6 +774,8 @@ final class LoopbackServer {
     private let tokens: ServerTokenFile
     private let configuration: RemoteRuntimeHubConfiguration
     private var control: RemoteConnectionID
+    /// More listeners on the same hub, as a server reached at a second address would be.
+    private var others: [RemoteServer] = []
 
     static func run(hub configuration: RemoteRuntimeHubConfiguration = RemoteRuntimeHubConfiguration(),
                     _ body: (LoopbackServer) async throws -> Void) async throws {
@@ -536,6 +830,18 @@ final class LoopbackServer {
                             on: try ServerListener.bind(ServerSocketAddress(bytes: [127, 0, 0, 1], port: port)))
     }
 
+    /// Serves the same hub, runtimes and token on another loopback port, and returns the port.
+    func listenOnAnotherPort() throws -> UInt16 {
+        let listener = try ServerListener.bind(ServerSocketAddress(bytes: [127, 0, 0, 1], port: 0))
+        others.append(Self.serve(hub, tokens: tokens, home: workspace.path, on: listener))
+        return listener.address.port
+    }
+
+    /// Stops the server as SIGTERM does, which stops every agent it runs.
+    func shutdown() async {
+        await server.shutdown()
+    }
+
     var profile: ServerProfile { store.servers[0] }
     var agentCommand: String { profile.customCommand }
 
@@ -571,6 +877,7 @@ final class LoopbackServer {
     }
 
     func close() async {
+        for other in others { await other.shutdown() }
         await server.shutdown()
         try? FileManager.default.removeItem(at: workspace)
         try? FileManager.default.removeItem(atPath: configDirectory)

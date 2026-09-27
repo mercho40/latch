@@ -107,6 +107,34 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: nil, error: failure))
     }
 
+    func testReconnectingElsewhereCarriesThePromptTheCursorAndTheTurnOver() async throws {
+        let channel = channel!
+        let turnID = UUID()
+        let first = try await attached()
+        first.event(1, .permissionClosed(requestID: UUID()))
+        _ = try await observer.nextEvent()
+
+        async let outcome = withTimeout(10) { try await channel.prompt(turnID: turnID, blocks: [.text("hello")]) }
+        let unanswered = try await first.nextRequest()
+        let moved = try await FakeServer.start()
+        defer { moved.stop() }
+        channel.reconnect(using: moved.options())
+        XCTAssertEqual(channel.connectionOptions.port, moved.port)
+
+        let second = try await moved.nextConnection()
+        try await second.acceptAttach(after: 1)
+        let resent = try await second.nextRequest()
+        XCTAssertEqual(resent.command, unanswered.command)
+        second.reply(resent.id, .promptAccepted(turnID: turnID))
+        second.event(2, .turnEnded(turnID: turnID, stopReason: "end_turn", error: nil))
+        let result = try await outcome
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil))
+        XCTAssertEqual(channel.linkState, .connected)
+        // The old connection's late reply changes nothing.
+        first.reply(unanswered.id, .promptAccepted(turnID: turnID))
+        try await server.connections.expectNothing(for: 0.3)
+    }
+
     func testAnyCommandLostWithTheConnectionIsSentAgain() async throws {
         let channel = channel!
         async let response = withTimeout { try await channel.send(.setMode(runtimeID: Fixture.runtimeID, modeID: "code")) }

@@ -3,8 +3,8 @@ import LatchRemoteClient
 import LatchRemoteProtocol
 
 /// A `latch-server` this Mac can run sessions on. The token is a shell on that server as its
-/// user, so nothing that describes, dumps or logs a profile shows it; only the Add sheet's
-/// secure field ever holds it on screen.
+/// user, so nothing that describes, dumps or logs a profile shows it; only the server sheet's
+/// secure fields ever hold it on screen.
 struct ServerProfile: Identifiable, Equatable, Sendable {
     var id: UUID
     var name: String
@@ -33,6 +33,13 @@ struct ServerProfile: Identifiable, Equatable, Sendable {
     var connectionOptions: LatchRemoteConnectionOptions {
         LatchRemoteConnectionOptions(host: host, port: port, token: token,
                                      allowUnencryptedNetwork: allowUnencryptedNetwork, client: .latchMac)
+    }
+
+    /// Whether a connection made with `other` would go to the same place the same way. A new
+    /// name or custom command changes nothing about a connection already made.
+    func connects(like other: ServerProfile) -> Bool {
+        host == other.host && port == other.port && token == other.token
+            && allowUnencryptedNetwork == other.allowUnencryptedNetwork
     }
 }
 

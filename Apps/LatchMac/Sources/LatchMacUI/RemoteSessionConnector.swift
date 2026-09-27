@@ -26,7 +26,8 @@ final class UnconnectedRemoteSessionConnector: RemoteSessionConnector {
 }
 
 /// Connects remote sessions through `LatchRemoteRuntimeChannel`, reading each server from
-/// the store as its sessions launch, so a token changed in Settings is used from the next one.
+/// the store as its sessions launch or attach. When Settings changes a server, every client on
+/// it is told, so its sessions reach their runtimes the new way and name the server anew.
 @MainActor
 final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnector {
     let servers: any ServerStore
@@ -34,6 +35,9 @@ final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnector {
     private let firstConnectionLimit: Duration
     /// Every client handed out that is still alive, to wake them all at once.
     private var clients: [WeakClient] = []
+    /// Each server a client was made for, as it was last seen, so its clients hear only of saves
+    /// that changed it.
+    private var known: [UUID: ServerProfile] = [:]
 
     private struct WeakClient {
         weak var client: RemoteAgentServiceClient?
@@ -49,6 +53,8 @@ final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnector {
         super.init()
         notificationCenter.addObserver(self, selector: #selector(didWake),
                                        name: NSWorkspace.didWakeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(serversChanged),
+                                               name: .serverStoreDidChange, object: servers)
     }
 
     func makeClient(serverID: UUID) -> AgentServiceClient {
@@ -60,6 +66,7 @@ final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnector {
         }
         clients.removeAll { $0.client == nil }
         clients.append(WeakClient(client: client))
+        known[serverID] = server
         return client
     }
 
@@ -71,6 +78,22 @@ final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnector {
     @objc private func didWake() {
         for client in liveClients {
             Task { await client.probe() }
+        }
+    }
+
+    /// A saved server's clients are told of its new name, address, port, token or network
+    /// setting; each decides what that changes for its session. A removed server's sessions
+    /// keep what they have.
+    @objc private func serversChanged() {
+        var changed: [UUID: ServerProfile] = [:]
+        for (id, before) in known {
+            guard let now = servers.server(id: id), now != before else { continue }
+            known[id] = now
+            changed[id] = now
+        }
+        guard !changed.isEmpty else { return }
+        for client in liveClients {
+            if let server = changed[client.serverID] { client.serverChanged(to: server) }
         }
     }
 }

@@ -618,10 +618,11 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     @objc private func harnessChanged(_ sender: NSPopUpButton) {
         guard let chosen = sender.selectedItem else { return }
         guard let raw = chosen.representedObject as? String, let preset = AgentPreset(rawValue: raw) else {
-            let remote = sidebar.selectedSession?.location.isRemote == true
+            let server = sidebar.selectedSession?.location.serverID
             refreshHarness()
-            NSApp.sendAction(remote ? #selector(LatchApplicationDelegate.showServerSettings(_:))
-                                    : #selector(LatchApplicationDelegate.showAgentSettings(_:)), to: nil, from: nil)
+            NSApp.sendAction(server != nil ? #selector(LatchApplicationDelegate.showServerSettings(_:))
+                                           : #selector(LatchApplicationDelegate.showAgentSettings(_:)),
+                             to: nil, from: server.map(ServerReference.init))
             return
         }
         sidebar.selectedSession?.chooseHarness(preset)

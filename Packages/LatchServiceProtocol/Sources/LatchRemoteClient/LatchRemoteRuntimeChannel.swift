@@ -60,7 +60,8 @@ public enum LatchRemoteChannelEvent: Equatable, Sendable {
 ///
 /// The channel fails permanently, finishing both streams and every pending call, on
 /// `unauthorized`, `protocolMismatch`, `destinationNotAllowed`, `runtimeNotFound` when
-/// re-attaching, or `close()`. Anything else is retried with `backoff`.
+/// re-attaching, or `close()`. Anything else is retried with `backoff`. Until then,
+/// `reconnect(using:)` can point it at the server another way, such as a new address or token.
 public final class LatchRemoteRuntimeChannel: Sendable {
     public struct Options: Sendable {
         public var connection: LatchRemoteConnectionOptions
@@ -108,6 +109,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         }
     }
 
+    /// As the channel was made. `connectionOptions` is how it reaches the server now.
     public let options: Options
     /// Single-consumer. Finishes only on permanent failure or `close()`.
     public let events: AsyncStream<LatchRemoteChannelEvent>
@@ -119,9 +121,11 @@ public final class LatchRemoteRuntimeChannel: Sendable {
     /// Every connection of this channel delivers here, so callbacks from an old connection
     /// and a new one never run at once.
     private let queue = DispatchQueue(label: "dev.latchapp.remote-channel")
-    private let core = Mutex(Core())
+    private let core: Mutex<Core>
 
     private struct Core {
+        /// How the next connection reaches the server.
+        var endpoint: LatchRemoteConnectionOptions
         var started = false
         var failure: LatchRemoteClientError?
         var link = LatchRemoteLinkState.idle
@@ -182,6 +186,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
 
     public init(options: Options) {
         self.options = options
+        core = Mutex(Core(endpoint: options.connection))
         (events, eventContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (linkStates, linkContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
@@ -199,6 +204,11 @@ public final class LatchRemoteRuntimeChannel: Sendable {
     /// stops it connecting, the answer is final.
     public var hasConnected: Bool {
         core.withLock { $0.hasConnected }
+    }
+
+    /// How the channel reaches the server: `options.connection` until `reconnect(using:)`.
+    public var connectionOptions: LatchRemoteConnectionOptions {
+        core.withLock { $0.endpoint }
     }
 
     /// The last sequence delivered on `events`; 0 before the first.
@@ -337,6 +347,35 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         }
     }
 
+    /// Reaches the server with `connection` from now on, such as at a new address or with a
+    /// new token, and connects that way at once. Nothing else changes: the cursor, commands
+    /// waiting for a reply and turns being awaited all carry over, the runtime is re-attached
+    /// from the cursor, and commands sent on the old connection are sent again, which is safe
+    /// for the same reason as after any reconnect. Returns false, changing nothing, once the
+    /// channel has failed.
+    @discardableResult
+    public func reconnect(using connection: LatchRemoteConnectionOptions) -> Bool {
+        let (taken, old): (Bool, LatchRemoteConnection?) = core.withLock { core in
+            guard core.failure == nil else { return (false, nil) }
+            core.endpoint = connection
+            guard core.started else { return (true, nil) }
+            let old = core.connection
+            core.connection = nil
+            core.commandsReady = false
+            for index in core.commands.indices {
+                core.commands[index].sentOn = nil
+            }
+            // A first attempt at a new place, not the next of the old place's failures.
+            core.failures = 0
+            core.reconnectImmediately = false
+            // A new generation: whatever the old connection still says is ignored.
+            connect(&core)
+            return (true, old)
+        }
+        old?.close()
+        return taken
+    }
+
     /// Drops the current connection as if the network had, so tests can exercise reconnects.
     public func dropConnectionForTesting() {
         core.withLock { $0.connection }?.close(with: .connectionLost)
@@ -456,7 +495,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         core.generation += 1
         let generation = core.generation
         let connection = LatchRemoteConnection(
-            options: options.connection,
+            options: core.endpoint,
             queue: queue,
             stateHandler: { [weak self] state in
                 self?.connectionStateChanged(state, generation: generation)

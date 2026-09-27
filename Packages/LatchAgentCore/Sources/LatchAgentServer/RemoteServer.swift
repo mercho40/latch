@@ -127,20 +127,26 @@ public final class RemoteServer: Sendable {
         }
     }
 
-    /// Stops accepting, closes every connection and waits for their threads, then shuts the
-    /// hub down, which stops every runtime.
+    /// Stops accepting, then shuts the hub down, which stops every runtime, while clients are
+    /// still connected: each hears that its agent was stopped rather than only that the
+    /// connection went. Then closes every connection once those events are written, or after
+    /// `drainLimit` for a client that is not reading, and waits for their threads.
     public func shutdown() async {
-        let (connections, first) = state.withLock { state in
+        let first = state.withLock { state in
             let first = !state.stopping
             state.stopping = true
-            return (Array(state.connections.values), first)
+            return first
         }
         if first {
             var byte: UInt8 = 0
             _ = write(stopPipe.write, &byte, 1)
             stopTicking.signal()
         }
-        for connection in connections { connection.close("the server is shutting down") }
+        await hub.shutdown()
+        let connections = state.withLock { Array($0.connections.values) }
+        for connection in connections {
+            connection.closeAfterWriting("the server is shutting down", within: Self.drainLimit)
+        }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             threads.notify(queue: .global()) { continuation.resume() }
         }
@@ -149,8 +155,10 @@ public final class RemoteServer: Sendable {
             return state.listeners
         }
         listeners.forEach { ServerSocket.close($0.descriptor) }
-        await hub.shutdown()
     }
+
+    /// How long a shutdown waits for a client to take the events it has waiting.
+    static let drainLimit: Duration = .seconds(2)
 
     /// Reads the token file now and closes every connection that authenticated with another
     /// token, or all of them when the file is gone or unusable. A failure to read it that says

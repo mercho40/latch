@@ -71,6 +71,116 @@ final class ServersSettingsTests: XCTestCase {
         XCTAssertEqual(profile.address, "100.64.0.9:7428")
     }
 
+    // MARK: Editing
+
+    func testEditingKeepsTheServersIDAndTokenUnlessAPairingStringReplacesThem() throws {
+        let server = ServerProfile(name: "Build box", host: "vps", port: 7000, token: token,
+                                   allowUnencryptedNetwork: true, customCommand: "agent --acp")
+        let sheet = AddServerController(editing: server)
+        XCTAssertEqual(sheet.window?.title, "Edit Server")
+        XCTAssertEqual(sheet.nameField.stringValue, "Build box")
+        XCTAssertEqual(sheet.hostField.stringValue, "vps")
+        XCTAssertEqual(sheet.portField.stringValue, "7000")
+        XCTAssertEqual(sheet.tokenField.stringValue, "", "Empty means the current token")
+        XCTAssertTrue(sheet.tokenField.isKind(of: NSSecureTextField.self))
+
+        edit(sheet.hostField, "vps.tailnet.ts.net", in: sheet)
+        XCTAssertEqual(sheet.nameField.stringValue, "Build box", "The server's name does not follow a new host")
+        guard case let .success(moved) = sheet.entry else { return XCTFail("Expected a complete entry") }
+        XCTAssertEqual(moved.id, server.id)
+        XCTAssertEqual(moved.address, "vps.tailnet.ts.net:7000")
+        XCTAssertEqual(moved.token, token, "The token is kept")
+        XCTAssertTrue(moved.allowUnencryptedNetwork)
+        XCTAssertEqual(moved.customCommand, "agent --acp")
+
+        edit(sheet.tokenField, "latch_short", in: sheet)
+        XCTAssertEqual(sheet.entry, .failure(.token), "A token typed in is checked like a new one")
+        edit(sheet.tokenField, "", in: sheet)
+
+        let rotated = LatchRemoteToken.generate()
+        edit(sheet.pairingField, "latch://100.64.0.9:9123?token=\(rotated.rawValue)", in: sheet)
+        var saved: ServerProfile?
+        sheet.onFinish = { saved = $0 }
+        sheet.add()
+        let profile = try XCTUnwrap(saved)
+        XCTAssertEqual(profile.id, server.id, "Sessions on the server stay on it")
+        XCTAssertEqual(profile.name, "Build box")
+        XCTAssertEqual(profile.address, "100.64.0.9:9123")
+        XCTAssertEqual(profile.token, rotated)
+        XCTAssertTrue(profile.allowUnencryptedNetwork)
+        XCTAssertEqual(profile.customCommand, "agent --acp")
+    }
+
+    func testANameThatWasOnlyTheHostFollowsANewOne() {
+        let sheet = AddServerController(editing: ServerProfile(name: "10.0.0.3", host: "10.0.0.3", token: token))
+        edit(sheet.pairingField, "latch://vps.tailnet.ts.net:9123?token=\(LatchRemoteToken.generate().rawValue)", in: sheet)
+        guard case let .success(moved) = sheet.entry else { return XCTFail("Expected a complete entry") }
+        XCTAssertEqual(moved.name, "vps.tailnet.ts.net")
+        XCTAssertEqual(moved.address, "vps.tailnet.ts.net:9123")
+    }
+
+    func testEditingKeepsACommandStillBeingTyped() throws {
+        let server = ServerProfile(name: "vps", host: "vps", token: token)
+        let (pane, store) = pane([server])
+        let window = NSWindow(contentViewController: pane)
+        defer { window.close() }
+        XCTAssertTrue(window.makeFirstResponder(pane.commandField))
+        let editor = try XCTUnwrap(pane.commandField.currentEditor() as? NSTextView)
+        editor.insertText("my-agent --acp", replacementRange: NSRange(location: 0, length: 0))
+
+        // Edit… takes no focus, so the command field is still being edited when it opens.
+        pane.editButton.performClick(nil)
+        let sheet = try XCTUnwrap(pane.serverSheet)
+        XCTAssertEqual(store.servers[0].customCommand, "my-agent --acp")
+        edit(sheet.nameField, "renamed", in: sheet)
+        sheet.add()
+        XCTAssertEqual(store.servers[0].name, "renamed")
+        XCTAssertEqual(store.servers[0].customCommand, "my-agent --acp")
+    }
+
+    func testServerSettingsOpensOnTheSessionsServer() {
+        let first = ServerProfile(name: "vps", host: "vps", token: token)
+        let second = ServerProfile(name: "mini", host: "127.0.0.1", port: 9000, token: token)
+        let controller = SettingsWindowController(
+            settings: AgentSettings(defaults: UserDefaults(suiteName: "LatchServers-\(UUID().uuidString)")!),
+            servers: InMemoryServerStore([first, second]))
+        controller.select(server: second.id)
+        XCTAssertEqual(controller.selectedPane, "Servers")
+        let pane = controller.contentViewController?.children.compactMap { $0 as? ServersSettingsViewController }.first
+        XCTAssertEqual(pane?.selectedServer?.id, second.id)
+    }
+
+    func testEditSavesOverTheSelectedServer() throws {
+        let first = ServerProfile(name: "vps", host: "vps", token: token)
+        let second = ServerProfile(name: "mini", host: "127.0.0.1", port: 9000, token: token)
+        let (pane, store) = pane([first, second])
+        let window = NSWindow(contentViewController: pane)
+        defer { window.close() }
+        XCTAssertTrue(pane.editButton.isEnabled)
+        pane.table.selectRowIndexes([1], byExtendingSelection: false)
+
+        pane.editServer()
+        let sheet = try XCTUnwrap(pane.serverSheet)
+        XCTAssertEqual(sheet.original, second)
+        edit(sheet.nameField, "Mac mini", in: sheet)
+        edit(sheet.portField, "9001", in: sheet)
+        sheet.add()
+        XCTAssertNil(pane.serverSheet)
+        XCTAssertEqual(store.servers.map(\.id), [first.id, second.id], "Changed in place, not added")
+        XCTAssertEqual(store.servers[1].name, "Mac mini")
+        XCTAssertEqual(store.servers[1].address, "127.0.0.1:9001")
+        XCTAssertEqual(store.servers[1].token, token)
+        XCTAssertEqual(store.servers[0], first)
+        XCTAssertEqual(pane.selectedServer?.id, second.id)
+
+        pane.editServer()
+        try XCTUnwrap(pane.serverSheet).cancel()
+        XCTAssertEqual(store.servers[1].name, "Mac mini", "Cancel changes nothing")
+
+        store.servers.forEach { try? store.remove(id: $0.id) }
+        XCTAssertFalse(pane.editButton.isEnabled)
+    }
+
     // MARK: The pane
 
     private func pane(_ servers: [ServerProfile],

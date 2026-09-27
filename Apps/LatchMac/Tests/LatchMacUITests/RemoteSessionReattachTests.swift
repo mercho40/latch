@@ -424,6 +424,30 @@ final class RemoteSessionReattachTests: XCTestCase {
         }
     }
 
+    func testAnAgentStoppedWhileLatchWasClosedSaysItWasStoppedThere() async throws {
+        try await LoopbackServer.run { server in
+            try await WindowFixture.run { fixture in
+                let (window, session) = try await firstRun(fixture, server)
+                let id = try await server.onlyRuntime()
+                await session.model.send("hello")
+                await window.shutdown()
+                let other = LatchRemoteRuntimeChannel(options: LatchRemoteRuntimeChannel.Options(
+                    connection: server.profile.connectionOptions, runtimeID: id, backoff: quickBackoff))
+                defer { other.close() }
+                _ = try await other.send(.stopRuntime(runtimeID: id))
+
+                let relaunched = try await relaunch(fixture, server)
+                try await fixture.settle({ relaunched.model.phase == .disconnected && relaunched.model.errorMessage != nil },
+                                         timeout: 15)
+                XCTAssertEqual(relaunched.model.status, "Stopped on loopback")
+                XCTAssertEqual(relaunched.model.errorMessage, "The agent was stopped on loopback.")
+                XCTAssertEqual(texts(relaunched.model), ["hello", "onetwothree"])
+                XCTAssertNil(relaunched.model.remoteBinding)
+                XCTAssertEqual(server.lines(in: "loads.log"), 0)
+            }
+        }
+    }
+
     func testOutputEvictedWhileLatchWasClosedKeepsTheTranscriptAndSaysSo() async throws {
         var configuration = RemoteRuntimeHubConfiguration()
         configuration.runtimeJournalBudget = 4096
@@ -685,7 +709,7 @@ private final class DuplicatingRemoteClient: AgentServiceClient {
 /// Stands in for user notifications, which need a bundle identifier and would ask this
 /// machine's user for authorization during a test run.
 @MainActor
-private final class NotificationRecorder: AttentionPresenting {
+final class NotificationRecorder: AttentionPresenting {
     struct Post {
         let id: String
         let body: String

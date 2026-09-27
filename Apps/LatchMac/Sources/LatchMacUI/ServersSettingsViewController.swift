@@ -14,6 +14,7 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         "No servers yet. On the server, run “latch-server pair”, then choose Add Server… and paste what it prints.")
     private let problemLabel = WrappingLabel(wrappingLabelWithString: "")
     let addButton = NSButton(title: "Add Server…", target: nil, action: nil)
+    let editButton = NSButton(title: "Edit…", target: nil, action: nil)
     let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     let unencryptedCheckbox = NSButton(checkboxWithTitle: "Allow unencrypted network", target: nil, action: nil)
     private let unencryptedWarning = WrappingLabel(wrappingLabelWithString:
@@ -27,8 +28,8 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
     private var testTask: Task<Void, Never>?
     /// Kept by ID, so a list that changes under the selection keeps the same server selected.
     private var selectedID: UUID?
-    /// The Add sheet while it is open.
-    private(set) var addSheet: AddServerController?
+    /// The Add or Edit sheet while it is open.
+    private(set) var serverSheet: AddServerController?
     /// The server whose command is being typed. An edit still open when the selection moves
     /// (Remove and Add Server… take no focus) belongs to the server it began on.
     private var commandEditServerID: UUID?
@@ -63,6 +64,8 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         table.setAccessibilityLabel("Servers")
         table.dataSource = self
         table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(editClickedServer)
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
@@ -91,10 +94,12 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
 
         addButton.target = self
         addButton.action = #selector(addServer)
+        editButton.target = self
+        editButton.action = #selector(editServer)
         removeButton.target = self
         removeButton.action = #selector(removeServer)
-        for button in [addButton, removeButton] { button.bezelStyle = .rounded }
-        let listButtons = NSStackView(views: [addButton, removeButton])
+        for button in [addButton, editButton, removeButton] { button.bezelStyle = .rounded }
+        let listButtons = NSStackView(views: [addButton, editButton, removeButton])
         listButtons.orientation = .horizontal
         listButtons.spacing = 8
 
@@ -228,6 +233,7 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         } ?? ""
         problemLabel.isHidden = readable
         addButton.isEnabled = readable
+        editButton.isEnabled = readable && server != nil
         removeButton.isEnabled = readable && server != nil
         for control in [unencryptedCheckbox, commandField, testButton] as [NSControl] {
             control.isEnabled = readable && server != nil
@@ -260,19 +266,58 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
     // MARK: Actions
 
     @objc func addServer() {
+        showSheet(AddServerController())
+    }
+
+    /// Changes the selected server in place. It keeps its ID, so the sessions on it stay on it;
+    /// this is how a rotated token reaches Latch without orphaning them.
+    @objc func editServer() {
+        // An open command edit is saved to its own server first, so the sheet starts from it.
+        view.window?.makeFirstResponder(nil)
+        guard let server = selectedServer else { return }
+        showSheet(AddServerController(editing: server))
+    }
+
+    /// Selects a server, as a session's banner does before the user edits the server it is on.
+    func select(serverID id: UUID) {
+        loadViewIfNeeded()
+        guard let row = store.servers.firstIndex(where: { $0.id == id }) else { return }
+        table.selectRowIndexes([row], byExtendingSelection: false)
+        table.scrollRowToVisible(row)
+    }
+
+    /// A double-click edits the row it landed on, not an empty part of the list.
+    @objc private func editClickedServer() {
+        guard store.servers.indices.contains(table.clickedRow) else { return }
+        table.selectRowIndexes([table.clickedRow], byExtendingSelection: false)
+        editServer()
+    }
+
+    private func showSheet(_ sheet: AddServerController) {
         guard let window = view.window, store.problem == nil, window.attachedSheet == nil else { return }
         window.makeFirstResponder(nil)
-        let sheet = AddServerController()
-        sheet.onFinish = { [weak self] profile in
+        sheet.onFinish = { [weak self] entry in
             guard let self else { return }
-            self.addSheet = nil
-            guard let profile else { return }
+            self.serverSheet = nil
+            guard var profile = entry else { return }
+            // An edit changes only what the sheet shows, on the server as it is now: anything
+            // else saved since the sheet opened, such as its command, stays.
+            if let current = self.store.server(id: profile.id) {
+                var edited = current
+                edited.name = profile.name
+                edited.host = profile.host
+                edited.port = profile.port
+                edited.token = profile.token
+                guard edited != current else { return }
+                profile = edited
+            }
+            if profile.id == self.selectedServer?.id { self.clearTestResult() }
             self.save(profile)
             if let row = self.store.servers.firstIndex(where: { $0.id == profile.id }) {
                 self.table.selectRowIndexes([row], byExtendingSelection: false)
             }
         }
-        addSheet = sheet
+        serverSheet = sheet
         sheet.begin(over: window)
     }
 
@@ -291,12 +336,13 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         }
     }
 
-    /// Removing forgets the token, which only pairing again brings back, so it is asked first.
+    /// Removing forgets the server for good: a server added again is a new one, so sessions on the
+    /// removed one never connect again. Edit… is the way to change an address or token.
     private static func askToRemove(_ server: ServerProfile, over window: NSWindow?, then remove: @escaping () -> Void) {
         guard let window else { return remove() }
         let alert = NSAlert()
         alert.messageText = "Remove “\(server.name)”?"
-        alert.informativeText = "Sessions on \(server.name) stay in the sidebar, but can’t connect until you add the server again with its pairing string."
+        alert.informativeText = "Sessions on \(server.name) stay in the sidebar but can’t connect again, even if you add the server back. To change its address or token, use Edit… instead."
         alert.addButton(withTitle: "Remove").hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { response in
@@ -385,10 +431,14 @@ private final class ServerRowView: NSTableCellView {
 
 /// Add Server: paste what `latch-server pair` prints, which fills in everything, or enter the
 /// server by hand. Both token-bearing fields are secure fields, so the token never shows.
+/// Editing a server uses the same sheet, filled in except for the token: left empty, the token
+/// stays as it was, and a pasted pairing string replaces the host, port and token together.
 @MainActor
 final class AddServerController: NSWindowController, NSTextFieldDelegate {
-    /// Called once: with the new profile on Add, nil on Cancel.
+    /// Called once: with the profile on Add or Save, nil on Cancel.
     var onFinish: ((ServerProfile?) -> Void)?
+    /// The server being edited, whose ID, token and settings carry over; nil when adding.
+    let original: ServerProfile?
 
     let pairingField = NSSecureTextField(string: "")
     let nameField = NSTextField(string: "")
@@ -397,18 +447,28 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
     let tokenField = NSSecureTextField(string: "")
     /// Says what is wrong with the entry, or what the pasted string filled in.
     let message = WrappingLabel(wrappingLabelWithString: "")
-    private let addButton = NSButton(title: "Add", target: nil, action: nil)
+    private let addButton: NSButton
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     /// The name follows the host until the user types one of their own.
     private var nameEdited = false
     private static let fieldWidth: CGFloat = 300
 
-    init() {
+    init(editing original: ServerProfile? = nil) {
+        self.original = original
+        addButton = NSButton(title: original == nil ? "Add" : "Save", target: nil, action: nil)
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 260),
                             styleMask: [.titled, .docModalWindow], backing: .buffered, defer: true)
-        panel.title = "Add Server"
+        panel.title = original == nil ? "Add Server" : "Edit Server"
         super.init(window: panel)
         build(in: panel)
+        if let original {
+            nameField.stringValue = original.name
+            hostField.stringValue = original.host
+            portField.stringValue = String(original.port)
+            // A name of the user's own stays when the host changes; one that was only ever
+            // the host follows it, as it does while adding.
+            nameEdited = original.name != original.host
+        }
         refresh()
     }
 
@@ -417,21 +477,24 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
     func begin(over parent: NSWindow) {
         guard let window else { return }
         parent.beginSheet(window)
+        // Editing starts where a rotated token goes too.
         window.makeFirstResponder(pairingField)
     }
 
     private func build(in panel: NSPanel) {
-        let heading = NSTextField(labelWithString: "Add Server")
+        let heading = NSTextField(labelWithString: original == nil ? "Add Server" : "Edit Server")
         heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         pairingField.placeholderString = "latch://host:\(LatchRemoteProtocol.defaultPort)?token=…"
         pairingField.setAccessibilityLabel("Pairing string")
-        let pairingCaption = NSTextField(labelWithString: "Paste what “latch-server pair” prints on the server; it fills in the rest.")
+        let pairingCaption = NSTextField(labelWithString: original == nil
+            ? "Paste what “latch-server pair” prints on the server; it fills in the rest."
+            : "Paste a new pairing string to replace the host, port and token.")
         nameField.setAccessibilityLabel("Name")
         hostField.placeholderString = "vps.tailnet.ts.net"
         hostField.setAccessibilityLabel("Host")
         portField.setAccessibilityLabel("Port")
         portField.alignment = .right
-        tokenField.placeholderString = "latch_…"
+        tokenField.placeholderString = original == nil ? "latch_…" : "Unchanged"
         tokenField.setAccessibilityLabel("Token")
         for field in [pairingField, nameField, hostField, portField, tokenField] as [NSTextField] { field.delegate = self }
         for label in [pairingCaption, message] {
@@ -530,12 +593,25 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
             return .failure(.port)
         }
         let tokenText = tokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !tokenText.isEmpty else { return .failure(.incomplete) }
-        guard let token = LatchRemoteToken(tokenText) else { return .failure(.token) }
+        let token: LatchRemoteToken
+        if tokenText.isEmpty, let original {
+            token = original.token
+        } else {
+            guard !tokenText.isEmpty else { return .failure(.incomplete) }
+            guard let entered = LatchRemoteToken(tokenText) else { return .failure(.token) }
+            token = entered
+        }
         // The pairing parser's host rules: a DNS name or a numeric address.
         guard (try? LatchRemotePairing(host: host, port: port, token: token)) != nil else { return .failure(.host) }
         let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return .success(ServerProfile(name: name.isEmpty ? host : name, host: host, port: port, token: token))
+        guard var profile = original else {
+            return .success(ServerProfile(name: name.isEmpty ? host : name, host: host, port: port, token: token))
+        }
+        profile.name = name.isEmpty ? host : name
+        profile.host = host
+        profile.port = port
+        profile.token = token
+        return .success(profile)
     }
 
     enum EntryProblem: Error, Equatable {

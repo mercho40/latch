@@ -35,6 +35,8 @@ final class RemoteServerConnection: Sendable {
         var outstanding = 0
         var wakePending = false
         var closing = false
+        /// Closing, but the writer sends the events already waiting for the client first.
+        var draining = false
         var closeReason = ""
         var runningThreads = 1
     }
@@ -68,6 +70,29 @@ final class RemoteServerConnection: Sendable {
         guard first else { return }
         ServerSocket.shutdownBoth(descriptor)
         wakeWriter()
+    }
+
+    /// Stops reading at once, then closes once the events already published for the client
+    /// have been written, such as the stops of a server shutting down, or after `limit` when
+    /// the client is not taking them.
+    func closeAfterWriting(_ reason: String, within limit: Duration) {
+        let first = state.withLock { state in
+            guard !state.closing else { return false }
+            state.closing = true
+            state.draining = true
+            state.closeReason = reason
+            return true
+        }
+        guard first else { return }
+        ServerSocket.shutdownRead(descriptor)
+        wakeWriter()
+        DispatchQueue.global().asyncAfter(deadline: .now() + limit.dispatchInterval) { [self] in
+            // The descriptor closes only after the last thread has left, which takes this
+            // lock, so it is still this connection's here.
+            state.withLock { state in
+                if state.runningThreads > 0 { ServerSocket.shutdownBoth(descriptor) }
+            }
+        }
     }
 
     func handshakeDeadlinePassed() {
@@ -313,11 +338,14 @@ final class RemoteServerConnection: Sendable {
         let budget = server.configuration.eventByteBudget
         let pause = server.configuration.writerPauseForTesting
         while true {
-            let (outgoing, closing) = state.withLock { state in
+            let (outgoing, closing, draining) = state.withLock { state in
                 defer { state.outbox.removeAll() }
-                return (state.outbox, state.closing)
+                return (state.outbox, state.closing, state.draining)
             }
-            if closing { return }
+            if closing {
+                if draining { drain(hubConnection, budget: budget) }
+                return
+            }
             for item in outgoing {
                 guard ServerSocket.sendAll(descriptor, item.line) else {
                     close("write failed")
@@ -342,6 +370,20 @@ final class RemoteServerConnection: Sendable {
                 writerWake.wait()
                 state.withLock { $0.wakePending = false }
             }
+        }
+    }
+
+    /// Writes every event line the client has waiting, then shuts the socket down. Stops at
+    /// the first failed write, which is also how `closeAfterWriting`'s limit ends it.
+    private func drain(_ hubConnection: RemoteConnectionID, budget: Int) {
+        defer { ServerSocket.shutdownBoth(descriptor) }
+        while true {
+            let lines = server.hub.pullEventLines(for: hubConnection, byteBudget: budget)
+            guard !lines.isEmpty else { return }
+            var batch = Data()
+            batch.reserveCapacity(lines.reduce(0) { $0 + $1.count })
+            lines.forEach { batch.append($0) }
+            guard ServerSocket.sendAll(descriptor, batch) else { return }
         }
     }
 

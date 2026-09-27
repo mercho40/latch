@@ -64,6 +64,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     /// Built-in connections use the chosen provider name, not the protocol executable's identity.
     var displayStatus: String {
+        // Named as Settings has the server now, in case it was renamed since.
+        if model.stoppedOnServer, let serverName { return "Stopped on \(serverName)" }
         if selectedAgent != .custom, model.status.hasPrefix("Connected · ") {
             return "Connected · \(selectedAgent.title)"
         }
@@ -88,7 +90,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         // the lost link is what matters now.
         if let reconnecting = reconnectingTitle { return (.working, reconnecting) }
         if model.errorMessage != nil {
-            return (.failed, model.status == "Not connected" ? "Couldn’t connect" : model.status)
+            return (.failed, model.status == "Not connected" ? "Couldn’t connect" : displayStatus)
         }
         switch model.phase {
         case .prompting where model.status == "Working…":
@@ -112,7 +114,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             permission: pending?.id,
             allowOptionID: pending?.options.first { $0.kind == "allow_once" }?.optionId,
             rejectOptionID: pending?.options.first { $0.kind == "reject_once" }?.optionId,
-            isPrompting: model.phase == .prompting
+            isPrompting: model.phase == .prompting,
+            turnsEnded: model.turnsEnded,
+            lastTurnStopped: model.lastTurnEndedByStop
         )
     }
 
@@ -679,6 +683,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let failure: (detail: String, advice: String)? = model.errorMessage.map { message in
             let builtIn = selectedAgent != .custom && disconnected
             let advice = model.errorAdvice ?? (builtIn ? selectedRecipe?.setup : nil) ?? ""
+            if model.stoppedOnServer, let serverName { return ("The agent was stopped on \(serverName).", advice) }
             return (Self.agentWords(builtIn ? withoutLaunchInternals(message) : message), advice)
         } ?? launchProblem.map { ("", $0) }
         guard let failure, !shuttingDown else {
@@ -686,12 +691,15 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             bannerRow.isHidden = true
             return
         }
+        // Each attempt to connect is keyed apart, so one that fails the way a dismissed one did,
+        // such as after a change in Settings, still has its say.
         banner.update(
-            key: "\(model.phase)\u{0}\(selectedAgent.rawValue)\u{0}\(failure.detail)\u{0}\(failure.advice)",
+            key: "\(model.phase)\u{0}\(model.connectionAttempts)\u{0}\(selectedAgent.rawValue)\u{0}\(failure.detail)\u{0}\(failure.advice)",
             title: failureTitle(disconnected: disconnected),
             message: failure.advice,
             detail: failure.detail,
-            severity: disconnected ? .error : .warning,
+            // An agent stopped on purpose, by another client or the server, is not a fault.
+            severity: disconnected && !model.stoppedOnServer ? .error : .warning,
             actions: [
                 SessionBannerView.Action(title: "Retry") { [weak self] in self?.retryConnection() },
                 location.isRemote
@@ -703,9 +711,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         bannerRow.isHidden = banner.isHidden
     }
 
+    /// Opens Settings on this session's server, not whichever one the list shows first.
     private var serverSettingsAction: SessionBannerView.Action {
-        SessionBannerView.Action(title: "Server Settings…") {
-            NSApp.sendAction(#selector(LatchApplicationDelegate.showServerSettings(_:)), to: nil, from: nil)
+        let server = location.serverID.map(ServerReference.init)
+        return SessionBannerView.Action(title: "Server Settings…") {
+            NSApp.sendAction(#selector(LatchApplicationDelegate.showServerSettings(_:)), to: nil, from: server)
         }
     }
 
@@ -716,6 +726,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             return disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem"
         }
         if model.errorIsConnectionFailure { return "Can’t connect to \(serverName)" }
+        if disconnected, model.stoppedOnServer {
+            return "\(selectedAgent.title) stopped on \(serverName)"
+        }
         if disconnected, case .failed(_, _, runtimeGone: true) = model.linkState {
             return "\(selectedAgent.title) stopped on \(serverName)"
         }

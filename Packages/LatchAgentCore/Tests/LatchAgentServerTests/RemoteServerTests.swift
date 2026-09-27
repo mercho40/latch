@@ -456,9 +456,16 @@ final class RemoteServerTests: XCTestCase {
         let client = try await testbed.authenticated()
         let id = AgentRuntimeID("stopping")
         try await client.ok(.launchAgent(runtimeID: id, agent: testbed.bed.mockAgent, workspace: testbed.bed.workspace.path))
+        try await client.ok(.attach(runtimeID: id, after: 0))
         let handshaking = try testbed.connect()
 
         await testbed.server.shutdown()
+        // Runtimes stop before connections close, so a client hears its agent was stopped
+        // rather than only that the server went away.
+        _ = try await client.readFrames(until: "the stop") { frame in
+            guard case let .event(event) = frame, event.runtimeID == id else { return false }
+            return event.event == .exited(LatchRemoteExit(status: nil, stopped: true))
+        }
         try await client.expectClosed()
         try await handshaking.expectClosed()
         XCTAssertThrowsError(try testbed.connect())

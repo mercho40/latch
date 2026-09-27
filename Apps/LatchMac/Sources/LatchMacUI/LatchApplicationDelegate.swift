@@ -38,10 +38,15 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         settingsWindow?.select(pane: "Agents")
     }
 
-    /// Settings, open on the Servers pane: where a remote session's server is fixed.
+    /// Settings, open on the Servers pane: where a remote session's server is fixed. A sender
+    /// that names the server selects it, so an edit made next is to the right one.
     @objc func showServerSettings(_ sender: Any?) {
         showSettings(sender)
-        settingsWindow?.select(pane: "Servers")
+        if let server = (sender as? ServerReference)?.serverID {
+            settingsWindow?.select(server: server)
+        } else {
+            settingsWindow?.select(pane: "Servers")
+        }
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -199,7 +204,8 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
                 // The quit's last save, read back from disk, holds the binding the next launch
                 // attaches with.
                 let saved = try? await SessionStore(directory: library).load()
-                guard let binding = saved?.sessions.first?.remote, binding.runtimeID == runtime else {
+                guard let binding = saved?.sessions.lazy.compactMap(\.remote).first(where: { $0.runtimeID == runtime })
+                else {
                     FileHandle.standardError.write(Data("UI SMOKE REMOTE: quitting did not save the session's runtime\n".utf8))
                     if let remoteSmokeOwnedWorkspace { try? FileManager.default.removeItem(at: remoteSmokeOwnedWorkspace) }
                     exit(EXIT_FAILURE)

@@ -21,7 +21,9 @@ enum SessionLinkState: Equatable, Sendable {
     /// Lost at `since`; commands and the turn in flight wait for it to come back.
     case reconnecting(server: String, since: Date)
     /// For good, in plain words that name the server. The event stream finishes after it.
-    /// `runtimeGone` when the server answered but no longer has the session's agent.
+    /// `runtimeGone` when the server answered but no longer has the session's agent. Otherwise
+    /// the link was turned away, not the agent: it is most likely still running there, so the
+    /// session keeps its binding for Retry, or a change in Settings, to attach to again.
     case failed(server: String, reason: String, runtimeGone: Bool = false)
 }
 
@@ -41,11 +43,17 @@ enum RemoteServiceEvent: Sendable {
     /// A journal event with nothing to show, such as one already delivered or of an unknown
     /// kind. It still moves the applied sequence.
     case skipped(runtimeID: AgentRuntimeID, sequence: UInt64)
-    /// A runtime an earlier run of Latch left on the server, attached again. Comes before
-    /// anything else from it, so the session rebuilds its state from the record before the
-    /// backlog arrives.
-    case attached(runtimeID: AgentRuntimeID, LatchRemoteAttachment)
+    /// The agent was stopped on `server`, by another client or the server shutting down, rather
+    /// than exiting on its own. Never for a stop this client asked for.
+    case stopped(runtimeID: AgentRuntimeID, server: String, sequence: UInt64)
+    /// A runtime left on `server` earlier, attached again. Comes before anything else from it,
+    /// so the session rebuilds its state from the record before the backlog arrives.
+    case attached(runtimeID: AgentRuntimeID, LatchRemoteAttachment, server: String)
     case link(SessionLinkState)
+    /// Settings changed how the session's server is reached while the client followed no
+    /// runtime. A session that kept one when its link failed attaches to it again. One the
+    /// client follows is pointed at the server the new way in place, and hears nothing of it.
+    case serverChanged
 }
 
 /// One session's command and event channel to a Latch Agent service, wherever it runs.
@@ -76,6 +84,9 @@ protocol AgentServiceClient: AnyObject, Sendable {
     /// Stops following a runtime and leaves it running, for another run of Latch to attach
     /// to. Best effort, and never a stop.
     func detach(runtimeID: AgentRuntimeID) async
+    /// Whether Settings now reaches the server differently from the last channel this client
+    /// made. Always false on this Mac.
+    func serverSettingsChangedSinceLastChannel() async -> Bool
     /// Releases the channel. In-process clients stop their runtimes; XPC clients only drop the connection.
     func close()
     /// Human-readable transport summary for diagnostics and the smoke test.
@@ -106,13 +117,16 @@ extension AgentServiceClient {
     }
 
     func detach(runtimeID: AgentRuntimeID) async {}
+
+    func serverSettingsChangedSinceLastChannel() async -> Bool { false }
 }
 
 /// The server no longer has the runtime a session was bound to: it restarted, or reaped or
 /// dropped the runtime while Latch was closed.
 struct RemoteRuntimeGone: LocalizedError, Equatable {
-    let message: String
-    var errorDescription: String? { message }
+    /// The server that answered without it, as Settings named it then.
+    let server: String
+    var errorDescription: String? { RemoteAgentServiceClient.reason(for: .runtimeNotFound(message: ""), server: server) }
 }
 
 /// Hosts the service inside the current process. Used by the SwiftPM preview and unit tests.

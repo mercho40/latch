@@ -17,13 +17,31 @@ final class SessionModel {
     private var history = ChatHistory()
     /// What went wrong, in the words it arrived in. Setting it clears `errorAdvice`, so
     /// advice never outlives the failure it was written for.
-    private(set) var errorMessage: String? { didSet { errorAdvice = nil; errorIsConnectionFailure = false } }
+    private(set) var errorMessage: String? {
+        didSet {
+            errorAdvice = nil
+            errorIsConnectionFailure = false
+            stoppedOnServer = false
+        }
+    }
     /// What to do about `errorMessage`, in Latch's words; kept apart so the banner can set
     /// the agent's text off from the advice instead of running them into one sentence.
     private(set) var errorAdvice: String?
     /// `errorMessage` is about reaching a server, not about the agent on it.
     private(set) var errorIsConnectionFailure = false
+    /// `errorMessage` says the agent was stopped on its server by something other than this
+    /// session, which is neither a crash nor a failure to start.
+    private(set) var stoppedOnServer = false
     static let idleSavedStatus = "Saved · Not connected"
+    /// Turns that have come to an end while this session followed them, so each end is
+    /// announced once. A turn whose link failed under it has not ended: it runs on, and a
+    /// re-attach follows it again.
+    private(set) var turnsEnded = 0
+    /// The last turn to end did so because its agent was stopped on the server.
+    private(set) var lastTurnEndedByStop = false
+    /// Every launch or attach counts one, so a failure that repeats an earlier one word for
+    /// word is still a new failure to report.
+    private(set) var connectionAttempts = 0
     private(set) var cancellationRequested = false
     private(set) var configuration = SessionConfiguration()
     private(set) var isChangingConfiguration = false
@@ -54,6 +72,7 @@ final class SessionModel {
         history.restore(messages)
         savedAgentSessionID = agentSessionID
         savedBinding = remote
+        bindingKeptFromLink = false
         archivedWithoutContext = agentSessionID == nil && !messages.isEmpty
         status = Self.idleSavedStatus
         onChange?()
@@ -73,10 +92,20 @@ final class SessionModel {
     /// session, or kept when Latch quit. The next remote connection attaches to it rather than
     /// launching another.
     private var savedBinding: SavedSession.RemoteBinding?
+    /// `savedBinding` was kept when the link to a live runtime failed, rather than restored
+    /// with the session: attaching to it again is reconnecting, not resuming after a relaunch.
+    private var bindingKeptFromLink = false
+    /// The prompt of a turn whose link failed before the server accepted it. A re-attach
+    /// whose record does not know the turn sends it again under the same turn ID; this Mac
+    /// still has it, unlike after a relaunch.
+    private var interruptedPrompt: (turn: UUID, blocks: [ACPPromptBlock])?
     /// The runtime was launched on, or attached to, a server, which keeps it when Latch quits.
     private var runtimeIsRemote = false
     /// The binding an attach in flight is for, until its record arrives.
     private var attaching: (id: AgentRuntimeID, binding: SavedSession.RemoteBinding)?
+    /// What the last remote connection asked for, so a change to the server's settings can
+    /// attach again without being asked.
+    private var remoteTarget: (agent: LatchRemoteAgent, path: String)?
     /// The attach waiting for its record to be taken in, so it returns with the session ready.
     private var attachWaiter: CheckedContinuation<Void, Never>?
     /// Where the transcript stood when the running turn began; see `remoteBinding`.
@@ -84,13 +113,17 @@ final class SessionModel {
     /// Turns whose prompts the transcript already shows, so their `turnStarted` is not shown
     /// again: sent from here, or the turn a saved binding was running.
     private var knownTurns: [UUID] = []
-    /// An attach found the runtime exited. Its exit is shown once its last output is in.
-    private var pendingExit: (through: UInt64, status: Int32)?
+    /// An attach found the runtime exited. Its exit is shown once its last output is in;
+    /// `stoppedOn` names the server when the agent was stopped there rather than exiting.
+    private var pendingExit: (through: UInt64, status: Int32, stoppedOn: String?)?
     /// The turn a saved binding was sending that the server's record does not know. Unless
     /// the backlog up to `through` shows it starting, the prompt never left this Mac.
-    private var unsentTurn: (turn: UUID, through: UInt64)?
+    /// `atQuit` when the binding was saved at quit, rather than kept when the link failed.
+    private var unsentTurn: (turn: UUID, through: UInt64, atQuit: Bool)?
     static let outputLostWhileClosed = "Some output from while Latch was closed could not be recovered."
+    static let outputLostWhileUnreachable = "Some output from while the server was out of reach could not be recovered."
     static let promptNotSent = "This message was not sent before Latch quit."
+    static let promptNotSentOverLink = "This message was not sent: the server could not be reached."
 
     /// What a relaunch needs to attach to this session's runtime again, saved in the same
     /// snapshot as `messages`. While a turn runs, the transcript is cut back to its prompt and
@@ -177,22 +210,40 @@ final class SessionModel {
     /// The service channel ended (XPC interruption or invalidation). Any runtime it owned is
     /// unreachable now; present that like an agent exit and open a fresh channel for next time.
     private func serviceConnectionLost() {
+        let ended = client
         client.close()
         client = makeClient()
         startEventTask()
         guard phase != .disconnected else { return }
         // A server that turned the session away for good said why, naming itself. One that
-        // answered but has lost the agent is reachable: the agent stopped, not the link.
+        // answered but has lost the agent is reachable: the agent stopped, not the link. When
+        // only the link failed, the agent is most likely still running, so the session keeps
+        // its binding: Retry, or fixing the server in Settings, attaches to it again from where
+        // it had got to, the turn in flight included, rather than starting another agent.
         if case let .failed(_, reason, runtimeGone) = linkState {
+            let binding = runtimeGone ? nil : remoteBinding
             resetAfterLoss(status: runtimeGone ? "Agent stopped" : "Not connected", error: reason,
-                           connectionFailure: !runtimeGone)
+                           advice: runtimeGone ? "Retry to start it again." : nil, connectionFailure: !runtimeGone)
+            guard let binding else { return }
+            savedBinding = binding
+            bindingKeptFromLink = true
+            // A fix saved in Settings while the link was failing reached no channel of this
+            // session's; it is taken up now.
+            let token = generation
+            Task { [weak self] in
+                guard await ended.serverSettingsChangedSinceLastChannel(), let self, generation == token else { return }
+                followAgainAfterServerChange()
+            }
             return
         }
         resetAfterLoss(status: "Agent service disconnected",
                        error: "Lost the connection to the Latch agent service. Select the agent again to reconnect.")
     }
 
-    private func resetAfterLoss(status: String, error: String, connectionFailure: Bool = false) {
+    private func resetAfterLoss(status: String, error: String, advice: String? = nil, connectionFailure: Bool = false,
+                                stoppedOnServer: Bool = false) {
+        // The agent ending ends its turn; a failed link does not, since the turn runs on.
+        if phase == .prompting, !connectionFailure { noteTurnEnded(stopped: stoppedOnServer) }
         generation = UUID()
         runtimeID = nil
         forgetRemoteRuntime()
@@ -205,8 +256,20 @@ final class SessionModel {
         phase = .disconnected
         self.status = status
         errorMessage = error
+        errorAdvice = advice
         errorIsConnectionFailure = connectionFailure
+        self.stoppedOnServer = stoppedOnServer
         onChange?()
+    }
+
+    /// Stopped on the server by something other than this session: another client or the server
+    /// shutting down. (The idle reaper only takes runtimes nobody is attached to, and forgets
+    /// them, so a session finds those gone rather than stopped.) Retry starts the agent again and resumes its session.
+    private func resetAfterStop(on server: String) {
+        // Whatever the link was doing, there is nothing left on it to wait for.
+        linkState = .connected
+        resetAfterLoss(status: "Stopped on \(server)", error: "The agent was stopped on \(server).",
+                       advice: "Retry to start it again.", stoppedOnServer: true)
     }
 
     func connect(command: String, workspace: URL?, launchEnvironment: AgentLaunchEnvironment = AgentLaunchEnvironment(), startNewSession: Bool = false) async {
@@ -235,6 +298,7 @@ final class SessionModel {
     /// launch is the local path's.
     func connect(remote agent: LatchRemoteAgent, path: String, startNewSession: Bool = false) async {
         guard beginConnecting(startNewSession: startNewSession) else { return }
+        remoteTarget = (agent, path)
         if let binding = savedBinding {
             guard startNewSession else { return await reattach(binding, agent: agent, path: path) }
             // A new context replaces the one that runtime holds, so nothing will attach to it again.
@@ -246,18 +310,22 @@ final class SessionModel {
     /// Attaches to the runtime the last run of Latch left on the server rather than launching
     /// another. The record arrives ahead of the backlog, in `receive(.attached)`, which
     /// rebuilds the session from it. A server that no longer has the runtime gets the resume
-    /// path, as after any lost runtime.
-    private func reattach(_ binding: SavedSession.RemoteBinding, agent: LatchRemoteAgent, path: String) async {
+    /// path, as after any lost runtime, when the user asked to connect; an attach that a change
+    /// in Settings started launches nothing unasked, on what may now be another machine.
+    private func reattach(_ binding: SavedSession.RemoteBinding, agent: LatchRemoteAgent, path: String,
+                          resumingIfGone: Bool = true) async {
         let token = UUID()
         generation = token
+        connectionAttempts += 1
         let id = AgentRuntimeID(binding.runtimeID)
+        let reconnecting = bindingKeptFromLink
         attaching = (id, binding)
         runtimeID = nil
         sessionID = nil
         linkState = .connected
         clearConfiguration()
         phase = .connecting
-        status = "Resuming…"
+        status = reconnecting ? "Connecting…" : "Resuming…"
         onChange?()
         do {
             _ = try await client.attach(runtimeID: id, after: binding.cursor)
@@ -265,27 +333,40 @@ final class SessionModel {
             if generation == token, attaching != nil {
                 await withCheckedContinuation { attachWaiter = $0 }
             }
-        } catch is RemoteRuntimeGone {
+        } catch let gone as RemoteRuntimeGone {
             guard generation == token else { return }
             attaching = nil
             savedBinding = nil
-            // Whatever the turn running at quit went on to say went with the runtime.
+            bindingKeptFromLink = false
+            // Whatever the turn running at quit, or when the link failed, went on to say went
+            // with the runtime.
             if binding.boundaryTurnID != nil {
-                history.appendNotice(Self.outputLostWhileClosed)
+                history.appendNotice(reconnecting ? Self.outputLostWhileUnreachable : Self.outputLostWhileClosed)
                 publishHistory()
+            }
+            guard resumingIfGone else {
+                let reason = gone.localizedDescription
+                linkState = .failed(server: gone.server, reason: reason, runtimeGone: true)
+                return resetAfterLoss(status: "Agent stopped", error: reason, advice: "Retry to start it again.")
             }
             phase = .disconnected
             await launch(.remote(agent: agent, path: path), cwd: path, startNewSession: false)
         } catch {
             guard generation == token else { return }
             // The runtime may well still be there: keep the binding, so Retry attaches again.
+            // Reconnecting after a failed link fails as that link did; only a relaunch's
+            // resume has saved history to reassure about.
             attaching = nil
             phase = .disconnected
-            status = "Saved · Resume failed"
+            status = reconnecting ? "Not connected" : "Saved · Resume failed"
             errorMessage = error.localizedDescription
             errorIsConnectionFailure = error is RemoteConnectionFailure
-            errorAdvice = "Your saved history is unchanged. Retry, or start a new session."
+            if !reconnecting { errorAdvice = "Your saved history is unchanged. Retry, or start a new session." }
             onChange?()
+            // Settings may have been fixed while this attach was failing the old way.
+            guard errorIsConnectionFailure, await client.serverSettingsChangedSinceLastChannel(),
+                  generation == token else { return }
+            followAgainAfterServerChange()
         }
     }
 
@@ -294,11 +375,16 @@ final class SessionModel {
     /// so it is dropped first, unless the journal no longer reaches back that far. When it does
     /// not, the saved transcript stays whole, what it already shows is skipped as it arrives
     /// again, and only output evicted from after it is reported lost.
-    private func rebuild(from attachment: LatchRemoteAttachment, binding: SavedSession.RemoteBinding, id: AgentRuntimeID) {
+    private func rebuild(from attachment: LatchRemoteAttachment, binding: SavedSession.RemoteBinding, id: AgentRuntimeID,
+                         server: String) {
         let record = attachment.record
         attaching = nil
         defer { resumeAttachWaiter() }
+        let afterLinkFailure = bindingKeptFromLink
+        let interrupted = interruptedPrompt
         savedBinding = nil
+        bindingKeptFromLink = false
+        interruptedPrompt = nil
         runtimeIsRemote = true
         runtimeID = id
         if let bound = record.sessionID { savedAgentSessionID = bound }
@@ -334,16 +420,22 @@ final class SessionModel {
         status = "Connected · \(title)"
         phase = .ready
         if record.lifecycle == .exited {
-            pendingExit = (record.lastSequence, record.exit?.status ?? 0)
+            pendingExit = (record.lastSequence, record.exit?.status ?? 0, record.exit?.stopped == true ? server : nil)
         } else if let turn = record.activeTurnID {
-            awaitRecordedTurn(turn, runtimeID: id, boundary: binding.boundaryTurnID == turn ? binding : nil)
+            followTurn(turn, runtimeID: id, boundary: binding.boundaryTurnID == turn ? binding : nil)
         } else if let turn = binding.boundaryTurnID {
             if record.turns.contains(where: { $0.turnID == turn && $0.state == .ended }) {
                 // It ended while Latch was closed. Followed to its end as the backlog replays
                 // it, it finishes here like any turn, so it is announced like one.
-                awaitRecordedTurn(turn, runtimeID: id, boundary: binding)
+                followTurn(turn, runtimeID: id, boundary: binding)
             } else if !record.turns.contains(where: { $0.turnID == turn }) {
-                unsentTurn = (turn, record.lastSequence)
+                if let interrupted, interrupted.turn == turn {
+                    // The server never had it, so this is its first delivery, not a retry; the
+                    // turn ID would keep a second one from running twice all the same.
+                    followTurn(turn, runtimeID: id, boundary: binding, sending: interrupted.blocks)
+                } else {
+                    unsentTurn = (turn, record.lastSequence, !afterLinkFailure)
+                }
             }
         }
         onChange?()
@@ -375,12 +467,16 @@ final class SessionModel {
     /// A turn the record shows running, from before Latch quit or from another client. No
     /// `send` waits for it, so this does, and ends it the way `send` ends its own. `boundary`
     /// is the saved binding when it is that binding's turn, whose prompt is already shown.
-    private func awaitRecordedTurn(_ turn: UUID, runtimeID id: AgentRuntimeID, boundary: SavedSession.RemoteBinding?) {
+    /// With `sending`, the turn is this session's own whose prompt never reached the server,
+    /// and this sends it.
+    private func followTurn(_ turn: UUID, runtimeID id: AgentRuntimeID, boundary: SavedSession.RemoteBinding?,
+                            sending blocks: [ACPPromptBlock]? = nil) {
         let token = generation
         phase = .prompting
         status = "Working…"
         promptStartedAt = now()
         promptGeneration = UUID()
+        let prompting = promptGeneration
         cancellationRequested = false
         turnID = turn
         turnBoundary = boundary
@@ -390,10 +486,26 @@ final class SessionModel {
                 options: .userInitiatedAllowingIdleSystemSleep, reason: "Agent prompt in flight")
             defer { ProcessInfo.processInfo.endActivity(activity) }
             let result: Result<LatchAgentResponse, any Error>
-            do { result = .success(try await client.awaitTurn(runtimeID: id, turnID: turn)) }
-            catch { result = .failure(error) }
+            do {
+                if let blocks { result = .success(try await client.prompt(runtimeID: id, turnID: turn, blocks: blocks)) }
+                else { result = .success(try await client.awaitTurn(runtimeID: id, turnID: turn)) }
+            } catch { result = .failure(error) }
+            if let blocks { self?.keepIfInterrupted(turn, blocks: blocks, result, prompting: prompting) }
             await self?.finishTurn(turn, result, generation: token)
         }
+    }
+
+    /// Settings changed how this session's server is reached. A session holding a runtime it
+    /// could not reach attaches to it again with the new settings, from where it had got to,
+    /// and follows a turn still running there to its end. One that follows a runtime needs
+    /// nothing from here: its client points the channel at the server the new way in place.
+    private func followAgainAfterServerChange() {
+        guard let target = remoteTarget, authenticationStop == nil, phase == .disconnected,
+              errorIsConnectionFailure, let binding = savedBinding else { return }
+        // Connecting from now, so a second notice of the same change starts nothing more.
+        phase = .connecting
+        errorMessage = nil
+        Task { [weak self] in await self?.reattach(binding, agent: target.agent, path: target.path, resumingIfGone: false) }
     }
 
     /// Quitting Latch: lets go of a remote session's runtime and leaves it running on the
@@ -411,6 +523,7 @@ final class SessionModel {
         runtimeID = nil
         forgetRemoteRuntime()
         savedBinding = binding
+        bindingKeptFromLink = false
         sessionID = nil
         clearConfiguration()
         cancellationRequested = false
@@ -426,6 +539,7 @@ final class SessionModel {
     func discardRemoteBinding() async {
         guard let binding = savedBinding else { return }
         savedBinding = nil
+        bindingKeptFromLink = false
         _ = try? await client.execute(.stopRuntime(id: AgentRuntimeID(binding.runtimeID)))
     }
 
@@ -457,10 +571,11 @@ final class SessionModel {
     private func caughtUp() {
         if let unsent = unsentTurn, appliedSequence >= unsent.through {
             unsentTurn = nil
-            history.appendNotice(Self.promptNotSent)
+            history.appendNotice(unsent.atQuit ? Self.promptNotSent : Self.promptNotSentOverLink)
             publishHistory()
         }
         guard let exit = pendingExit, appliedSequence >= exit.through else { return }
+        if let server = exit.stoppedOn { return resetAfterStop(on: server) }
         resetAfterLoss(status: "Agent exited (\(exit.status))",
                        error: "The agent process ended. Select the agent again to reconnect.")
     }
@@ -480,6 +595,8 @@ final class SessionModel {
     private func launch(_ launch: AgentLaunch, cwd: String, startNewSession: Bool) async {
         let token = UUID()
         generation = token
+        connectionAttempts += 1
+        interruptedPrompt = nil
         let id = AgentRuntimeID(token.uuidString)
         runtimeID = id
         if startNewSession {
@@ -636,10 +753,14 @@ final class SessionModel {
         promptStartedAt = now()
         lastActiveAt = promptStartedAt
         promptGeneration = UUID()
+        let prompting = promptGeneration
         cancellationRequested = false
         let turn = UUID()
         turnID = turn
-        defer { if turnID == turn { turnID = nil } }
+        // Not once a re-attach is following the same turn in its own right: when the link
+        // failed under this prompt, its failure can reach here after Retry, or a fix in
+        // Settings, has already attached again and taken the turn up.
+        defer { if turnID == turn, promptGeneration == prompting { turnID = nil } }
         remember(turn)
         status = "Working…"
         history.appendUser(text, attachments: attachments.map(\.record))
@@ -652,13 +773,38 @@ final class SessionModel {
         let result: Result<LatchAgentResponse, any Error>
         do { result = .success(try await client.prompt(runtimeID: id, turnID: turn, blocks: blocks)) }
         catch { result = .failure(error) }
+        keepIfInterrupted(turn, blocks: blocks, result, prompting: prompting)
         await finishTurn(turn, result, generation: token)
+    }
+
+    /// A prompt whose link failed under it may never have reached the server; see
+    /// `interruptedPrompt`. Not once a re-attach has taken the turn up since.
+    private func keepIfInterrupted(_ turn: UUID, blocks: [ACPPromptBlock], _ result: Result<LatchAgentResponse, any Error>,
+                                   prompting: UUID) {
+        guard case .failure(is RemoteTurnInterrupted) = result, promptGeneration == prompting else { return }
+        interruptedPrompt = (turn, blocks)
+    }
+
+    private func noteTurnEnded(stopped: Bool = false) {
+        turnsEnded += 1
+        lastTurnEndedByStop = stopped
     }
 
     /// How a turn ends, whether `send` started it or an attach found it running. Nothing
     /// changes once the session has moved on to another runtime or another turn.
     private func finishTurn(_ turn: UUID, _ result: Result<LatchAgentResponse, any Error>, generation token: UUID) async {
         guard generation == token, turnID == turn else { return }
+        switch result {
+        case .failure(is RemoteTurnInterrupted):
+            // The link failed under the turn, not the turn: the session ends next and keeps
+            // the turn, where it stands, for a re-attach to follow.
+            return
+        case .failure(is RemoteAgentExited):
+            // The runtime's exit follows on the same stream and says how it ended.
+            return
+        default:
+            noteTurnEnded()
+        }
         switch result {
         case let .success(.promptCompleted(_, response)):
             status = response.stopReason == "cancelled" ? "Cancelled" : "Ready · \(response.stopReason)"
@@ -740,6 +886,7 @@ final class SessionModel {
         sessionID = nil
         clearConfiguration()
         permissions.cancelAll()
+        interruptedPrompt = nil
         phase = .stopping
         status = "Stopping…"
         onChange?()
@@ -836,9 +983,15 @@ final class SessionModel {
             guard state != linkState else { return }
             linkState = state
             onChange?()
-        case let .attached(id, attachment):
+        case let .attached(id, attachment, server):
             guard let attaching, attaching.id == id else { return }
-            rebuild(from: attachment, binding: attaching.binding, id: id)
+            rebuild(from: attachment, binding: attaching.binding, id: id, server: server)
+            return
+        case let .stopped(id, server, sequence) where id == runtimeID:
+            appliedSequence = max(appliedSequence, sequence)
+            resetAfterStop(on: server)
+        case .serverChanged:
+            followAgainAfterServerChange()
             return
         case let .agent(event, sequence):
             receive(event)
@@ -952,7 +1105,8 @@ private extension RemoteServiceEvent {
         case let .configurationSet(id, _, sequence), let .turnStarted(id, _, _, _, sequence),
              let .turnEnded(id, _, sequence), let .skipped(id, sequence): (id, sequence)
         case let .outputLost(id, sequence): sequence.map { (id, $0) }
-        case .attached, .link: nil
+        case let .stopped(id, _, sequence): (id, sequence)
+        case .attached, .link, .serverChanged: nil
         }
     }
 }

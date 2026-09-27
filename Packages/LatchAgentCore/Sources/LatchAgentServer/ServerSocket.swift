@@ -222,6 +222,10 @@ enum ServerSocket {
         _ = posixShutdown(descriptor, Int32(SHUT_RDWR))
     }
 
+    static func shutdownRead(_ descriptor: Int32) {
+        _ = posixShutdown(descriptor, Int32(SHUT_RD))
+    }
+
     static func shutdownWrite(_ descriptor: Int32) {
         _ = posixShutdown(descriptor, Int32(SHUT_WR))
     }

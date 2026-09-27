@@ -9,8 +9,9 @@ import Synchronization
 /// A session's service on a server, behind the same contract as this Mac's: a long-held
 /// prompt reply, and an event stream that finishes only when the runtime is out of reach for
 /// good. Each runtime gets a `LatchRemoteRuntimeChannel`, made when it launches or is attached
-/// to again after a relaunch, and closed when it stops, is detached from or the next one
-/// launches. The channel reconnects, re-attaches and sends pending commands again on its own.
+/// to again, after a relaunch or a failed link, and closed when it stops, is detached from or
+/// the next one is followed. The channel reconnects, re-attaches and sends pending commands
+/// again on its own, and a change in Settings points it at the server the new way in place.
 /// Nothing here retries a command: the channel's retries are safe because every command is
 /// idempotent on the server.
 final class RemoteAgentServiceClient: AgentServiceClient {
@@ -18,6 +19,8 @@ final class RemoteAgentServiceClient: AgentServiceClient {
     let events: AsyncStream<LatchAgentEvent>
     let remoteEvents: AsyncStream<RemoteServiceEvent>?
     var isRemote: Bool { true }
+    /// The server in Settings this client reaches, whatever it is called or wherever it is now.
+    let serverID: UUID
 
     private let lifetime: AsyncStream<LatchAgentEvent>.Continuation
     private let continuation: AsyncStream<RemoteServiceEvent>.Continuation
@@ -34,6 +37,13 @@ final class RemoteAgentServiceClient: AgentServiceClient {
     private struct State {
         /// The server as it was last read, for messages and the transport description.
         var server: ServerProfile
+        /// How the last channel made here reaches the server: `server` as it was then, or
+        /// as a change in Settings that channel took up. Not updated for a channel that had
+        /// already failed, so the session can tell that its settings have moved on since.
+        var reached: ServerProfile
+        /// Changes in Settings taken up by the channel in place, each of which gives a first
+        /// connection its full time again.
+        var reconnections = 0
         var runtime: Runtime?
         var finished = false
         /// Every runtime's stop, once asked for or once none is needed. A second stop of one
@@ -58,9 +68,10 @@ final class RemoteAgentServiceClient: AgentServiceClient {
          firstConnectionLimit: Duration = .seconds(15),
          readServer: @escaping @MainActor @Sendable () -> ServerProfile?) {
         self.readServer = readServer
+        serverID = server.id
         self.backoff = backoff
         self.firstConnectionLimit = firstConnectionLimit
-        state = Mutex(State(server: server))
+        state = Mutex(State(server: server, reached: server))
         (events, lifetime) = AsyncStream.makeStream()
         let (stream, continuation) = AsyncStream<RemoteServiceEvent>.makeStream(bufferingPolicy: .unbounded)
         remoteEvents = stream
@@ -80,7 +91,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
             throw LatchAgentFailure(code: .invalidRequest, message: "A remote session cannot run a command on this Mac.")
         }
         let (channel, server) = try await follow(id)
-        relayEvents(channel, runtimeID: id, server: server.name)
+        relayEvents(channel, runtimeID: id)
         let initialization = try await firstConnection(of: channel, id: id, server: server) {
             try await channel.launch(agent: agent, workspace: path)
         }
@@ -102,7 +113,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
                 do {
                     return try await channel.attach(after: cursor)
                 } catch let error as LatchRemoteError where error.code == .runtimeNotFound {
-                    throw RemoteRuntimeGone(message: "The agent is no longer running on \(server.name).")
+                    throw RemoteRuntimeGone(server: serverName)
                 }
             }
         } catch {
@@ -116,8 +127,8 @@ final class RemoteAgentServiceClient: AgentServiceClient {
             return true
         }
         guard current else { throw LatchRemoteClientError.closed }
-        yield(.attached(runtimeID: id, attachment), from: channel)
-        relayEvents(channel, runtimeID: id, server: server.name, attached: attachment)
+        yield(.attached(runtimeID: id, attachment, server: serverName), from: channel)
+        relayEvents(channel, runtimeID: id, attached: attachment)
         return attachment
     }
 
@@ -131,35 +142,43 @@ final class RemoteAgentServiceClient: AgentServiceClient {
             guard !state.finished else { throw LatchRemoteClientError.closed }
             let replaced = state.runtime
             state.server = server
+            state.reached = server
             state.runtime = Runtime(id: id, channel: channel)
             return replaced
         }
         // Left running on the server, if it still is: stopping it is `SessionModel`'s call.
         if let replaced { release(replaced.id, replaced.channel) }
-        relayLinks(channel, server: server.name)
+        relayLinks(channel)
         channel.start()
         return (channel, server)
     }
 
     /// Runs a runtime's first command. One whose server has not answered once within
     /// `firstConnectionLimit` fails: a wrong address or a server that is not running is for
-    /// Settings to fix, not for waiting out.
+    /// Settings to fix, not for waiting out. A fix made in Settings meanwhile gets the whole
+    /// limit to answer in.
     private func firstConnection<Value: Sendable>(
         of channel: LatchRemoteRuntimeChannel, id: AgentRuntimeID, server: ServerProfile,
         _ body: () async throws -> Value
     ) async throws -> Value {
         let watchdog = Task { [firstConnectionLimit, weak self] in
-            try await Task.sleep(for: firstConnectionLimit)
-            guard !channel.hasConnected else { return }
-            self?.release(id, channel)
+            var seen = self?.state.withLock { $0.reconnections }
+            while true {
+                try await Task.sleep(for: firstConnectionLimit)
+                guard !channel.hasConnected, let self else { return }
+                let now = state.withLock { $0.reconnections }
+                guard now != seen else { return release(id, channel) }
+                seen = now
+            }
         }
         defer { watchdog.cancel() }
         do {
             return try await mapFailures(server: server.name, body)
         } catch where !channel.hasConnected && channel.linkState == .failed(.closed) {
             // The watchdog's close, or the session's own stop, before the server ever answered.
+            let server = state.withLock { $0.server }
             throw RemoteServerFailure(message: "\(server.name) is not answering at \(server.address). "
-                + "Check that latch-server is running there and that Settings ▸ Servers has its address right.")
+                + "Check that latch-server is running there and that Settings → Servers has its address right.")
         }
     }
 
@@ -214,7 +233,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
     /// turn ID if the first attempt's reply was lost, and the server runs it once.
     func prompt(runtimeID: AgentRuntimeID, turnID: UUID, blocks: [ACPPromptBlock]) async throws -> LatchAgentResponse {
         let (channel, server) = try current(runtimeID)
-        let outcome = try await mapFailures(server: server) {
+        let outcome = try await awaitingTurn(on: channel, server: server) {
             try await channel.prompt(turnID: turnID, blocks: blocks)
         }
         return try Self.completion(of: outcome, runtimeID: runtimeID)
@@ -222,11 +241,28 @@ final class RemoteAgentServiceClient: AgentServiceClient {
 
     func awaitTurn(runtimeID: AgentRuntimeID, turnID: UUID) async throws -> LatchAgentResponse {
         let (channel, server) = try current(runtimeID)
-        let outcome = try await mapFailures(server: server) { try await channel.awaitTurn(turnID) }
+        let outcome = try await awaitingTurn(on: channel, server: server) { try await channel.awaitTurn(turnID) }
         return try Self.completion(of: outcome, runtimeID: runtimeID)
     }
 
+    /// Waits for a turn. A channel that fails for good under it, rather than being closed
+    /// here, ends this client next, and the turn may well run on without it; the session is
+    /// told so, and keeps the turn for a re-attach to follow instead of ending it.
+    private func awaitingTurn(on channel: LatchRemoteRuntimeChannel, server: String,
+                              _ body: () async throws -> LatchRemoteTurnOutcome) async throws -> LatchRemoteTurnOutcome {
+        do {
+            return try await mapFailures(server: server, body)
+        } catch let error as RemoteServerFailure {
+            if case let .failed(failure) = channel.linkState, failure != .closed {
+                throw RemoteTurnInterrupted(message: error.message)
+            }
+            throw error
+        }
+    }
+
     private static func completion(of outcome: LatchRemoteTurnOutcome, runtimeID: AgentRuntimeID) throws -> LatchAgentResponse {
+        // The runtime's exit event comes next and says whether it crashed or was stopped.
+        if let error = outcome.error, error.code == .runtimeExited { throw RemoteAgentExited(message: error.message) }
         if let error = outcome.error { throw agentFailure(error) }
         return .promptCompleted(runtimeID: runtimeID, response: ACPPromptResponse(stopReason: outcome.stopReason ?? "end_turn"))
     }
@@ -255,6 +291,40 @@ final class RemoteAgentServiceClient: AgentServiceClient {
         channel?.close()
         continuation.finish()
         lifetime.finish()
+    }
+
+    /// Settings changed this client's server. A channel still reaching it is pointed at it the
+    /// new way in place, so the cursor, a prompt waiting for the link and the turn being
+    /// awaited all carry over, and the session sees at most a reconnect. With no such channel
+    /// the session is told, since only it knows whether it kept a runtime it could not reach.
+    /// A new name is used from the next message on.
+    func serverChanged(to server: ServerProfile) {
+        let (channel, previous, finished) = state.withLock { state in
+            defer { state.server = server }
+            return (state.runtime?.channel, state.server, state.finished)
+        }
+        guard !finished else { return }
+        guard let channel else {
+            if !server.connects(like: previous) { continuation.yield(.serverChanged) }
+            return
+        }
+        let reached = state.withLock { $0.reached }
+        guard !server.connects(like: reached) else { return }
+        // A channel that has failed ends this client instead, and its session finds the new
+        // settings through `serverSettingsChangedSinceLastChannel()`.
+        guard channel.reconnect(using: server.connectionOptions) else { return }
+        state.withLock { state in
+            guard state.runtime?.channel === channel else { return }
+            state.reached = server
+            state.reconnections += 1
+        }
+    }
+
+    /// Whether Settings now reaches the server differently from the last channel made here,
+    /// as when a change landed while that channel was failing and this client ending.
+    func serverSettingsChangedSinceLastChannel() async -> Bool {
+        guard let current = await readServer() else { return false }
+        return !current.connects(like: state.withLock { $0.reached })
     }
 
     /// Checks the link now, as after the Mac wakes.
@@ -350,8 +420,11 @@ final class RemoteAgentServiceClient: AgentServiceClient {
 
     // MARK: Events
 
+    /// The server's name as Settings has it now, for what is said from here on.
+    private var serverName: String { state.withLock { $0.server.name } }
+
     /// Forwards one channel's link changes for as long as it is this client's.
-    private func relayLinks(_ channel: LatchRemoteRuntimeChannel, server: String) {
+    private func relayLinks(_ channel: LatchRemoteRuntimeChannel) {
         Task { [weak self] in
             for await link in channel.linkStates {
                 guard let self else { return }
@@ -359,7 +432,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
                 case .idle, .connecting, .connected:
                     yield(.link(.connected), from: channel)
                 case let .reconnecting(since):
-                    yield(.link(.reconnecting(server: server, since: since)), from: channel)
+                    yield(.link(.reconnecting(server: serverName, since: since)), from: channel)
                 case .failed:
                     // Told once the events have all been delivered, if it ends this client.
                     break
@@ -370,7 +443,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
 
     /// Forwards one channel's events for as long as it is this client's. `attached` is the
     /// attach that came before them, whose record says which permissions are still pending.
-    private func relayEvents(_ channel: LatchRemoteRuntimeChannel, runtimeID: AgentRuntimeID, server: String,
+    private func relayEvents(_ channel: LatchRemoteRuntimeChannel, runtimeID: AgentRuntimeID,
                              attached: LatchRemoteAttachment? = nil) {
         Task { [weak self] in
             var permissions = RemotePermissionLedger()
@@ -388,7 +461,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
                 // An agent that exited on its own leaves nothing to follow, and nothing to stop.
                 if translated.contains(where: \.isTermination) { release(runtimeID, channel, exited: true) }
             }
-            self?.channelEnded(channel, server: server)
+            self?.channelEnded(channel)
         }
     }
 
@@ -425,6 +498,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
                 // A stop this client asked for is not news to the session that asked.
                 let expected = state.withLock { $0.runtime?.channel === channel && $0.runtime?.stopping == true }
                 guard !expected else { return [skipped] }
+                if exit.stopped { return [.stopped(runtimeID: id, server: serverName, sequence: sequence)] }
                 return [.agent(.processTerminated(runtimeID: id, status: exit.status ?? 0), sequence: sequence)]
             case .omitted:
                 return [.outputLost(runtimeID: id, sequence: sequence)]
@@ -442,9 +516,10 @@ final class RemoteAgentServiceClient: AgentServiceClient {
     }
 
     /// A launched runtime whose channel failed for good cannot be reached again from here, so
-    /// the client ends, the way a lost XPC service does. A failure while launching is the
-    /// launch's to report, and closing a channel on purpose is no failure at all.
-    private func channelEnded(_ channel: LatchRemoteRuntimeChannel, server: String) {
+    /// the client ends, the way a lost XPC service does. Unless the server no longer has the
+    /// runtime, the session keeps it, to attach to again through a new client. A failure while
+    /// launching is the launch's to report, and closing a channel on purpose is no failure at all.
+    private func channelEnded(_ channel: LatchRemoteRuntimeChannel) {
         guard case let .failed(error) = channel.linkState else { return }
         let ends = state.withLock { state in
             guard !state.finished, let runtime = state.runtime, runtime.channel === channel, runtime.launched else { return false }
@@ -454,6 +529,7 @@ final class RemoteAgentServiceClient: AgentServiceClient {
         }
         guard ends else { return }
         let runtimeGone = if case .runtimeNotFound = error { true } else { false }
+        let server = serverName
         continuation.yield(.link(.failed(server: server, reason: Self.reason(for: error, server: server), runtimeGone: runtimeGone)))
         continuation.finish()
         lifetime.finish()
@@ -488,16 +564,16 @@ final class RemoteAgentServiceClient: AgentServiceClient {
     static func reason(for error: LatchRemoteClientError, server: String) -> String {
         switch error {
         case .unauthorized:
-            "\(server) refused the token. Update it in Settings ▸ Servers."
+            "\(server) refused the token. Update its token in Settings → Servers."
         case let .destinationNotAllowed(address):
             "Latch did not send the token to \(server): \(address) is neither this Mac nor on a Tailscale network. "
-                + "Turn on “Allow unencrypted network” for it in Settings ▸ Servers to connect anyway."
+                + "Turn on “Allow unencrypted network” for it in Settings → Servers to connect anyway."
         case .protocolMismatch:
             "\(server) runs a latch-server this version of Latch can’t talk to. Update Latch or the server so they match."
         case .runtimeNotFound:
-            "The agent is no longer running on \(server); the server may have restarted. Retry to start it again."
+            "The agent is no longer running on \(server); the server may have restarted."
         case .invalidEndpoint:
-            "The port set for \(server) is not valid. Fix it in Settings ▸ Servers."
+            "The port set for \(server) is not valid. Fix it in Settings → Servers."
         case .timedOut:
             "\(server) did not answer in time."
         default:
@@ -524,7 +600,10 @@ final class RemoteAgentServiceClient: AgentServiceClient {
 
 private extension RemoteServiceEvent {
     var isTermination: Bool {
-        if case .agent(.processTerminated, _) = self { true } else { false }
+        switch self {
+        case .agent(.processTerminated, _), .stopped: true
+        default: false
+        }
     }
 }
 
@@ -538,6 +617,20 @@ private extension ChatAttachment {
 
 /// A server that cannot be reached, as a session reports it.
 struct RemoteServerFailure: RemoteConnectionFailure, LocalizedError, Equatable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// A turn whose channel failed for good while it was awaited. Not the turn's end: the client
+/// ends next and says why, and the turn is followed again if the session re-attaches.
+struct RemoteTurnInterrupted: RemoteConnectionFailure, LocalizedError, Equatable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// A turn that ended because its agent's runtime did. Not how the session learns of the exit:
+/// the runtime's `exited` event follows it, and says whether the agent crashed or was stopped.
+struct RemoteAgentExited: LocalizedError, Equatable {
     let message: String
     var errorDescription: String? { message }
 }

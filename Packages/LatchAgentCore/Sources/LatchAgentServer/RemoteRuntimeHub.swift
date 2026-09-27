@@ -521,8 +521,10 @@ public actor RemoteRuntimeHub {
         if state.turns.count > configuration.retainedTurns {
             state.turns.removeFirst(state.turns.count - configuration.retainedTurns)
         }
+        let started = Self.turnStarted(turnID, blocks: blocks)
+        if state.title == nil, case let .turnStarted(_, text, _) = started { state.title = Self.title(of: text) }
         runtimes[id] = state
-        publish(Self.turnStarted(turnID, blocks: blocks), for: id)
+        publish(started, for: id)
 
         // Not tied to any connection: the turn runs to its end whoever is listening.
         let incarnation = state.incarnation
@@ -719,9 +721,23 @@ public actor RemoteRuntimeHub {
             lifecycle: state.lifecycle,
             activeTurnID: state.activeTurnID,
             pendingPermissionCount: state.pendingPermissions.count,
-            lastSequence: journal.lastSequence(of: id)
+            lastSequence: journal.lastSequence(of: id),
+            title: state.title,
+            agent: state.agent
         )
     }
+
+    /// A prompt's text as a runtime's title: its first line with any text, each run of
+    /// whitespace made one space, at most `titleLength` characters with the ellipsis.
+    static func title(of text: String) -> String? {
+        let line = text.split(whereSeparator: \.isNewline).lazy
+            .map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+            .first { !$0.isEmpty }
+        guard let line else { return nil }
+        return line.count > titleLength ? String(line.prefix(titleLength - 1)) + "…" : line
+    }
+
+    static let titleLength = 80
 
     // MARK: Helpers
 
@@ -816,6 +832,8 @@ private struct RuntimeState {
     var activeTurnID: UUID?
     var turns: [LatchRemoteTurnRecord] = []
     var pendingPermissions: [LatchRemotePendingPermission] = []
+    /// From the first turn whose prompt had text.
+    var title: String?
 
     init(
         incarnation: UInt64,

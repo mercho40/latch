@@ -205,6 +205,31 @@ final class LatchRemoteToleranceTests: XCTestCase {
         XCTAssertEqual(set.route.rawValue, "effort")
     }
 
+    func testSummaryTitleAndAgentAreOptional() throws {
+        // As an older server sends it.
+        let old = try decoded(
+            LatchRemoteRuntimeSummary.self,
+            #"{"runtimeID":"rt-1","agentTitle":"A","workspace":"/w","lifecycle":"ready","pendingPermissionCount":0,"lastSequence":3}"#
+        )
+        XCTAssertNil(old.title)
+        XCTAssertNil(old.agent)
+        XCTAssertFalse(try encodedString(old).contains("title"))
+        XCTAssertFalse(try encodedString(old).contains(#""agent""#))
+
+        let summary = LatchRemoteRuntimeSummary(
+            runtimeID: Sample.runtimeID, agentTitle: "A", workspace: "/w", lifecycle: .ready,
+            title: "Fix the build", agent: .custom("my-agent --acp")
+        )
+        XCTAssertEqual(try decoded(LatchRemoteRuntimeSummary.self, try encodedString(summary)), summary)
+        // An agent form from a newer server still names the rest.
+        let newer = try decoded(
+            LatchRemoteRuntimeSummary.self,
+            #"{"runtimeID":"rt-1","agentTitle":"A","workspace":"/w","lifecycle":"ready","pendingPermissionCount":0,"lastSequence":3,"title":"T","agent":{"registry":"x"}}"#
+        )
+        XCTAssertEqual(newer.agent, .unknown)
+        XCTAssertEqual(newer.title, "T")
+    }
+
     func testEncodingAnInvalidRuntimeIDFails() {
         let command = LatchRemoteCommand.stopRuntime(runtimeID: AgentRuntimeID("not/valid"))
         XCTAssertThrowsError(try LatchRemoteCoding.encodeLine(command))

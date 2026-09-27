@@ -99,6 +99,10 @@ final class LatchRemoteGoldenTests: XCTestCase {
                 runtimeID: id, agentTitle: "Claude Code", workspace: "/home/me/project", lifecycle: .ready,
                 activeTurnID: Sample.turnID, pendingPermissionCount: 1, lastSequence: 12
             )]), #"{"kind":"runtimes","runtimes":[{"activeTurnID":"00000000-0000-0000-0000-00000000000A","agentTitle":"Claude Code","lastSequence":12,"lifecycle":"ready","pendingPermissionCount":1,"runtimeID":"rt-1","workspace":"/home/me/project"}]}"#),
+            (.runtimes([LatchRemoteRuntimeSummary(
+                runtimeID: id, agentTitle: "Claude Code", workspace: "/home/me/project", lifecycle: .ready,
+                lastSequence: 12, title: "Fix the build", agent: .preset("claudeCode")
+            )]), #"{"kind":"runtimes","runtimes":[{"agent":{"preset":"claudeCode"},"agentTitle":"Claude Code","lastSequence":12,"lifecycle":"ready","pendingPermissionCount":0,"runtimeID":"rt-1","title":"Fix the build","workspace":"/home/me/project"}]}"#),
         ]
         for (response, fixture) in cases {
             try assertGolden(response, fixture)

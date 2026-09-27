@@ -157,6 +157,45 @@ final class RemoteRuntimeHubTests: XCTestCase {
         }
     }
 
+    func testASummaryNamesTheRuntimeByItsFirstPrompt() async throws {
+        try await withTestbed { bed in
+            let id = AgentRuntimeID("titled")
+            try await bed.launchWithSession(id)
+            var summary = try await bed.summary(id)
+            XCTAssertNil(summary.title)
+            XCTAssertEqual(summary.agent, bed.mockAgent)
+
+            // A prompt of attachments alone names nothing; the next with text does.
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.image(data: Data([1]), mimeType: "image/png")]))
+            try await bed.waitForIdle(id, through: 5)
+            summary = try await bed.summary(id)
+            XCTAssertNil(summary.title)
+            let long = String(repeating: "word ", count: 30)
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("\n  Fix   the\tbuild, " + long + "\nsecond line")]))
+            try await bed.waitForIdle(id, through: 10)
+            summary = try await bed.summary(id)
+            let title = try XCTUnwrap(summary.title)
+            XCTAssertEqual(title.count, 80)
+            XCTAssertTrue(title.hasPrefix("Fix the build, word word"), title)
+            XCTAssertTrue(title.hasSuffix("…"), title)
+            XCTAssertFalse(title.contains("second"), title)
+
+            // Later turns keep it.
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("something else")]))
+            try await bed.waitForIdle(id, through: 15)
+            summary = try await bed.summary(id)
+            XCTAssertEqual(summary.title, title)
+        }
+    }
+
+    func testTitlesAreOneShortLine() {
+        XCTAssertEqual(RemoteRuntimeHub.title(of: "Hello"), "Hello")
+        XCTAssertEqual(RemoteRuntimeHub.title(of: " \n\n  a \t b  \r\nc"), "a b")
+        XCTAssertNil(RemoteRuntimeHub.title(of: " \n\t\n"))
+        XCTAssertEqual(RemoteRuntimeHub.title(of: String(repeating: "x", count: 80)), String(repeating: "x", count: 80))
+        XCTAssertEqual(RemoteRuntimeHub.title(of: String(repeating: "x", count: 81)), String(repeating: "x", count: 79) + "…")
+    }
+
     func testPromptNeedsASessionAndOneTurnAtATime() async throws {
         try await withTestbed { bed in
             let id = AgentRuntimeID("busy")
@@ -531,7 +570,8 @@ final class RemoteRuntimeHubTests: XCTestCase {
             }
             let listed = try await bed.ok(.listRuntimes)
             XCTAssertEqual(listed, .runtimes(ids.dropFirst().map {
-                LatchRemoteRuntimeSummary(runtimeID: $0, agentTitle: "sh", workspace: bed.workspace.path, lifecycle: .exited, lastSequence: 1)
+                LatchRemoteRuntimeSummary(runtimeID: $0, agentTitle: "sh", workspace: bed.workspace.path, lifecycle: .exited,
+                                          lastSequence: 1, agent: bed.mockAgent)
             }))
             // The oldest ID is free again.
             try await bed.launch(ids[0])

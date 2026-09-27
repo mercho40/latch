@@ -160,6 +160,12 @@ public struct LatchRemoteRuntimeSummary: Codable, Equatable, Sendable {
     public var activeTurnID: UUID?
     public var pendingPermissionCount: Int
     public var lastSequence: UInt64
+    /// What the runtime's first turn asked, cut to one short line, so a device that did not
+    /// start it can name it. Nil until a turn with text has started, and from older servers.
+    public var title: String?
+    /// What was launched, so a device that adopts the runtime can launch it again. Nil from
+    /// older servers.
+    public var agent: LatchRemoteAgent?
 
     public init(
         runtimeID: AgentRuntimeID,
@@ -168,7 +174,9 @@ public struct LatchRemoteRuntimeSummary: Codable, Equatable, Sendable {
         lifecycle: LatchRemoteLifecycle,
         activeTurnID: UUID? = nil,
         pendingPermissionCount: Int = 0,
-        lastSequence: UInt64 = 0
+        lastSequence: UInt64 = 0,
+        title: String? = nil,
+        agent: LatchRemoteAgent? = nil
     ) {
         self.runtimeID = runtimeID
         self.agentTitle = agentTitle
@@ -177,5 +185,7 @@ public struct LatchRemoteRuntimeSummary: Codable, Equatable, Sendable {
         self.activeTurnID = activeTurnID
         self.pendingPermissionCount = pendingPermissionCount
         self.lastSequence = lastSequence
+        self.title = title
+        self.agent = agent
     }
 }

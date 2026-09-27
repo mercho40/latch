@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LatchAgentCore
 
@@ -59,3 +60,4 @@ public final class LatchAgentXPCHost: NSObject, NSXPCListenerDelegate, Sendable 
         await hub.shutdown()
     }
 }
+#endif

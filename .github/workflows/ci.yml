@@ -39,6 +39,48 @@ jobs:
       # throws while compiling Latch.icon. Add it back once the runner image carries Xcode 27.
       - run: bash Scripts/test-xpc-process.sh
 
+  ios:
+    name: iOS build check
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      # The wire types stay buildable for an iOS client; the agent runtime is gated to macOS and Linux.
+      - run: >-
+          swift build --package-path Packages/LatchServiceProtocol --target LatchServiceProtocol
+          --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+
+  linux:
+    name: Linux package tests
+    runs-on: ${{ matrix.runner }}
+    container: swift:6.4.0-noble
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v5
+      - run: swift --version
+      - run: swift test --package-path Packages/LatchACP
+      - run: swift test --package-path Packages/LatchServiceProtocol
+      - run: swift test --package-path Packages/LatchAgentCore
+
+  linux-static:
+    name: Static Linux build
+    runs-on: ubuntu-24.04
+    container: swift:6.4.0-noble
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - run: >-
+          swift sdk install
+          https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
+          --checksum 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
+      # Builds the LatchAgentCore target until the latch-server product exists; then build that product.
+      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk x86_64-swift-linux-musl -c release --target LatchAgentCore
+      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk aarch64-swift-linux-musl -c release --target LatchAgentCore
+
   site:
     name: Site budget
     runs-on: ubuntu-latest

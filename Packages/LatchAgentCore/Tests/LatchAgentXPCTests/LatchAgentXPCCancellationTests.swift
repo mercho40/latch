@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LatchAgentCore
 import LatchAgentXPC
@@ -156,3 +157,4 @@ final class LatchAgentXPCCancellationTests: XCTestCase {
     done
     """#
 }
+#endif

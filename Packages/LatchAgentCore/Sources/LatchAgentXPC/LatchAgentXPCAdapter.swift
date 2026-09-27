@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LatchAgentCore
 import LatchServiceProtocol
@@ -63,3 +64,4 @@ public final class LatchAgentXPCAdapter: NSObject, LatchAgentXPCProtocol, Sendab
         }
     }
 }
+#endif

@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import LatchACP
 
@@ -52,7 +51,7 @@ struct LatchACPProbe {
                 print("session id=\(session.sessionId)")
 
                 print("assistant> ", terminator: "")
-                fflush(stdout)
+                fflush(nil)
                 let updateTask = Task {
                     for await notification in runtime.sessionUpdates {
                         render(notification.event)
@@ -137,7 +136,7 @@ struct LatchACPProbe {
         case let .messageChunk(chunk) where chunk.role == .agent:
             guard let text = chunk.text else { return }
             print(text, terminator: "")
-            fflush(stdout)
+            fflush(nil)
         case let .messageChunk(chunk):
             if let text = chunk.text {
                 print("\n[\(chunk.role.rawValue)] \(text)")

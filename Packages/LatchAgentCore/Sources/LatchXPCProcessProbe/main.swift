@@ -1,3 +1,4 @@
+#if os(macOS)
 import Darwin
 import Foundation
 import LatchAgentCore
@@ -303,3 +304,15 @@ private func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("LatchXPCProcessProbe: \(message)\n".utf8))
     exit(EXIT_FAILURE)
 }
+#else
+import Foundation
+
+/// XPC exists only on macOS; the executable target still has to link elsewhere.
+@main
+struct LatchXPCProcessProbe {
+    static func main() {
+        FileHandle.standardError.write(Data("LatchXPCProcessProbe: XPC requires macOS\n".utf8))
+        exit(EXIT_FAILURE)
+    }
+}
+#endif

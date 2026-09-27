@@ -16,6 +16,7 @@ public enum ACPAgentRuntimeEvent: Equatable, Sendable {
     case processTerminated(status: Int32)
 }
 
+#if os(macOS) || os(Linux)
 /// Owns one ACP subprocess, JSON-RPC connection, and typed client lifecycle.
 ///
 /// A background service can retain one runtime per active workspace session while forwarding
@@ -223,6 +224,9 @@ public actor ACPAgentRuntime {
 
     private func processTerminated(status: Int32) async {
         guard currentState != .stopped else { return }
+        // The agent's last frames can still be in flight behind its exit.
+        await Self.waitForCompletion(of: [connectionTask, updateTask, errorTask], upTo: .seconds(1))
+        guard currentState != .stopped else { return }
         connectionTask?.cancel()
         updateTask?.cancel()
         errorTask?.cancel()
@@ -250,4 +254,22 @@ public actor ACPAgentRuntime {
             throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState)
         }
     }
+
+    /// Awaiting a task's value ignores cancellation, so the deadline races it instead.
+    private static func waitForCompletion(of tasks: [Task<Void, Never>?], upTo limit: Duration) async {
+        let (signal, continuation) = AsyncStream<Void>.makeStream()
+        let timer = Task {
+            try? await Task.sleep(for: limit)
+            continuation.finish()
+        }
+        Task {
+            for task in tasks {
+                await task?.value
+            }
+            continuation.finish()
+        }
+        for await _ in signal {}
+        timer.cancel()
+    }
 }
+#endif

@@ -56,10 +56,12 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
             var leading: CGFloat = 16
             var trailing: CGFloat = 16
             if let host, host.bounds.width > 0 {
+                // Centred in the readable width rather than the view's, which on iPad runs
+                // under the sidebar: the composer's constraints do the same.
                 let readable = host.readableContentGuide.layoutFrame
-                let centred = (host.bounds.width - TranscriptController.maximumColumnWidth) / 2
-                leading = max(16, readable.minX - host.bounds.minX, centred)
-                trailing = max(16, host.bounds.maxX - readable.maxX, centred)
+                let spare = max(0, (readable.width - TranscriptController.maximumColumnWidth) / 2)
+                leading = max(16, readable.minX - host.bounds.minX + spare)
+                trailing = max(16, host.bounds.maxX - readable.maxX + spare)
             }
             section.contentInsetsReference = .none
             section.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: leading, bottom: 8, trailing: trailing)

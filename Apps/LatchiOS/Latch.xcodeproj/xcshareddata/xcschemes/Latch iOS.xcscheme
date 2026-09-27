@@ -5,12 +5,15 @@
          <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A50000000000000000000001" BuildableName="Latch.app" BlueprintName="Latch" ReferencedContainer="container:Latch.xcodeproj"/>
          </BuildActionEntry>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A50000000000000000000002" BuildableName="LatchiOSUITests.xctest" BlueprintName="LatchiOSUITests" ReferencedContainer="container:Latch.xcodeproj"/>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
       <Testables>
          <TestableReference skipped="NO">
-            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="LatchiOSUITests" BuildableName="LatchiOSUITests" BlueprintName="LatchiOSUITests" ReferencedContainer="container:"/>
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A50000000000000000000002" BuildableName="LatchiOSUITests.xctest" BlueprintName="LatchiOSUITests" ReferencedContainer="container:Latch.xcodeproj"/>
          </TestableReference>
       </Testables>
    </TestAction>

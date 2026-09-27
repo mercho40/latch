@@ -155,7 +155,7 @@ final class ServerEditorTests: XCTestCase {
     // MARK: Pairing links
 
     private func hostedRoot(_ store: any PhoneServerStore) -> (RootViewController, UIWindow) {
-        let library = SessionLibrary(servers: store, connector: B1Connector(), store: nil, listRuntimes: { _ in [] })
+        let library = SessionLibrary(servers: store, connector: FakeConnector(), store: nil, listRuntimes: { _ in [] })
         let root = RootViewController(library: library, servers: store, check: { _ in throw LatchRemoteClientError.timedOut },
                                       badge: nil)
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
@@ -196,7 +196,7 @@ final class ServerEditorTests: XCTestCase {
     /// A server saved without its token, as after a backup restored onto a new phone, takes
     /// the link's token under its own ID rather than being added twice.
     func testALinkForAServerMissingItsTokenRestoresThatServer() throws {
-        let directory = try B1.temporaryDirectory()
+        let directory = try Fake.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let vault = InMemoryTokenVault()
         let store = KeychainServerStore(directory: directory, vault: vault)
@@ -233,7 +233,7 @@ final class ServerEditorTests: XCTestCase {
     // MARK: The list
 
     func testTheServersListChecksEachServer() async throws {
-        let store = InMemoryServerStore([B1.server("vps"), B1.server("mini")])
+        let store = InMemoryServerStore([Fake.server("vps"), Fake.server("mini")])
         let list = ServersViewController(store: store, check: { [info] options in
             guard options.host == "vps.example" else { throw LatchRemoteClientError.timedOut }
             return info

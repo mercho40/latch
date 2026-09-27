@@ -18,8 +18,8 @@ extension InMemoryServerStore: PhoneServerStore {
     var fileProblem: String? { nil }
 }
 
-/// Where each server's token is kept, by server ID. The app uses the Keychain; tests that
-/// run without an app host, where the Keychain refuses every call, use `InMemoryTokenVault`.
+/// Where each server's token is kept, by server ID: the Keychain, and in tests that need no
+/// real one, `InMemoryTokenVault`. Never a file.
 @MainActor
 protocol TokenVault: AnyObject {
     /// The token, or nil when there is none, or none Latch can read.
@@ -74,6 +74,19 @@ final class KeychainTokenVault: TokenVault {
     func removeToken(for id: UUID) {
         SecItemDelete(query(id) as CFDictionary)
     }
+
+    /// Stops the app when the Keychain refuses it for want of an entitlement, as it does a build
+    /// signed without Configuration/Latch.entitlements. Tokens are kept nowhere else, so such a
+    /// build could not keep a server, and saying so at launch beats failing at the first save.
+    func requireEntitlement() {
+        var result: CFTypeRef?
+        let probe: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecMatchLimit as String: kSecMatchLimitOne]
+        guard SecItemCopyMatching(probe as CFDictionary, &result) == errSecMissingEntitlement else { return }
+        fatalError("Latch cannot use the Keychain: this build has no keychain access group. "
+                   + "Sign it with Configuration/Latch.entitlements, as Scripts/test-ios-app.sh does for the Simulator.")
+    }
 }
 
 @MainActor
@@ -83,72 +96,6 @@ final class InMemoryTokenVault: TokenVault {
     func token(for id: UUID) throws(TokenVaultFailure) -> LatchRemoteToken? { tokens[id] }
     func setToken(_ token: LatchRemoteToken, for id: UUID) throws(TokenVaultFailure) { tokens[id] = token }
     func removeToken(for id: UUID) { tokens[id] = nil }
-}
-
-/// The vault the app uses: the Keychain, except in a Simulator build made without signing
-/// (`CODE_SIGNING_ALLOWED=NO`, as the scripts build), which has no Keychain access group, so
-/// every call fails with `errSecMissingEntitlement`. There tokens go in a 0600 file instead,
-/// so servers can be added in the Simulator. A device build is always signed and always uses
-/// the Keychain.
-@MainActor
-enum DeviceTokenVault {
-    static func make(directory: URL) -> any TokenVault {
-        let keychain = KeychainTokenVault()
-        #if targetEnvironment(simulator)
-        var probe: CFTypeRef?
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: keychain.service,
-                                    kSecMatchLimit as String: kSecMatchLimitOne]
-        if SecItemCopyMatching(query as CFDictionary, &probe) == errSecMissingEntitlement {
-            return TokenFileVault(directory: directory)
-        }
-        #endif
-        return keychain
-    }
-}
-
-/// Tokens by server ID in `tokens.json`, 0600, for an unsigned Simulator build only.
-@MainActor
-final class TokenFileVault: TokenVault {
-    static let fileName = "tokens.json"
-    private let directory: URL
-
-    init(directory: URL) { self.directory = directory }
-
-    private func read() throws(TokenVaultFailure) -> [String: String] {
-        do {
-            guard let data = try PrivateFile.read(Self.fileName, in: directory, maximumSize: 1024 * 1024) else { return [:] }
-            return try JSONDecoder().decode([String: String].self, from: data)
-        } catch {
-            throw TokenVaultFailure(status: errSecDecode)
-        }
-    }
-
-    private func write(_ tokens: [String: String]) throws(TokenVaultFailure) {
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = .sortedKeys
-            try PrivateFile.write(try encoder.encode(tokens), as: Self.fileName, in: directory)
-        } catch {
-            throw TokenVaultFailure(status: errSecIO)
-        }
-    }
-
-    func token(for id: UUID) throws(TokenVaultFailure) -> LatchRemoteToken? {
-        try read()[id.uuidString].flatMap { LatchRemoteToken($0) }
-    }
-
-    func setToken(_ token: LatchRemoteToken, for id: UUID) throws(TokenVaultFailure) {
-        var tokens = try read()
-        tokens[id.uuidString] = token.rawValue
-        try write(tokens)
-    }
-
-    func removeToken(for id: UUID) {
-        guard var tokens = try? read(), tokens[id.uuidString] != nil else { return }
-        tokens[id.uuidString] = nil
-        try? write(tokens)
-    }
 }
 
 /// Servers on iOS: each profile without its token in `servers.json` in Application Support,

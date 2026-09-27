@@ -12,12 +12,19 @@ SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO
 TARGETED_DEVICE_FAMILY = 1,2
 SWIFT_VERSION = 6.0
 
-// Automatic signing with no team committed. To run on a device, put your team ID in
+// Server tokens live in the Keychain, which needs the app's keychain access group: every
+// build is signed with Configuration/Latch.entitlements. Nothing falls back to a file, so a
+// build that cannot use the Keychain says so rather than keeping tokens anywhere else.
+CODE_SIGN_ENTITLEMENTS = Configuration/Latch.entitlements
+// Devices: automatic signing with no team committed. To run on one, put your team ID in
 // Configuration/Local.xcconfig (git-ignored) as `DEVELOPMENT_TEAM = ABCDE12345`; a free
 // personal team works. A bundle ID belongs to one team, so unless yours owns dev.latchapp.ios
-// also set `PRODUCT_BUNDLE_IDENTIFIER = <your reverse-DNS>.latch` there. Simulator builds need
-// no team: pass CODE_SIGNING_ALLOWED=NO.
+// also set `PRODUCT_BUNDLE_IDENTIFIER = <your reverse-DNS>.latch` there.
 CODE_SIGN_STYLE = Automatic
+// The Simulator: signed ad hoc ("Sign to Run Locally"), which needs no team and still grants
+// the entitlements, so the real Keychain works there and in the tests the app hosts.
+CODE_SIGN_STYLE[sdk=iphonesimulator*] = Manual
+CODE_SIGN_IDENTITY[sdk=iphonesimulator*] = -
 #include? "Local.xcconfig"
 
 // Icon Composer icon shared with the Mac app; actool renders it for iOS too.
@@ -42,4 +49,7 @@ INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = UIInterfaceOrientationPort
 INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
 
 ALWAYS_SEARCH_USER_PATHS = NO
+// The code stays in the executable rather than a separate debug dylib, so the tests the app
+// hosts link against it.
+ENABLE_DEBUG_DYLIB = NO
 LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks

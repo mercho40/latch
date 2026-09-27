@@ -11,7 +11,7 @@ import XCTest
 /// A server channel that answers in memory: it launches, starts a session, runs a turn until
 /// the test ends it, raises a permission request, and attaches to a runtime with the record
 /// and backlog a test gives it.
-final class B1FakeClient: AgentServiceClient {
+final class FakeClient: AgentServiceClient {
     let events: AsyncStream<LatchAgentEvent>
     let remoteEvents: AsyncStream<RemoteServiceEvent>?
     var isRemote: Bool { true }
@@ -144,7 +144,7 @@ final class B1FakeClient: AgentServiceClient {
         lifetime.finish()
     }
 
-    var transportDescription: String { "B1 fake" }
+    var transportDescription: String { "fake" }
 
     static func record(agent: LatchRemoteAgent, workspace: String, lastSequence: UInt64 = 1) -> LatchRemoteRuntimeRecord {
         LatchRemoteRuntimeRecord(
@@ -157,15 +157,15 @@ final class B1FakeClient: AgentServiceClient {
 
 /// Hands every session on any server its own fake client, and keeps them for the test.
 @MainActor
-final class B1Connector: RemoteSessionConnector {
-    private(set) var clients: [B1FakeClient] = []
-    var prepare: ((B1FakeClient) -> Void)?
+final class FakeConnector: RemoteSessionConnector {
+    private(set) var clients: [FakeClient] = []
+    var prepare: ((FakeClient) -> Void)?
     /// When set, a client for a server not in it refuses everything, as the channel
     /// connector's does.
     var servers: (any ServerStore)?
 
     func makeClient(serverID: UUID) -> AgentServiceClient {
-        let client = B1FakeClient()
+        let client = FakeClient()
         prepare?(client)
         if let servers, servers.server(id: serverID) == nil { client.refuseEverything() }
         clients.append(client)
@@ -173,7 +173,7 @@ final class B1Connector: RemoteSessionConnector {
     }
 }
 
-enum B1 {
+enum Fake {
     static let token = LatchRemoteToken.generate()
 
     static func server(_ name: String, host: String? = nil, port: UInt16 = 7800, command: String = "") -> ServerProfile {
@@ -181,7 +181,7 @@ enum B1 {
     }
 
     static func temporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("latch-b1-\(UUID().uuidString)", isDirectory: true)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("latch-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
@@ -198,8 +198,8 @@ enum B1 {
 extension XCTestCase {
     /// Polls the main actor until `condition` holds, for work that finishes on its own tasks.
     @MainActor
-    func eventuallyB1(_ what: String, timeout: Duration = .seconds(5), _ condition: () -> Bool,
-                      file: StaticString = #filePath, line: UInt = #line) async throws {
+    func eventually(_ what: String, timeout: Duration = .seconds(5), _ condition: () -> Bool,
+                    file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now + timeout
         while !condition() {
             guard ContinuousClock.now < deadline else {
@@ -207,6 +207,20 @@ extension XCTestCase {
                 return
             }
             try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    /// Waits for main-actor state that arrives through the model's event task.
+    @MainActor
+    func waitUntil(_ description: String = "condition", timeout: Duration = .seconds(5),
+                   file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) async {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                XCTFail("Timed out waiting for \(description)", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(10))
         }
     }
 }

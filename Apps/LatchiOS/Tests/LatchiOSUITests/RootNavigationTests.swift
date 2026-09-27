@@ -7,11 +7,11 @@ import XCTest
 
 @MainActor
 final class RootNavigationTests: XCTestCase {
-    private let vps = B1.server("vps")
+    private let vps = Fake.server("vps")
 
     private func hosted() -> (RootViewController, SessionLibrary, UIWindow) {
         let store = InMemoryServerStore([vps])
-        let library = SessionLibrary(servers: store, connector: B1Connector(), store: nil, listRuntimes: { _ in [] })
+        let library = SessionLibrary(servers: store, connector: FakeConnector(), store: nil, listRuntimes: { _ in [] })
         let root = RootViewController(library: library, servers: store, check: { _ in throw LatchRemoteClientError.timedOut },
                                       badge: nil, defaults: UserDefaults(suiteName: UUID().uuidString)!)
         let window = UIWindow(frame: UIScreen.main.bounds)
@@ -28,11 +28,11 @@ final class RootNavigationTests: XCTestCase {
         session.hasUnseenReply = true
         root.show(session)
         XCTAssertTrue(root.shown?.session === session)
-        XCTAssertTrue(root.shown?.controller is SessionStandInViewController)
+        XCTAssertTrue(root.shown?.controller is SessionDetailViewController)
         XCTAssertEqual(library.selectedSessionID, session.id)
         XCTAssertFalse(session.hasUnseenReply)
         window.layoutIfNeeded()
-        try await eventuallyB1("the screen on screen") {
+        try await eventually("the screen on screen") {
             root.isShowing(session.id) && root.shown?.controller.transitionCoordinator == nil
         }
         XCTAssertTrue(library.isSessionVisible(session.id), "The library asks the root")
@@ -50,13 +50,13 @@ final class RootNavigationTests: XCTestCase {
         let session = library.create(serverID: vps.id, path: "/srv", agent: .fx)
         root.show(session)
         await library.remove(session)
-        try await eventuallyB1("the placeholder back") { root.shown == nil }
+        try await eventually("the placeholder back") { root.shown == nil }
         XCTAssertTrue(root.viewController(for: .secondary) === root.placeholder)
     }
 
     func testTheFactoryMakesTheSessionScreen() {
         let store = InMemoryServerStore([vps])
-        let library = SessionLibrary(servers: store, connector: B1Connector(), store: nil, listRuntimes: { _ in [] })
+        let library = SessionLibrary(servers: store, connector: FakeConnector(), store: nil, listRuntimes: { _ in [] })
         var made: [UUID] = []
         let root = RootViewController(library: library, servers: store, check: { _ in throw CancellationError() }, badge: nil,
                                       makeSessionViewController: { session, _ in

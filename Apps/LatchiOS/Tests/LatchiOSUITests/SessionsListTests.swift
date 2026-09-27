@@ -50,8 +50,8 @@ final class SessionsListTests: XCTestCase {
     // MARK: Sections
 
     private func makeList(servers: [ServerProfile], listing: @escaping RuntimeListing = { _ in [] })
-        -> (SessionsViewController, SessionLibrary, B1Connector) {
-        let connector = B1Connector()
+        -> (SessionsViewController, SessionLibrary, FakeConnector) {
+        let connector = FakeConnector()
         let library = SessionLibrary(servers: InMemoryServerStore(servers), connector: connector, store: nil,
                                      listRuntimes: listing)
         let list = SessionsViewController(library: library, defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -59,7 +59,7 @@ final class SessionsListTests: XCTestCase {
         return (list, library, connector)
     }
 
-    private func session(_ library: SessionLibrary, _ connector: B1Connector, on server: ServerProfile, title: String,
+    private func session(_ library: SessionLibrary, _ connector: FakeConnector, on server: ServerProfile, title: String,
                          minutesAgo: Double) -> PhoneSession {
         let saved = SavedSession(id: UUID(), workspacePath: "/srv/\(title.lowercased())", title: title, agentID: "codex",
                                  customCommand: "", draft: "", messages: [], lastActiveAt: now.addingTimeInterval(-60 * minutesAgo),
@@ -70,12 +70,12 @@ final class SessionsListTests: XCTestCase {
     }
 
     func testOneSectionPerServerNewestFirstAndRemovedServersLast() {
-        let vps = B1.server("vps")
-        let mini = B1.server("mini")
+        let vps = Fake.server("vps")
+        let mini = Fake.server("mini")
         let (list, library, connector) = makeList(servers: [vps, mini])
         let old = session(library, connector, on: vps, title: "Old", minutesAgo: 90)
         let recent = session(library, connector, on: vps, title: "Recent", minutesAgo: 2)
-        let orphan = session(library, connector, on: B1.server("gone"), title: "Orphan", minutesAgo: 5)
+        let orphan = session(library, connector, on: Fake.server("gone"), title: "Orphan", minutesAgo: 5)
         list.loadViewIfNeeded()
         let snapshot = list.dataSource.snapshot()
         XCTAssertEqual(snapshot.sectionIdentifiers, [.server(vps.id), .server(mini.id), .removedServer])
@@ -88,11 +88,11 @@ final class SessionsListTests: XCTestCase {
     }
 
     func testRuntimesOnAServerAreAGroupAndAFailureIsSaid() async throws {
-        let vps = B1.server("vps")
-        let mini = B1.server("mini")
+        let vps = Fake.server("vps")
+        let mini = Fake.server("mini")
         let (list, library, _) = makeList(servers: [vps, mini]) { options in
             guard options.host == vps.host else { throw LatchRemoteClientError.timedOut }
-            return [B1.summary("a", workspace: "/srv/a"), B1.summary("b", workspace: "/srv/b", approvals: 1)]
+            return [Fake.summary("a", workspace: "/srv/a"), Fake.summary("b", workspace: "/srv/b", approvals: 1)]
         }
         list.loadViewIfNeeded()
         await library.refreshRuntimes()
@@ -114,9 +114,9 @@ final class SessionsListTests: XCTestCase {
     }
 
     func testTappingARuntimeAdoptsItAndOpensTheSession() async throws {
-        let vps = B1.server("vps")
-        let (list, library, connector) = makeList(servers: [vps]) { _ in [B1.summary("theirs", workspace: "/srv/a")] }
-        connector.prepare = { $0.serve(record: B1FakeClient.record(agent: .preset("fx"), workspace: "/srv/a"), backlog: []) }
+        let vps = Fake.server("vps")
+        let (list, library, connector) = makeList(servers: [vps]) { _ in [Fake.summary("theirs", workspace: "/srv/a")] }
+        connector.prepare = { $0.serve(record: FakeClient.record(agent: .preset("fx"), workspace: "/srv/a"), backlog: []) }
         var opened: [PhoneSession] = []
         list.onOpen = { opened.append($0) }
         list.loadViewIfNeeded()
@@ -146,7 +146,7 @@ final class SessionsListTests: XCTestCase {
     }
 
     func testVoiceOverActionsReachTheDecisionAndSayWhatRemoveRemoves() {
-        let vps = B1.server("vps")
+        let vps = Fake.server("vps")
         let (list, library, connector) = makeList(servers: [vps])
         let waiting = session(library, connector, on: vps, title: "Waiting", minutesAgo: 1)
         waiting.stubbedStatus = SessionRowStatus.Input(phase: .prompting, needsApproval: true)
@@ -165,7 +165,7 @@ final class SessionsListTests: XCTestCase {
         XCTAssertEqual(pairing?.text, "No servers yet")
         XCTAssertEqual(pairing?.button.title, "Add Server")
 
-        let (list, _, _) = makeList(servers: [B1.server("vps")])
+        let (list, _, _) = makeList(servers: [Fake.server("vps")])
         var newSessions = 0
         list.onNewSession = { _ in newSessions += 1 }
         list.loadViewIfNeeded()
@@ -176,7 +176,7 @@ final class SessionsListTests: XCTestCase {
     }
 
     func testRemoveExplainsOnceThatTheAgentKeepsRunning() async throws {
-        let vps = B1.server("vps")
+        let vps = Fake.server("vps")
         let (list, library, connector) = makeList(servers: [vps])
         let first = session(library, connector, on: vps, title: "First", minutesAgo: 1)
         let second = session(library, connector, on: vps, title: "Second", minutesAgo: 2)
@@ -187,14 +187,14 @@ final class SessionsListTests: XCTestCase {
         }
         list.loadViewIfNeeded()
         list.remove(first)
-        try await eventuallyB1("the first removal") { library.sessions.count == 1 }
+        try await eventually("the first removal") { library.sessions.count == 1 }
         list.remove(second)
-        try await eventuallyB1("the second removal") { library.sessions.isEmpty }
+        try await eventually("the second removal") { library.sessions.isEmpty }
         XCTAssertEqual(asked, [.remove(sessionTitle: "First", serverName: "vps")])
     }
 
     func testStopAlwaysAsks() async throws {
-        let vps = B1.server("vps")
+        let vps = Fake.server("vps")
         let (list, library, _) = makeList(servers: [vps])
         let session = library.create(serverID: vps.id, path: "/srv", agent: .fx)
         await session.settled()

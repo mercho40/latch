@@ -2,7 +2,7 @@
 {
 	archiveVersion = 1;
 	classes = {};
-	objectVersion = 56;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -18,13 +18,26 @@
 		A20000000000000000000004 /* Latch.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = ../LatchMac/Resources/Latch.icon; sourceTree = "<group>"; };
 		A20000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Configuration/Info.plist; sourceTree = "<group>"; };
 		A20000000000000000000006 /* LatchiOS */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = LatchiOS; path = .; sourceTree = "<group>"; };
+		A20000000000000000000007 /* LatchiOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LatchiOSUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000008 /* Tests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configuration/Tests.xcconfig; sourceTree = "<group>"; };
+		A20000000000000000000009 /* Latch.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Configuration/Latch.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		AB0000000000000000000001 /* LatchiOSUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Tests/LatchiOSUITests; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A30000000000000000000001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (A10000000000000000000002 /* LatchiOSUI in Frameworks */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A30000000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -35,16 +48,19 @@
 			children = (
 				A20000000000000000000001 /* main.swift */,
 				A20000000000000000000003 /* App.xcconfig */,
+				A20000000000000000000008 /* Tests.xcconfig */,
 				A20000000000000000000005 /* Info.plist */,
+				A20000000000000000000009 /* Latch.entitlements */,
 				A20000000000000000000004 /* Latch.icon */,
 				A20000000000000000000006 /* LatchiOS */,
+				AB0000000000000000000001 /* LatchiOSUITests */,
 				A40000000000000000000002 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
 		A40000000000000000000002 /* Products */ = {
 			isa = PBXGroup;
-			children = (A20000000000000000000002 /* Latch.app */,);
+			children = (A20000000000000000000002 /* Latch.app */, A20000000000000000000007 /* LatchiOSUITests.xctest */,);
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -67,6 +83,21 @@
 			productReference = A20000000000000000000002 /* Latch.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A50000000000000000000002 /* LatchiOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000003 /* Build configuration list for PBXNativeTarget "LatchiOSUITests" */;
+			buildPhases = (
+				A30000000000000000000005 /* Sources */,
+				A30000000000000000000004 /* Frameworks */,
+			);
+			buildRules = ();
+			dependencies = (AC0000000000000000000001 /* PBXTargetDependency */,);
+			fileSystemSynchronizedGroups = (AB0000000000000000000001 /* LatchiOSUITests */,);
+			name = LatchiOSUITests;
+			productName = LatchiOSUITests;
+			productReference = A20000000000000000000007 /* LatchiOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -77,19 +108,20 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					A50000000000000000000001 = {CreatedOnToolsVersion = 16.0; };
+					A50000000000000000000002 = {CreatedOnToolsVersion = 27.0; TestTargetID = A50000000000000000000001; };
 				};
 			};
 			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXProject "Latch" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (en, Base,);
 			mainGroup = A40000000000000000000001;
 			packageReferences = (A90000000000000000000001 /* XCLocalSwiftPackageReference "." */,);
+			preferredProjectObjectVersion = 77;
 			productRefGroup = A40000000000000000000002 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (A50000000000000000000001 /* Latch */,);
+			targets = (A50000000000000000000001 /* Latch */, A50000000000000000000002 /* LatchiOSUITests */,);
 		};
 /* End PBXProject section */
 
@@ -109,7 +141,20 @@
 			files = (A10000000000000000000001 /* main.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A30000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AC0000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A50000000000000000000001 /* Latch */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A70000000000000000000001 /* Debug */ = {
@@ -154,6 +199,18 @@
 			buildSettings = {};
 			name = Release;
 		};
+		A70000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A20000000000000000000008 /* Tests.xcconfig */;
+			buildSettings = {};
+			name = Debug;
+		};
+		A70000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A20000000000000000000008 /* Tests.xcconfig */;
+			buildSettings = {};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -166,6 +223,12 @@
 		A80000000000000000000002 /* Build configuration list for PBXNativeTarget "Latch" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (A70000000000000000000003 /* Debug */, A70000000000000000000004 /* Release */,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A80000000000000000000003 /* Build configuration list for PBXNativeTarget "LatchiOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A70000000000000000000005 /* Debug */, A70000000000000000000006 /* Release */,);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};

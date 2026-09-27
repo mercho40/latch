@@ -5,16 +5,13 @@ import XCTest
 
 /// Renders the session screen's states to `/tmp/latch-ios-session` for design review, in
 /// light, dark and an accessibility text size, on whichever device runs the tests. Run on an
-/// iPhone and an iPad to see both. Skipped unless `LATCH_SNAPSHOTS` is set, or the images
-/// directory exists, so ordinary runs stay fast.
+/// iPhone and an iPad to see both. Skipped unless `LATCH_SNAPSHOTS` is set.
 @MainActor
 final class SessionSnapshotTests: XCTestCase {
     private static let task = "session"
 
     override func setUp() async throws {
-        let enabled = ProcessInfo.processInfo.environment["LATCH_SNAPSHOTS"] != nil
-            || FileManager.default.fileExists(atPath: Snapshot.directory(task: Self.task).path)
-        try XCTSkipUnless(enabled, "Set LATCH_SNAPSHOTS, or create \(Snapshot.directory(task: Self.task).path), to render snapshots")
+        try Snapshot.skipUnlessEnabled()
     }
 
     private func render(_ name: String, holdLaunch: Bool = false, appearances: [Snapshot.Appearance] = Snapshot.Appearance.all,

@@ -20,10 +20,7 @@ let package = Package(
             .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
             .product(name: "LatchRemoteClient", package: "LatchServiceProtocol"),
         ]),
-        // UIKit tests: they run in the iOS Simulator through the `Latch iOS` scheme, not `swift test`.
-        .testTarget(name: "LatchiOSUITests", dependencies: [
-            "LatchiOSUI", "LatchSessionKit",
-            .product(name: "LatchRemoteProtocol", package: "LatchServiceProtocol"),
-        ]),
+        // Its tests, in Tests/LatchiOSUITests, are a target of Latch.xcodeproj hosted by the app,
+        // so they run with its Keychain entitlement; the `Latch iOS` scheme runs them.
     ]
 )

@@ -52,15 +52,15 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
                   servers: servers, check: ServerCheckText.live, badge: nil)
     }
 
-    /// `makeSessionViewController` builds the session screen; without one, a stand-in shows
-    /// the session's title and status.
+    /// `makeSessionViewController` builds the screen for a session; tests pass their own.
     init(library: SessionLibrary, servers: any PhoneServerStore, check: @escaping ServerCheck, badge: ApprovalBadge?,
-         defaults: UserDefaults = .standard, makeSessionViewController: SessionViewControllerFactory? = nil) {
+         defaults: UserDefaults = .standard,
+         makeSessionViewController: @escaping SessionViewControllerFactory = SessionDetailViewController.make) {
         self.library = library
         self.servers = servers
         self.check = check
         self.badge = badge
-        self.makeSessionViewController = makeSessionViewController ?? { session, _ in SessionStandInViewController(session: session) }
+        self.makeSessionViewController = makeSessionViewController
         sessions = SessionsViewController(library: library, defaults: defaults)
         super.init(style: .doubleColumn)
         delegate = self
@@ -109,11 +109,17 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         serverDelegate.rootViewController(self, didOpenPairingLink: link)
     }
 
-    /// Collapsing shows the sessions list, not an empty session.
+    /// Collapsing, as on a rotation or a narrower window, keeps the open session on top of the
+    /// list, and shows the list when none is open rather than an empty session.
     public func splitViewController(_ svc: UISplitViewController,
                                     topColumnForCollapsingToProposedTopColumn proposedTopColumn: UISplitViewController.Column)
         -> UISplitViewController.Column {
-        .primary
+        shown == nil ? .primary : .secondary
+    }
+
+    /// Expanding again, the open session is selected beside it.
+    public func splitViewControllerDidExpand(_ svc: UISplitViewController) {
+        sessions.selectShownSession()
     }
 
     // MARK: Sessions
@@ -151,6 +157,8 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     private func libraryChanged() {
         sessions.reload()
         placeholder.isEmpty = servers.servers.isEmpty
+        // A renamed server's name, in the open session's title.
+        if let shown, let screen = shown.controller as? SessionDetailViewController { screen.follow(shown.session, in: self) }
         // A removed session's screen goes with it, once any push or pop has finished: the split
         // view asserts when its columns change in the middle of one.
         guard let shown, library.session(id: shown.session.id) !== shown.session else { return }
@@ -279,8 +287,10 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     // MARK: Attention
 
     private func announce(_ session: PhoneSession, _ attention: SessionLibrary.Attention) {
+        let waiting = SessionStatusView.mark(for: .waiting)
         let (message, symbol, tint): (String, String, UIColor) = switch attention {
-        case .needsApproval: ("The agent is waiting for a permission decision.", "exclamationmark.circle.fill", .systemOrange)
+        case .needsApproval: ("The agent is waiting for a permission decision.",
+                              waiting?.symbol ?? "exclamationmark.circle.fill", waiting?.color ?? .systemOrange)
         case .finished: ("The agent finished its turn.", "checkmark.circle.fill", .systemGreen)
         case .stoppedOnServer: ("The agent was stopped on its server.", "stop.circle.fill", .secondaryLabel)
         }
@@ -315,36 +325,6 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     @objc func serversCommand() { presentServers() }
     @objc func previousSessionCommand() { step(by: -1) }
     @objc func nextSessionCommand() { step(by: 1) }
-}
-
-/// The session's own screen until the full one is wired in: its title, where it runs, and
-/// what it is doing.
-final class SessionStandInViewController: UIViewController {
-    let session: PhoneSession
-
-    init(session: PhoneSession) {
-        self.session = session
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-        navigationItem.largeTitleDisplayMode = .never
-        session.observe(self, change: { [weak self] in self?.refresh() })
-        refresh()
-    }
-
-    private func refresh() {
-        title = session.title
-        var configuration = UIContentUnavailableConfiguration.empty()
-        configuration.text = session.title
-        configuration.secondaryText = "\(session.subtitle)\n\(session.model.status)"
-        contentUnavailableConfiguration = configuration
-    }
 }
 
 /// The secondary column before a session is chosen. Never seen on iPhone, where the

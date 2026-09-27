@@ -8,8 +8,8 @@ import XCTest
 
 @MainActor
 final class NewSessionTests: XCTestCase {
-    private let vps = B1.server("vps")
-    private let box = B1.server("box", command: "mock-agent")
+    private let vps = Fake.server("vps")
+    private let box = Fake.server("box", command: "mock-agent")
 
     private nonisolated static func info(_ home: String) -> LatchRemoteServerInfo {
         LatchRemoteServerInfo(version: "0.1.0", hostname: "vps", os: "Linux", arch: "x86_64", home: home)

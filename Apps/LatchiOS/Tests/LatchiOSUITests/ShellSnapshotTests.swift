@@ -6,21 +6,24 @@ import UIKit
 import XCTest
 @testable import LatchiOSUI
 
-/// Renders the app shell's screens to /tmp/latch-ios-b1 for design review, on whichever
-/// device the tests run: light, dark, and the largest accessibility text on iPhone.
+/// Renders the app shell's screens to /tmp/latch-ios-shell for design review, on whichever
+/// device the tests run: light, dark, and an accessibility text size on iPhone. Skipped
+/// unless `LATCH_SNAPSHOTS` is set.
 @MainActor
 final class ShellSnapshotTests: XCTestCase {
+    private static let task = "shell"
     private let now = Date()
     private let vps = UIFixture.vps
     private let mini = UIFixture.mini
     private nonisolated static let info = LatchRemoteServerInfo(version: "0.1.0", hostname: "vps", os: "Ubuntu 24.04", arch: "x86_64",
                                                     home: "/home/simon")
 
-    private var variants: [SnapshotB1.Variant] {
-        SnapshotB1.device == "ipad" ? [.light, .dark] : [.light, .dark, .accessibility]
+    private var appearances: [Snapshot.Appearance] {
+        Snapshot.deviceName == "ipad" ? [.light, .dark] : [.light, .dark, .accessibility]
     }
 
     override func setUp() async throws {
+        try Snapshot.skipUnlessEnabled()
         UIView.setAnimationsEnabled(false)
     }
 
@@ -34,7 +37,7 @@ final class ShellSnapshotTests: XCTestCase {
                       check: @escaping ServerCheck = { _ in ShellSnapshotTests.info })
         -> (RootViewController, SessionLibrary) {
         let store = InMemoryServerStore(servers)
-        let library = SessionLibrary(servers: store, connector: B1Connector(), store: nil, listRuntimes: listing)
+        let library = SessionLibrary(servers: store, connector: FakeConnector(), store: nil, listRuntimes: listing)
         library.now = { [now] in now }
         let root = RootViewController(library: library, servers: store, check: check, badge: nil,
                                       defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -48,8 +51,8 @@ final class ShellSnapshotTests: XCTestCase {
 
     private static let runtimes: RuntimeListing = { options in
         guard options.host == "vps.tailnet.ts.net" else { throw LatchRemoteClientError.timedOut }
-        return [B1.summary("a", agent: "Claude Code", workspace: "/home/simon/api", working: true),
-                B1.summary("b", agent: "Codex", workspace: "/home/simon/dotfiles")]
+        return [Fake.summary("a", agent: "Claude Code", workspace: "/home/simon/api", working: true),
+                Fake.summary("b", agent: "Codex", workspace: "/home/simon/dotfiles")]
     }
 
     private func expandRuntimes(_ root: RootViewController, serverID: UUID) {
@@ -61,108 +64,108 @@ final class ShellSnapshotTests: XCTestCase {
     // MARK: Screens
 
     func testOnboarding() async throws {
-        for variant in variants {
+        for appearance in appearances {
             let (root, _) = root(servers: [], sessions: false)
-            let window = SnapshotB1.window(root, variant: variant)
-            await SnapshotB1.settle()
-            try SnapshotB1.write(window, name: "onboarding", variant: variant)
-            window.isHidden = true
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
+            await Snapshot.settle()
+            try await Snapshot.write(window, task: Self.task, name: "onboarding", appearance: appearance)
+            Snapshot.tearDown(window)
         }
     }
 
     func testNoSessionsYet() async throws {
         let (root, _) = root(servers: [vps], sessions: false)
-        let window = SnapshotB1.window(root, variant: .light)
-        await SnapshotB1.settle()
-        try SnapshotB1.write(window, name: "no-sessions", variant: .light)
-        window.isHidden = true
+        let window = Snapshot.host(root, appearance: .light, navigation: false)
+        await Snapshot.settle()
+        try await Snapshot.write(window, task: Self.task, name: "no-sessions", appearance: .light)
+        Snapshot.tearDown(window)
     }
 
     func testSessionsList() async throws {
-        for variant in variants {
+        for appearance in appearances {
             let (root, library) = root(servers: [vps, mini], sessions: true, listing: Self.runtimes)
-            let window = SnapshotB1.window(root, variant: variant)
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
             await library.refreshRuntimes()
             // The list's own refresh on appearing may answer in its place.
-            try await eventuallyB1("the runtimes") { !library.adoptableRuntimes(on: vps.id).isEmpty }
+            try await eventually("the runtimes") { !library.adoptableRuntimes(on: vps.id).isEmpty }
             expandRuntimes(root, serverID: vps.id)
-            if SnapshotB1.device == "ipad", let first = library.sessions(on: vps.id).first { root.show(first) }
-            await SnapshotB1.settle()
-            try SnapshotB1.write(window, name: "sessions", variant: variant)
-            window.isHidden = true
+            if Snapshot.deviceName == "ipad", let first = library.sessions(on: vps.id).first { root.show(first) }
+            await Snapshot.settle()
+            try await Snapshot.write(window, task: Self.task, name: "sessions", appearance: appearance)
+            Snapshot.tearDown(window)
         }
     }
 
     func testRuntimesGroupCollapsed() async throws {
         let (root, library) = root(servers: [vps, mini], sessions: false, listing: Self.runtimes)
-        let window = SnapshotB1.window(root, variant: .light)
+        let window = Snapshot.host(root, appearance: .light, navigation: false)
         await library.refreshRuntimes()
-        try await eventuallyB1("the runtimes") { !library.adoptableRuntimes(on: vps.id).isEmpty }
-        await SnapshotB1.settle()
-        try SnapshotB1.write(window, name: "runtimes-collapsed", variant: .light)
-        window.isHidden = true
+        try await eventually("the runtimes") { !library.adoptableRuntimes(on: vps.id).isEmpty }
+        await Snapshot.settle()
+        try await Snapshot.write(window, task: Self.task, name: "runtimes-collapsed", appearance: .light)
+        Snapshot.tearDown(window)
     }
 
-    private var sheetKind: SnapshotB1.Sheet { SnapshotB1.device == "ipad" ? .form : .page(medium: false) }
+    private var sheetKind: Snapshot.Sheet { Snapshot.deviceName == "ipad" ? .form : .page(medium: false) }
 
     func testNewSessionSheet() async throws {
-        for variant in variants {
+        for appearance in appearances {
             let (root, _) = root(servers: [vps, mini], sessions: true)
-            let window = SnapshotB1.window(root, variant: variant)
-            await SnapshotB1.settle()
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
+            await Snapshot.settle()
             let sheet = try XCTUnwrap(root.newSessionSheet(serverID: vps.id))
-            let kind: SnapshotB1.Sheet = SnapshotB1.device == "ipad" ? .form : .page(medium: true)
-            try await SnapshotB1.writeSheet(sheet, over: window, as: kind, name: "new-session", variant: variant)
-            window.isHidden = true
+            let kind: Snapshot.Sheet = Snapshot.deviceName == "ipad" ? .form : .page(medium: true)
+            try await Snapshot.writeSheet(sheet, over: window, as: kind, task: Self.task, name: "new-session", appearance: appearance)
+            Snapshot.tearDown(window)
         }
     }
 
     func testServersList() async throws {
-        for variant in variants {
+        for appearance in appearances {
             let slow = ServerProfile(name: "Pi", host: "pi.home.arpa", token: .generate())
             let (root, _) = root(servers: [vps, mini, slow], sessions: true, check: { options in
                 if options.host == "pi.home.arpa" { try await Task.sleep(for: .seconds(30)) }
                 guard options.host == "vps.tailnet.ts.net" else { throw LatchRemoteClientError.timedOut }
                 return ShellSnapshotTests.info
             })
-            let window = SnapshotB1.window(root, variant: variant)
-            await SnapshotB1.settle()
-            try await SnapshotB1.writeSheet(root.serversSheet(), over: window, as: sheetKind, name: "servers",
-                                            variant: variant) { sheet in
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
+            await Snapshot.settle()
+            try await Snapshot.writeSheet(root.serversSheet(), over: window, as: sheetKind, task: Self.task, name: "servers",
+                                          appearance: appearance) { sheet in
                 let list = (sheet as? UINavigationController)?.topViewController as? ServersViewController
                 list?.beginAppearanceTransition(true, animated: false)
                 list?.endAppearanceTransition()
             }
-            window.isHidden = true
+            Snapshot.tearDown(window)
         }
     }
 
     func testServerEditorAdding() async throws {
-        for variant in variants {
+        for appearance in appearances {
             let (root, _) = root(servers: [vps], sessions: true)
-            let window = SnapshotB1.window(root, variant: variant)
-            await SnapshotB1.settle()
-            try await SnapshotB1.writeSheet(root.serverEditorSheet(), over: window, as: sheetKind, name: "server-add",
-                                            variant: variant) { sheet in
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
+            await Snapshot.settle()
+            try await Snapshot.writeSheet(root.serverEditorSheet(), over: window, as: sheetKind, task: Self.task, name: "server-add",
+                                          appearance: appearance) { sheet in
                 guard let editor = (sheet as? UINavigationController)?.topViewController as? ServerEditorViewController
                 else { return XCTFail("No editor") }
                 editor.applyPairing("latch://mini.tailnet.ts.net:7800?token=\(LatchRemoteToken.generate().rawValue)")
                 editor.testConnection()
                 await editor.testFinished()
             }
-            window.isHidden = true
+            Snapshot.tearDown(window)
         }
     }
 
     func testServerEditorEditing() async throws {
-        for variant in variants {
+        for appearance in appearances {
             let (root, _) = root(servers: [vps], sessions: true, check: { _ in
                 throw LatchRemoteClientError.destinationNotAllowed(address: "203.0.113.7")
             })
-            let window = SnapshotB1.window(root, variant: variant)
-            await SnapshotB1.settle()
-            try await SnapshotB1.writeSheet(root.serverEditorSheet(serverID: vps.id), over: window, as: sheetKind,
-                                            name: "server-edit", variant: variant) { sheet in
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
+            await Snapshot.settle()
+            try await Snapshot.writeSheet(root.serverEditorSheet(serverID: vps.id), over: window, as: sheetKind,
+                                          task: Self.task, name: "server-edit", appearance: appearance) { sheet in
                 guard let editor = (sheet as? UINavigationController)?.topViewController as? ServerEditorViewController
                 else { return XCTFail("No editor") }
                 editor.testConnection()
@@ -172,21 +175,21 @@ final class ShellSnapshotTests: XCTestCase {
                 table.setContentOffset(CGPoint(x: 0, y: max(0, table.contentSize.height - table.bounds.height
                     + table.adjustedContentInset.bottom)), animated: false)
             }
-            window.isHidden = true
+            Snapshot.tearDown(window)
         }
     }
 
     func testAttentionBanner() async throws {
-        for variant in [SnapshotB1.Variant.light, .dark] {
+        for appearance in [Snapshot.Appearance.light, .dark] {
             let (root, library) = root(servers: [vps, mini], sessions: true)
-            let window = SnapshotB1.window(root, variant: variant)
-            await SnapshotB1.settle()
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
+            await Snapshot.settle()
             let session = try XCTUnwrap(library.sessions(on: vps.id).dropFirst().first)
             library.onAttention?(session, .needsApproval)
-            await SnapshotB1.settle()
+            await Snapshot.settle()
             XCTAssertNotNil(root.attentionBanner)
-            try SnapshotB1.write(window, name: "banner", variant: variant)
-            window.isHidden = true
+            try await Snapshot.write(window, task: Self.task, name: "banner", appearance: appearance)
+            Snapshot.tearDown(window)
         }
     }
 }

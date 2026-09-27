@@ -9,17 +9,17 @@ import XCTest
 @MainActor
 final class SessionLibraryTests: XCTestCase {
     private var directory: URL!
-    private let vps = B1.server("vps")
+    private let vps = Fake.server("vps")
 
     override func setUp() async throws {
-        directory = try B1.temporaryDirectory()
+        directory = try Fake.temporaryDirectory()
     }
 
     override func tearDown() async throws {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    private func makeLibrary(_ connector: B1Connector, store: SessionStore? = nil,
+    private func makeLibrary(_ connector: FakeConnector, store: SessionStore? = nil,
                              listing: @escaping RuntimeListing = { _ in [] }) -> SessionLibrary {
         SessionLibrary(servers: InMemoryServerStore([vps]), connector: connector, store: store, listRuntimes: listing)
     }
@@ -28,7 +28,7 @@ final class SessionLibraryTests: XCTestCase {
 
     /// The fields the Mac's session saves, the same way: the first prompt names it.
     func testASessionSavesWhatTheMacSaves() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector)
         let session = library.create(serverID: vps.id, path: "/srv/app", agent: .claudeCode)
         await session.settled()
@@ -36,7 +36,7 @@ final class SessionLibraryTests: XCTestCase {
         XCTAssertEqual(connector.clients.first?.snapshot.launches, [.remote(agent: .preset("claudeCode"), path: "/srv/app")])
         session.draft = "half a thought"
         let send = Task { await session.model.send("  Fix the flaky test  \nand explain why") }
-        try await eventuallyB1("the turn to start") { connector.clients[0].isRunningTurn }
+        try await eventually("the turn to start") { connector.clients[0].isRunningTurn }
         XCTAssertEqual(session.title, "Fix the flaky test")
 
         let saved = session.savedSession
@@ -66,8 +66,8 @@ final class SessionLibraryTests: XCTestCase {
     }
 
     func testACustomAgentRunsItsServersCommand() async {
-        let server = B1.server("box", command: "mock-agent --acp")
-        let connector = B1Connector()
+        let server = Fake.server("box", command: "mock-agent --acp")
+        let connector = FakeConnector()
         let library = SessionLibrary(servers: InMemoryServerStore([server]), connector: connector, store: nil,
                                      listRuntimes: { _ in [] })
         let session = library.create(serverID: server.id, path: "~", agent: .custom)
@@ -81,7 +81,7 @@ final class SessionLibraryTests: XCTestCase {
 
     func testALibrarySavesAndRestoresAndReattachesBoundSessionsFirst() async throws {
         let store = SessionStore(directory: directory)
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector, store: store)
         await library.restore()
         let bound = library.create(serverID: vps.id, path: "/srv/bound", agent: .codex)
@@ -98,8 +98,8 @@ final class SessionLibraryTests: XCTestCase {
 
         // A relaunch: the bound session attaches to its runtime before anything is opened;
         // the other waits to be opened.
-        let relaunched = B1Connector()
-        relaunched.prepare = { $0.serve(record: B1FakeClient.record(agent: .preset("codex"), workspace: "/srv/bound"), backlog: []) }
+        let relaunched = FakeConnector()
+        relaunched.prepare = { $0.serve(record: FakeClient.record(agent: .preset("codex"), workspace: "/srv/bound"), backlog: []) }
         let next = makeLibrary(relaunched, store: SessionStore(directory: directory))
         await next.restore()
         XCTAssertEqual(next.sessions.map(\.id), [bound.id, idle.id])
@@ -117,7 +117,7 @@ final class SessionLibraryTests: XCTestCase {
     /// Leaving the foreground writes at once; nothing is detached or stopped.
     func testFlushingSavesImmediatelyAndLeavesRuntimesRunning() async throws {
         let store = SessionStore(directory: directory)
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector, store: store)
         await library.restore()
         let session = library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
@@ -133,7 +133,7 @@ final class SessionLibraryTests: XCTestCase {
 
     func testAnUnreadableLibraryIsNeverOverwritten() async throws {
         try Data("not json".utf8).write(to: directory.appendingPathComponent(SessionStore.fileName))
-        let library = makeLibrary(B1Connector(), store: SessionStore(directory: directory))
+        let library = makeLibrary(FakeConnector(), store: SessionStore(directory: directory))
         await library.restore()
         XCTAssertNotNil(library.persistenceError)
         library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
@@ -144,7 +144,7 @@ final class SessionLibraryTests: XCTestCase {
     // MARK: Attention
 
     func testAnOffScreenTurnLeavesAnUnreadMarkAndAsksForAttention() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector)
         var attention: [SessionLibrary.Attention] = []
         var counts: [Int] = []
@@ -153,15 +153,15 @@ final class SessionLibraryTests: XCTestCase {
         let session = library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
         await session.settled()
         let send = Task { await session.model.send("go") }
-        try await eventuallyB1("the turn") { connector.clients[0].isRunningTurn }
+        try await eventually("the turn") { connector.clients[0].isRunningTurn }
         connector.clients[0].requestPermission()
-        try await eventuallyB1("the request") { session.model.permissions.current != nil }
+        try await eventually("the request") { session.model.permissions.current != nil }
         XCTAssertEqual(attention, [.needsApproval])
         XCTAssertEqual(counts, [1])
         XCTAssertEqual(session.rowStatus(now: Date()).text, "Needs approval")
         let request = try XCTUnwrap(session.model.permissions.current)
         session.model.permissions.resolve(id: request.id, optionID: "allow")
-        try await eventuallyB1("the badge to clear") { counts == [1, 0] }
+        try await eventually("the badge to clear") { counts == [1, 0] }
 
         connector.clients[0].finishTurn()
         await send.value
@@ -173,7 +173,7 @@ final class SessionLibraryTests: XCTestCase {
     }
 
     func testTheSessionOnScreenIsNeitherMarkedNorAnnounced() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector)
         var attention: [SessionLibrary.Attention] = []
         library.onAttention = { _, kind in attention.append(kind) }
@@ -181,7 +181,7 @@ final class SessionLibraryTests: XCTestCase {
         library.isSessionVisible = { $0 == session.id }
         await session.settled()
         let send = Task { await session.model.send("go") }
-        try await eventuallyB1("the turn") { connector.clients[0].isRunningTurn }
+        try await eventually("the turn") { connector.clients[0].isRunningTurn }
         connector.clients[0].finishTurn()
         await send.value
         XCTAssertEqual(attention, [])
@@ -189,7 +189,7 @@ final class SessionLibraryTests: XCTestCase {
     }
 
     func testNothingIsAnnouncedWhileInactiveButTheMarkStays() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector)
         library.isActive = false
         var attention: [SessionLibrary.Attention] = []
@@ -197,7 +197,7 @@ final class SessionLibraryTests: XCTestCase {
         let session = library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
         await session.settled()
         let send = Task { await session.model.send("go") }
-        try await eventuallyB1("the turn") { connector.clients[0].isRunningTurn }
+        try await eventually("the turn") { connector.clients[0].isRunningTurn }
         connector.clients[0].finishTurn()
         await send.value
         XCTAssertEqual(attention, [])
@@ -207,17 +207,17 @@ final class SessionLibraryTests: XCTestCase {
     // MARK: Runtimes on the server
 
     func testRuntimesListedExceptThoseFollowedHereOrStillStarting() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let followedID = UUID().uuidString
         let listing: RuntimeListing = { _ in
-            [B1.summary("other", workspace: "/srv/other", working: true),
-             B1.summary(followedID, workspace: "/srv/mine"),
-             B1.summary("starting", workspace: "/srv/new", lifecycle: .starting),
-             B1.summary("exited", workspace: "/srv/old", lifecycle: .exited)]
+            [Fake.summary("other", workspace: "/srv/other", working: true),
+             Fake.summary(followedID, workspace: "/srv/mine"),
+             Fake.summary("starting", workspace: "/srv/new", lifecycle: .starting),
+             Fake.summary("exited", workspace: "/srv/old", lifecycle: .exited)]
         }
         let library = makeLibrary(connector, listing: listing)
         // A session here that follows one of them.
-        connector.prepare = { $0.serve(record: B1FakeClient.record(agent: .preset("fx"), workspace: "/srv/mine"), backlog: []) }
+        connector.prepare = { $0.serve(record: FakeClient.record(agent: .preset("fx"), workspace: "/srv/mine"), backlog: []) }
         let mine = PhoneSession(serverID: vps.id, path: "/srv/mine", agent: .fx, customCommand: "",
                                 saved: SavedSession(id: UUID(), workspacePath: "/srv/mine", title: "Mine", agentID: "fx",
                                                     customCommand: "", draft: "", messages: [], agentSessionID: "s",
@@ -230,7 +230,7 @@ final class SessionLibraryTests: XCTestCase {
     }
 
     func testAServerThatCannotBeListedSaysWhy() async {
-        let library = makeLibrary(B1Connector(), listing: { _ in throw LatchRemoteClientError.timedOut })
+        let library = makeLibrary(FakeConnector(), listing: { _ in throw LatchRemoteClientError.timedOut })
         await library.refreshRuntimes()
         XCTAssertNotNil(library.runtimes[vps.id]?.failure)
         XCTAssertEqual(library.runtimes[vps.id]?.isLoading, false)
@@ -239,10 +239,10 @@ final class SessionLibraryTests: XCTestCase {
     /// Adopting replays the runtime from the start and saves the agent and folder its record
     /// names; the first prompt in the replay names the session.
     func testAdoptingARuntimeTakesItsAgentFolderAndTitle() async throws {
-        let connector = B1Connector()
-        let runtime = B1.summary("theirs", workspace: "/srv/listed")
+        let connector = FakeConnector()
+        let runtime = Fake.summary("theirs", workspace: "/srv/listed")
         connector.prepare = { client in
-            client.serve(record: B1FakeClient.record(agent: .preset("claudeCode"), workspace: "/home/me/app", lastSequence: 2),
+            client.serve(record: FakeClient.record(agent: .preset("claudeCode"), workspace: "/home/me/app", lastSequence: 2),
                          backlog: [.turnStarted(runtimeID: AgentRuntimeID("theirs"), turnID: UUID(), text: "Tidy the README",
                                                 attachments: [], sequence: 1),
                                    .turnEnded(runtimeID: AgentRuntimeID("theirs"), turnID: UUID(), sequence: 2)])
@@ -258,17 +258,17 @@ final class SessionLibraryTests: XCTestCase {
         XCTAssertEqual(session.model.phase, .ready)
         XCTAssertEqual(session.agent, .claudeCode)
         XCTAssertEqual(session.path, "/home/me/app")
-        try await eventuallyB1("the replayed prompt") { session.title == "Tidy the README" }
+        try await eventually("the replayed prompt") { session.title == "Tidy the README" }
         XCTAssertEqual(session.savedSession.agentID, "claudeCode")
         XCTAssertEqual(session.savedSession.remote?.runtimeID, "theirs")
         XCTAssertTrue(library.adoptableRuntimes(on: vps.id).isEmpty, "Followed here now")
     }
 
     func testAdoptingACustomAgentKeepsItsCommand() async {
-        let connector = B1Connector()
-        connector.prepare = { $0.serve(record: B1FakeClient.record(agent: .custom("mock-agent"), workspace: "/srv"), backlog: []) }
+        let connector = FakeConnector()
+        connector.prepare = { $0.serve(record: FakeClient.record(agent: .custom("mock-agent"), workspace: "/srv"), backlog: []) }
         let library = makeLibrary(connector)
-        let session = library.adopt(B1.summary(workspace: "/srv"), serverID: vps.id)
+        let session = library.adopt(Fake.summary(workspace: "/srv"), serverID: vps.id)
         await session.settled()
         XCTAssertEqual(session.agent, .custom)
         XCTAssertEqual(session.customCommand, "mock-agent")
@@ -278,7 +278,7 @@ final class SessionLibraryTests: XCTestCase {
     // MARK: Remove and stop
 
     func testRemovingDetachesAndForgetsTheSession() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector)
         let session = library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
         await session.settled()
@@ -291,7 +291,7 @@ final class SessionLibraryTests: XCTestCase {
     }
 
     func testStoppingStopsTheAgentAndKeepsTheSession() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector)
         let session = library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
         await session.settled()
@@ -303,12 +303,12 @@ final class SessionLibraryTests: XCTestCase {
 
     func testRemovingAServerDetachesItsSessions() async throws {
         let servers = InMemoryServerStore([vps])
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = SessionLibrary(servers: servers, connector: connector, store: nil, listRuntimes: { _ in [] })
         let session = library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
         await session.settled()
         try servers.remove(id: vps.id)
-        try await eventuallyB1("the detach") { connector.clients[0].snapshot.detaches.count == 1 }
+        try await eventually("the detach") { connector.clients[0].snapshot.detaches.count == 1 }
         XCTAssertEqual(library.orphanedSessions.map(\.id), [session.id])
         XCTAssertTrue(connector.clients[0].snapshot.stops.isEmpty)
     }
@@ -318,9 +318,9 @@ final class SessionLibraryTests: XCTestCase {
     /// A runtime being adopted, or adopted, is not offered again, and a second tap opens the
     /// session that took it up.
     func testAnAdoptionIsNeverOfferedTwice() async throws {
-        let connector = B1Connector()
-        connector.prepare = { $0.serve(record: B1FakeClient.record(agent: .preset("fx"), workspace: "/srv/a"), backlog: []) }
-        let runtime = B1.summary("theirs", workspace: "/srv/a")
+        let connector = FakeConnector()
+        connector.prepare = { $0.serve(record: FakeClient.record(agent: .preset("fx"), workspace: "/srv/a"), backlog: []) }
+        let runtime = Fake.summary("theirs", workspace: "/srv/a")
         let library = makeLibrary(connector, listing: { _ in [runtime] })
         await library.refreshRuntimes()
         var changes = 0
@@ -341,11 +341,11 @@ final class SessionLibraryTests: XCTestCase {
     /// cannot name, and is not saved: a relaunch finds the runtime listed again.
     func testAFailedAdoptionAdoptsAgainAndIsNotSaved() async throws {
         let store = SessionStore(directory: directory)
-        let connector = B1Connector()
+        let connector = FakeConnector()
         connector.prepare = { $0.failAttaches(with: LatchRemoteClientError.connectionLost) }
         let library = makeLibrary(connector, store: store)
         await library.restore()
-        let session = library.adopt(B1.summary("theirs", workspace: "/srv/a"), serverID: vps.id)
+        let session = library.adopt(Fake.summary("theirs", workspace: "/srv/a"), serverID: vps.id)
         await session.settled()
         XCTAssertEqual(session.model.phase, .disconnected)
         XCTAssertEqual(session.pendingAdoption?.rawValue, "theirs")
@@ -363,8 +363,8 @@ final class SessionLibraryTests: XCTestCase {
     }
 
     func testRuntimesAreNotOfferedBeforeTheSavedSessionsLoad() async {
-        let library = makeLibrary(B1Connector(), store: SessionStore(directory: directory),
-                                  listing: { _ in [B1.summary("x", workspace: "/srv")] })
+        let library = makeLibrary(FakeConnector(), store: SessionStore(directory: directory),
+                                  listing: { _ in [Fake.summary("x", workspace: "/srv")] })
         await library.refreshRuntimes()
         XCTAssertTrue(library.adoptableRuntimes(on: vps.id).isEmpty, "Its own could be among them")
         await library.restore()
@@ -373,7 +373,7 @@ final class SessionLibraryTests: XCTestCase {
 
     // MARK: Stop Agent edges
 
-    private func bound(_ runtimeID: String, in library: SessionLibrary, _ connector: B1Connector) -> PhoneSession {
+    private func bound(_ runtimeID: String, in library: SessionLibrary, _ connector: FakeConnector) -> PhoneSession {
         let saved = SavedSession(id: UUID(), workspacePath: "/srv/app", title: "Bound", agentID: "codex", customCommand: "",
                                  draft: "", messages: [], agentSessionID: "s", serverID: vps.id,
                                  remote: .init(runtimeID: runtimeID, cursor: 3))
@@ -384,7 +384,7 @@ final class SessionLibraryTests: XCTestCase {
 
     /// A session whose re-attach failed still names a runtime that runs on: Stop reaches it.
     func testStopReachesARuntimeLeftBoundAfterAFailedReattach() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         connector.prepare = { $0.failAttaches(with: LatchRemoteClientError.connectionLost) }
         let library = makeLibrary(connector)
         let session = bound("rt", in: library, connector)
@@ -401,12 +401,12 @@ final class SessionLibraryTests: XCTestCase {
 
     /// Stopped while its launch-time re-attach is still waiting: the runtime it names stops.
     func testStopWhileReattachingStopsTheBoundRuntime() async throws {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         connector.prepare = { $0.holdAttaches() }
         let library = makeLibrary(connector)
         let session = bound("rt", in: library, connector)
         session.startIfNeeded()
-        try await eventuallyB1("the attach") { connector.clients.first?.snapshot.attaches.count == 1 }
+        try await eventually("the attach") { connector.clients.first?.snapshot.attaches.count == 1 }
         XCTAssertEqual(session.model.phase, .connecting)
         XCTAssertTrue(session.canStop)
         await library.stop(session)
@@ -418,7 +418,7 @@ final class SessionLibraryTests: XCTestCase {
     }
 
     func testNothingToStopIsNotStopped() async {
-        let connector = B1Connector()
+        let connector = FakeConnector()
         let library = makeLibrary(connector)
         let saved = SavedSession(id: UUID(), workspacePath: "/srv", title: "Idle", agentID: "fx", customCommand: "",
                                  draft: "", messages: [], serverID: vps.id)
@@ -443,9 +443,9 @@ final class SessionLibraryTests: XCTestCase {
                                  remote: .init(runtimeID: "rt", cursor: 0))
         let sessions = SessionStore(directory: directory)
         try await sessions.save(SavedSessionLibrary(sessions: [saved], selectedSessionID: nil))
-        let connector = B1Connector()
+        let connector = FakeConnector()
         connector.servers = servers
-        connector.prepare = { $0.serve(record: B1FakeClient.record(agent: .preset("codex"), workspace: "/srv/bound"), backlog: []) }
+        connector.prepare = { $0.serve(record: FakeClient.record(agent: .preset("codex"), workspace: "/srv/bound"), backlog: []) }
         let library = SessionLibrary(servers: servers, connector: connector, store: sessions, listRuntimes: { _ in [] })
         await library.restore()
         let before = try XCTUnwrap(library.session(id: saved.id))

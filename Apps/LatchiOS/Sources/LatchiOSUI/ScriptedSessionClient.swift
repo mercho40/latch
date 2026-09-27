@@ -1,14 +1,15 @@
+#if DEBUG
 import Foundation
 import LatchACP
 import LatchRemoteProtocol
 import LatchServiceProtocol
 import LatchSessionKit
 import Synchronization
-import XCTest
 
-/// A server as the session screen sees it, scripted by a test: it launches at once (or when
-/// released), holds each prompt until the test ends the turn, and records every prompt and
-/// command. Events reach the model as a remote channel's would.
+/// A server as the session screen sees it, scripted by a test or a `--ui-fixture` screen: it
+/// launches at once (or when released), holds each prompt until the script ends the turn, and
+/// records every prompt and command. Events reach the model as a remote channel's would.
+/// Debug builds only.
 final class ScriptedSessionClient: AgentServiceClient {
     let events: AsyncStream<LatchAgentEvent>
     let remoteEvents: AsyncStream<RemoteServiceEvent>?
@@ -183,22 +184,6 @@ final class ScriptedSessionClient: AgentServiceClient {
     }
 }
 
-extension XCTestCase {
-    /// Waits for main-actor state that arrives through the model's event task.
-    @MainActor
-    func waitUntil(_ description: String = "condition", timeout: Duration = .seconds(5),
-                   file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) async {
-        let deadline = ContinuousClock.now + timeout
-        while !condition() {
-            guard ContinuousClock.now < deadline else {
-                XCTFail("Timed out waiting for \(description)", file: file, line: line)
-                return
-            }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-    }
-}
-
 /// Config options an agent advertises: grouped models, an effort, and a permission mode.
 enum ScriptedConfiguration {
     static let options: [ACPJSONValue] = [
@@ -231,3 +216,52 @@ struct UnreachableServer: RemoteConnectionFailure, LocalizedError {
     let message: String
     var errorDescription: String? { message }
 }
+
+/// A conversation about a flaky test: a prompt, two tool calls, a reply in rich Markdown, and a
+/// prompt with a photo. What the tests and the `--ui-fixture` screens show.
+enum SampleConversation {
+    static let prompt = ChatMessage(role: .user, text: "The reconnect test fails about one run in five on the Linux runner. Can you find out why?")
+    static let read = ChatMessage(role: .tool, text: """
+        Read Tests/RemoteSessionLiveTests.swift · completed
+
+        Content:
+        func testReconnect() async throws {
+            let server = try await LoopbackServer.start()
+            try await server.restart()
+        }
+        """)
+    static let run = ChatMessage(role: .tool, text: """
+        `swift test --filter RemoteSessionLiveTests/testReconnectAfterServerRestart` · failed
+
+        rawOutput (text):
+        error: testReconnect: timed out after 5.0 seconds
+        """)
+    static let answer = ChatMessage(role: .assistant, text: """
+        ## What I found
+
+        The test restarts the loopback server and reconnects **before the old port is released**. On Linux the port stays in `TIME_WAIT`, so:
+
+        1. The restart binds a *new* port.
+        2. The client still dials the old one:
+           - it retries with backoff,
+           - and gives up after 5 s.
+
+        ```swift
+        let port = try await server.restart(keepingPort: true)
+        ```
+
+        | Runner | Runs | Failures |
+        | :-- | --: | --: |
+        | macOS | 50 | 0 |
+        | Linux | 50 | 9 |
+
+        > The Mac never shows it: it sets `SO_REUSEADDR` by default.
+
+        See [SO_REUSEADDR](https://man7.org/linux/man-pages/man7/socket.7.html) for the details.
+        """)
+    static let followUp = ChatMessage(role: .user, text: "Here is the CI log from the last failure.",
+                                      attachments: [ChatAttachment(kind: .image, name: "ci-log.jpg", path: nil)])
+
+    static let messages = [prompt, read, run, answer, followUp]
+}
+#endif

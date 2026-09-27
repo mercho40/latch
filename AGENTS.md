@@ -26,6 +26,7 @@ swift test --package-path Packages/LatchSessionKit
 swift test --package-path Apps/LatchMac
 bash Scripts/test-mac-app.sh            # builds the bundle, runs the UI smoke over XPC and the remote smoke against a loopback latch-server
 bash Scripts/test-linux.sh              # the package tests on Linux, in Apple's container tool
+bash Scripts/test-ios-app.sh            # the iOS app in the Simulator: its tests, the launch smoke, and the remote smoke against a loopback latch-server
 ```
 
 A change to anything the user sees is not verified until the bundle script passes; the SwiftPM preview has no bundle identifier and no separate service process.
@@ -48,3 +49,4 @@ A change to anything the user sees is not verified until the bundle script passe
 - **Never block inside a Task on the server.** Sockets, `waitpid` and pipe reads belong on their own threads; a 1-vCPU VPS runs one task at a time, and one blocked task stalls every agent.
 - **Remote commands are re-sent after a reconnect only because each is idempotent on the server** (turn IDs, same-ID launches, recorded session replies). A new remote command needs that property before the client may retry it; the no-blind-retries rule above still stands everywhere else.
 - **The static musl build needs large thread stacks.** musl's 128 KiB default overflows on deeply nested JSON; `RemoteServer` gives its threads 1 MiB and `latch-server` links with an 8 MiB `PT_GNU_STACK`. `Scripts/build-linux-server.sh` checks the latter; keep both.
+- **The iOS app keeps server tokens only in the Keychain.** Simulator builds are signed ad hoc with `Configuration/Latch.entitlements`, and the tests are hosted by the app for the same reason. A build made with `CODE_SIGNING_ALLOWED=NO` has no keychain access group and stops at launch; there is no file to fall back to.

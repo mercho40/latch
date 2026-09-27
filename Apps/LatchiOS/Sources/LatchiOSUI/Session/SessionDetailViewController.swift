@@ -27,6 +27,9 @@ struct SessionDetailContext {
     var onServerSettings: () -> Void = {}
     /// The draft changed, to be saved with the session. Empty once a draft is sent.
     var onDraftChange: (String) -> Void = { _ in }
+    /// Whether Stop Agent has a runtime to stop, when the host knows better than the model,
+    /// such as while an adoption is still attaching.
+    var canStopAgent: (() -> Bool)?
 }
 
 /// One session: its conversation, a composer pinned above the keyboard, a banner for the
@@ -298,6 +301,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             && SlashCommandSuggestionsView.query(in: composer.text).map { suggestions.show(model.commands, query: $0) } == true
         guard open == suggestions.isHidden else { return }
         suggestions.isHidden = !open
+        refreshEmptyState()
     }
 
     private func choose(_ command: ACPAvailableCommand) {
@@ -323,7 +327,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     }
 
     private func refreshEmptyState() {
-        guard model.messages.isEmpty else {
+        // Slash suggestions take the empty page's place, rather than showing through it.
+        guard model.messages.isEmpty, suggestions.isHidden else {
             emptyView.isHidden = true
             return
         }
@@ -465,7 +470,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         let state = MenuState(
             configuration: model.configuration,
             editable: model.phase == .ready && !model.isChangingConfiguration,
-            canStopAgent: model.phase != .disconnected || model.remoteBinding != nil,
+            canStopAgent: context.canStopAgent?() ?? (model.phase != .disconnected || model.remoteBinding != nil),
             folderPath: context.folderPath)
         guard state != renderedMenu else { return }
         renderedMenu = state
@@ -673,7 +678,11 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         }
         guard let pending, viewIfLoaded?.window != nil else { return }
         let presenter = topPresenter
-        guard !presenter.isBeingPresented, !presenter.isBeingDismissed else { return schedulePermissionRetry() }
+        // An alert, such as Stop Agent's confirmation, is answered first: nothing is presented
+        // over one. On iPad it can go with a tap outside its popover, which calls no action.
+        guard !presenter.isBeingPresented, !presenter.isBeingDismissed, !(presenter is UIAlertController) else {
+            return schedulePermissionRetry()
+        }
         let sheet = PermissionRequestViewController(prompt: pending, agentTitle: context.agentTitle) { [weak self] optionID in
             guard let self else { return }
             model.permissions.resolve(id: pending.id, optionID: optionID)

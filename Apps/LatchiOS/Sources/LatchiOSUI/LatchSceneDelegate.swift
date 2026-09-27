@@ -2,8 +2,8 @@ import LatchSessionKit
 import UIKit
 
 /// Builds the window and everything behind it: servers in the Keychain, one connector every
-/// session reaches its server through, and the saved sessions. Hands the root any `latch://`
-/// link the system opens the app with.
+/// session reaches its server through, the saved sessions, and the session screen the root
+/// shows each one in. Hands the root any `latch://` link the system opens the app with.
 final class LatchSceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
     private var root: RootViewController?
@@ -13,6 +13,15 @@ final class LatchSceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
                options connectionOptions: UIScene.ConnectionOptions) {
         guard let windowScene = scene as? UIWindowScene else { return }
+        // The tests the app hosts make their own windows, over nothing of the app's: no saved
+        // servers or sessions are read, and no server is reached.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            let window = UIWindow(windowScene: windowScene)
+            window.rootViewController = UIViewController()
+            window.makeKeyAndVisible()
+            self.window = window
+            return
+        }
         #if DEBUG
         // `--ui-fixture <screen>`: made-up servers and sessions, for screenshots.
         if let screen = UIFixture.requestedScreen {
@@ -24,11 +33,22 @@ final class LatchSceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         #endif
         let directory = AppFiles.directory
-        let servers = KeychainServerStore(directory: directory, vault: DeviceTokenVault.make(directory: directory))
+        let vault = KeychainTokenVault()
+        vault.requireEntitlement()
+        let servers = KeychainServerStore(directory: directory, vault: vault)
+        #if DEBUG
+        // The remote smoke never asks to badge the icon: the question is this device owner's.
+        let remoteSmoke = RemoteSmoke.request
+        let connector = remoteSmoke == nil ? ChannelRemoteSessionConnector(servers: servers)
+            : ChannelRemoteSessionConnector(servers: servers, backoff: RemoteSmoke.backoff)
+        let badge = remoteSmoke == nil ? ApprovalBadge() : nil
+        #else
         let connector = ChannelRemoteSessionConnector(servers: servers)
+        let badge: ApprovalBadge? = ApprovalBadge()
+        #endif
         let library = SessionLibrary(servers: servers, connector: connector, store: SessionStore(directory: directory))
-        let badge = ApprovalBadge()
-        let root = RootViewController(library: library, servers: servers, check: ServerCheckText.live, badge: badge)
+        let root = RootViewController(library: library, servers: servers, check: ServerCheckText.live, badge: badge,
+                                      makeSessionViewController: SessionDetailViewController.make)
         root.serverDelegate = serverSheets
         let window = show(root, in: windowScene)
         self.root = root
@@ -38,9 +58,21 @@ final class LatchSceneDelegate: UIResponder, UIWindowSceneDelegate {
         Task {
             await library.restore()
             root.restoreSelection()
-            badge.sync(library.approvalsNeeded)
+            badge?.sync(library.approvalsNeeded)
         }
         if LaunchSmoke.isRequested { LaunchSmoke.run(in: window) }
+        #if DEBUG
+        switch remoteSmoke {
+        case let .success(request)?:
+            RemoteSmoke.run(request, window: window, scene: windowScene, delegate: self, root: root, servers: servers,
+                            connector: connector)
+        case let .failure(problem)?:
+            FileHandle.standardError.write(Data("IOS SMOKE REMOTE: FAIL — \(problem)\n".utf8))
+            exit(1)
+        case nil:
+            break
+        }
+        #endif
     }
 
     @discardableResult

@@ -85,8 +85,10 @@ final class PermissionRequestViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
-        let icon = UIImageView(image: UIImage(systemName: "hand.raised.fill"))
-        icon.tintColor = .systemOrange
+        // The list's "Needs approval" mark, so a decision looks the same wherever it waits.
+        let mark = SessionStatusView.mark(for: .waiting)
+        let icon = UIImageView(image: UIImage(systemName: mark?.symbol ?? "exclamationmark.circle.fill"))
+        icon.tintColor = mark?.color ?? .systemOrange
         icon.preferredSymbolConfiguration = .init(textStyle: .title2)
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.isAccessibilityElement = false

@@ -1,0 +1,20 @@
+// LatchiOSUITests: hosted by the app, so the tests run in its process with its entitlements,
+// the Keychain's included, and in a window scene of its own.
+PRODUCT_NAME = LatchiOSUITests
+PRODUCT_BUNDLE_IDENTIFIER = dev.latchapp.ios.tests
+IPHONEOS_DEPLOYMENT_TARGET = 18.0
+SDKROOT = iphoneos
+SUPPORTED_PLATFORMS = iphoneos iphonesimulator
+TARGETED_DEVICE_FAMILY = 1,2
+SWIFT_VERSION = 6.0
+GENERATE_INFOPLIST_FILE = YES
+TEST_HOST = $(BUILT_PRODUCTS_DIR)/Latch.app/Latch
+// The package's modules are linked into the app, not again into the tests: they resolve
+// against the host, so there is one copy of every class.
+BUNDLE_LOADER = $(TEST_HOST)
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_STYLE[sdk=iphonesimulator*] = Manual
+CODE_SIGN_IDENTITY[sdk=iphonesimulator*] = -
+#include? "Local.xcconfig"
+ALWAYS_SEARCH_USER_PATHS = NO
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks @loader_path/Frameworks

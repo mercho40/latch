@@ -70,16 +70,28 @@ final class AttentionCenterTests: XCTestCase {
         var visible = false
         center.isSessionVisible = { _ in visible }
         let prompting = AttentionCenter.State(workspaceName: "workspace", isPrompting: true)
-        let idle = AttentionCenter.State(workspaceName: "workspace")
+        let idle = AttentionCenter.State(workspaceName: "workspace", turnsEnded: 1)
 
         center.update([sessionID: prompting])
         center.update([sessionID: idle])
         XCTAssertEqual(presenter.posts.map(\.body), ["The agent finished its turn."])
 
         visible = true
-        center.update([sessionID: prompting])
-        center.update([sessionID: idle])
+        center.update([sessionID: AttentionCenter.State(workspaceName: "workspace", isPrompting: true, turnsEnded: 1)])
+        center.update([sessionID: AttentionCenter.State(workspaceName: "workspace", turnsEnded: 2)])
         XCTAssertEqual(presenter.posts.count, 1, "A session you are looking at announces nothing")
+    }
+
+    func testOnlyATurnThatEndedIsAnnounced() {
+        let presenter = RecordingPresenter()
+        let center = AttentionCenter(presenter: presenter)
+        center.update([sessionID: AttentionCenter.State(workspaceName: "workspace", isPrompting: true)])
+        // No longer awaited, as when its link fails, but still running on its server.
+        center.update([sessionID: AttentionCenter.State(workspaceName: "workspace")])
+        XCTAssertEqual(presenter.posts.count, 0)
+
+        center.update([sessionID: AttentionCenter.State(workspaceName: "workspace", turnsEnded: 1, lastTurnStopped: true)])
+        XCTAssertEqual(presenter.posts.map(\.body), ["The agent was stopped on its server."])
     }
 
     func testClosedSessionTakesItsAlertsWithIt() {

@@ -1,4 +1,8 @@
 import AppKit
+import LatchAgentCore
+import LatchRemoteClient
+import LatchRemoteProtocol
+import LatchSessionKit
 
 @MainActor
 public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -10,17 +14,53 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
     /// Built on first use and kept alive: the pane holds the selected agent and the
     /// window's frame, and reopening ⌘, should land where it was left.
     private var settingsWindow: SettingsWindowController?
+    /// The servers remote sessions run on. A smoke run swaps in an in-memory store at launch,
+    /// so it never reads or writes this Mac's real servers.
+    private var servers: any ServerStore = FileServerStore.shared
+    private var agentSettings: AgentSettings = .shared
+    /// The runtime the remote smoke leaves running when it quits, checked once the quit has run.
+    private var remoteSmokeRuntime: String?
+    /// The remote smoke's folder, when it made one itself. A run that passes leaves it to the
+    /// caller, whose check needs the agent still running in it; one that fails takes it away.
+    private var remoteSmokeOwnedWorkspace: URL?
+    /// Where the remote smoke saves its sessions, so the quit's last save can be read back.
+    private var remoteSmokeLibrary: URL?
 
     /// Agent install state and the custom command live here, not in any session.
     @objc func showSettings(_ sender: Any?) {
-        let controller = settingsWindow ?? SettingsWindowController()
+        let controller = settingsWindow ?? SettingsWindowController(settings: agentSettings, servers: servers)
         settingsWindow = controller
         controller.show()
     }
 
+    /// Settings, open on the Agents pane: where a local agent that can't start is fixed.
+    @objc func showAgentSettings(_ sender: Any?) {
+        showSettings(sender)
+        settingsWindow?.select(pane: "Agents")
+    }
+
+    /// Settings, open on the Servers pane: where a remote session's server is fixed. A sender
+    /// that names the server selects it, so an edit made next is to the right one.
+    @objc func showServerSettings(_ sender: Any?) {
+        showSettings(sender)
+        if let server = (sender as? ServerReference)?.serverID {
+            settingsWindow?.select(server: server)
+        } else {
+            settingsWindow?.select(pane: "Servers")
+        }
+    }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
-        let smokeTest = CommandLine.arguments.contains("--smoke-test")
+        let arguments = CommandLine.arguments
+        // `--smoke-test-remote latch://host:port?token=… [folder]`: the remote smoke, against a
+        // server the caller started, in a folder the caller cleans up or else one of its own.
+        // It is a smoke run like `--smoke-test` in every other respect.
+        let remoteSmoke = arguments.firstIndex(of: "--smoke-test-remote").map { index in
+            (pairing: arguments.indices.contains(index + 1) ? arguments[index + 1] : "",
+             workspace: arguments.indices.contains(index + 2) ? arguments[index + 2] : nil)
+        }
+        let smokeTest = arguments.contains("--smoke-test") || remoteSmoke != nil
         // A smoke run keeps the Dock badge but never posts a notification or claims a slot
         // in the real menu bar: neither belongs to an automated check of this machine.
         let attention = AttentionCenter(presenter: smokeTest ? nil : UserNotificationPresenter.make(),
@@ -30,16 +70,41 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         // A smoke run gets its own preferences for the same reason it gets its own store:
         // it must assert on Latch's behaviour, not on the agents this Mac's owner happens
         // to have turned off.
+        if smokeTest {
+            agentSettings = AgentSettings(defaults: UserDefaults(suiteName: "LatchSmoke-\(UUID().uuidString)")!)
+            servers = InMemoryServerStore()
+        }
+        var remoteSmokeSetup: (server: ServerProfile, workspace: URL)?
+        if let remoteSmoke {
+            do {
+                remoteSmokeSetup = try prepareRemoteSmoke(remoteSmoke.pairing, workspace: remoteSmoke.workspace)
+                servers = InMemoryServerStore([remoteSmokeSetup!.server])
+            } catch {
+                FileHandle.standardError.write(Data("UI SMOKE REMOTE: \(error)\n".utf8))
+                exit(EXIT_FAILURE)
+            }
+        }
+        // Built on whichever store is in use, so a smoke run's remote sessions reach only the
+        // servers it added itself. The remote smoke saves to its own folder, so the quit's save
+        // can be checked, and waits long between reconnects, so the rest of a turn is journaled
+        // while its link is down and has to be replayed.
         let controller = SessionWindowController(
-            store: smokeTest ? nil : SessionStore(directory: SessionStore.defaultDirectory),
-            attention: attention, menuBar: menuBar,
-            settings: smokeTest ? AgentSettings(defaults: UserDefaults(suiteName: "LatchSmoke-\(UUID().uuidString)")!) : nil
+            store: remoteSmokeLibrary.map { SessionStore(directory: $0) }
+                ?? (smokeTest ? nil : SessionStore(directory: SessionStore.defaultDirectory)),
+            attention: attention, menuBar: menuBar, settings: agentSettings, servers: servers,
+            remoteConnector: remoteSmoke == nil
+                ? ChannelRemoteSessionConnector(servers: servers, notificationCenter: NSWorkspace.shared.notificationCenter)
+                : ChannelRemoteSessionConnector(servers: servers,
+                                                backoff: LatchRemoteBackoff(initial: .seconds(30), maximum: .seconds(30)),
+                                                notificationCenter: NSWorkspace.shared.notificationCenter)
         )
         self.controller = controller
         controller.showWindow(nil)
         NSApp.activate()
         if !smokeTest { Task { await controller.restoreSessions() } }
-        if smokeTest {
+        if let remoteSmokeSetup {
+            runRemoteSmoke(controller, server: remoteSmokeSetup.server, workspace: remoteSmokeSetup.workspace)
+        } else if smokeTest {
             DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
                 FileHandle.standardError.write(Data("UI SMOKE: timed out\n".utf8))
                 exit(EXIT_FAILURE)
@@ -55,6 +120,53 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
                     FileHandle.standardError.write(Data("UI SMOKE: \(error)\n".utf8))
                     exit(EXIT_FAILURE)
                 }
+            }
+        }
+    }
+
+    /// The server from the pairing string, with a custom agent command running the smoke's
+    /// mock agent from the caller's folder or a new one. On loopback the server's filesystem is
+    /// this Mac's, so the folder is the session's path there too.
+    private func prepareRemoteSmoke(_ pairingString: String, workspace path: String?) throws
+        -> (server: ServerProfile, workspace: URL) {
+        let pairing = try LatchRemotePairing(parsing: pairingString)
+        let workspace = path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() }
+            ?? FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent("latch-remote-smoke-\(UUID().uuidString)")
+        if path == nil { remoteSmokeOwnedWorkspace = workspace }
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        remoteSmokeLibrary = workspace.appendingPathComponent("library")
+        let script = workspace.appendingPathComponent("agent.sh")
+        try SmokeAgent.remoteScript.write(to: script, atomically: true, encoding: .utf8)
+        let server = ServerProfile(name: "smoke", host: pairing.host, port: pairing.port, token: pairing.token,
+                                   customCommand: "/bin/sh " + AgentCommand.quotedArgument(script.path))
+        return (server, workspace)
+    }
+
+    /// Runs the remote conversation, then quits through the real path. What quitting left
+    /// running on the server is for the caller to check, after this process has gone.
+    private func runRemoteSmoke(_ controller: SessionWindowController, server: ServerProfile, workspace: URL) {
+        let owned = remoteSmokeOwnedWorkspace
+        DispatchQueue.global().asyncAfter(deadline: .now() + 60) {
+            FileHandle.standardError.write(Data("UI SMOKE REMOTE: timed out\n".utf8))
+            if let owned { try? FileManager.default.removeItem(at: owned) }
+            exit(EXIT_FAILURE)
+        }
+        Task {
+            do {
+                // An empty library, loaded so the quit's save is allowed to write.
+                await controller.restoreSessions()
+                let report = try await controller.smokeTestRemote(serverID: server.id, workspace: workspace)
+                print("UI SMOKE REMOTE: agent service transport = \(report.transport) (app pid \(getpid()))")
+                print("UI SMOKE REMOTE: runtime \(report.runtimeID) agent pid \(report.agentPID) workspace \(workspace.path)")
+                print("UI SMOKE REMOTE: remote session, streamed reply, permission approval, link dropped mid-turn and the turn replayed — PASS")
+                remoteSmokeRuntime = report.runtimeID
+                NSApp.terminate(nil)
+            } catch {
+                await controller.shutdown()
+                FileHandle.standardError.write(Data("UI SMOKE REMOTE: \(error)\n".utf8))
+                if let owned { try? FileManager.default.removeItem(at: owned) }
+                exit(EXIT_FAILURE)
             }
         }
     }
@@ -90,6 +202,18 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         terminating = true
         Task {
             await controller?.shutdown()
+            if let runtime = remoteSmokeRuntime, let library = remoteSmokeLibrary {
+                // The quit's last save, read back from disk, holds the binding the next launch
+                // attaches with.
+                let saved = try? await SessionStore(directory: library).load()
+                guard let binding = saved?.sessions.lazy.compactMap(\.remote).first(where: { $0.runtimeID == runtime })
+                else {
+                    FileHandle.standardError.write(Data("UI SMOKE REMOTE: quitting did not save the session's runtime\n".utf8))
+                    if let remoteSmokeOwnedWorkspace { try? FileManager.default.removeItem(at: remoteSmokeOwnedWorkspace) }
+                    exit(EXIT_FAILURE)
+                }
+                print("UI SMOKE REMOTE: quit detached runtime \(runtime) and saved it at journal sequence \(binding.cursor)")
+            }
             shutdownComplete = true
             // Avoid nesting AppKit's termination loop inside an active MainActor task.
             DispatchQueue.main.async { sender.terminate(nil) }
@@ -198,6 +322,9 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         menu.addItem(viewItem)
         let sessionItem = NSMenuItem()
         let session = NSMenu(title: "Session")
+        session.addItem(withTitle: "New Remote Session…", action: #selector(SessionWindowController.newRemoteSession(_:)), keyEquivalent: "n")
+            .keyEquivalentModifierMask = [.command, .option]
+        session.addItem(.separator())
         session.addItem(withTitle: "Attach Files…", action: #selector(SessionWindowController.attachFiles(_:)), keyEquivalent: "a")
             .keyEquivalentModifierMask = [.command, .shift]
         session.addItem(.separator())

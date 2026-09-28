@@ -61,6 +61,32 @@ final class ACPAgentRuntimeTests: XCTestCase {
         XCTAssertEqual(stoppedState, .stopped)
     }
 
+    /// The frame is large enough that the reader is still inside it when the exit is seen.
+    func testDeliversTheLastFrameOfAnAgentThatExitsRightAfterWritingIt() async throws {
+        let script = #"""
+        IFS= read -r line
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}'
+        IFS= read -r line
+        pad=$(head -c 3000000 /dev/zero | tr '\0' a)
+        printf '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"last-words","pad":"%s"}}\n' "$pad"
+        """#
+        let runtime = ACPAgentRuntime(
+            configuration: ACPProcessConfiguration(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", script],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp")
+            ),
+            clientInfo: ACPImplementation(name: "latch-tests", version: "0.1.0")
+        )
+        var events = runtime.events.makeAsyncIterator()
+
+        _ = try await runtime.start()
+        let session = try await runtime.newSession(cwd: "/tmp")
+        XCTAssertEqual(session.sessionId, "last-words")
+        let event = await events.next()
+        XCTAssertEqual(event, .processTerminated(status: 0))
+    }
+
     func testRejectsOperationsBeforeStart() async throws {
         let runtime = ACPAgentRuntime(
             configuration: mockProcessConfiguration(),

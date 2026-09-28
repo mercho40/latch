@@ -1,6 +1,8 @@
 import AppKit
+import LatchAgentCore
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 /// A temporary store, workspace, and window for tests that drive the real window controller.
 /// The launch environment has no harness installed, so no selection can launch a process,
@@ -67,16 +69,23 @@ final class WindowFixture {
 
     /// A window restored from the given saved sessions, with the first one selected.
     func restored(_ sessions: SavedSession..., attention: AttentionCenter? = nil,
-                  menuBar: MenuBarController? = nil) async throws -> (SessionWindowController, SidebarViewController) {
+                  menuBar: MenuBarController? = nil, settings: AgentSettings? = nil, servers: (any ServerStore)? = nil,
+                  remoteConnector: (any RemoteSessionConnector)? = nil) async throws -> (SessionWindowController, SidebarViewController) {
         try await store.save(SavedSessionLibrary(sessions: sessions, selectedSessionID: sessions.first?.id))
-        let window = self.window(attention: attention, menuBar: menuBar)
+        let window = self.window(attention: attention, menuBar: menuBar, settings: settings, servers: servers,
+                                 remoteConnector: remoteConnector)
         await window.restoreSessions(launchEnvironment: environment)
         return (window, try sidebar(in: window))
     }
 
-    func window(attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil) -> SessionWindowController {
+    /// Remote-session tests pass their own server store and check, so none reads this Mac's
+    /// real servers or opens a connection.
+    func window(attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil, settings: AgentSettings? = nil,
+                servers: (any ServerStore)? = nil, remoteConnector: (any RemoteSessionConnector)? = nil,
+                serverCheck: ServerCheck? = nil) -> SessionWindowController {
         let window = SessionWindowController(store: SessionStore(directory: storeDirectory),
-                                             attention: attention, menuBar: menuBar)
+                                             attention: attention, menuBar: menuBar, settings: settings, servers: servers,
+                                             remoteConnector: remoteConnector, serverCheck: serverCheck)
         windows.append(window)
         return window
     }
@@ -137,5 +146,21 @@ final class WindowFixture {
         }
         windows.removeAll()
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+extension XCTestCase {
+    /// Waits for a condition that may need the server to answer, such as a runtime's state.
+    @MainActor func eventually(_ description: String, timeout: Duration = .seconds(15),
+                    file: StaticString = #filePath, line: UInt = #line,
+                    _ condition: () async throws -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while try await !condition() {
+            guard ContinuousClock.now < deadline else {
+                XCTFail("Timed out waiting for \(description)", file: file, line: line)
+                throw WindowFixture.SettleTimeout(description: description)
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 }

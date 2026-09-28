@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 /// The menu bar extra lists every session, whichever one the window happens to show.
 @MainActor

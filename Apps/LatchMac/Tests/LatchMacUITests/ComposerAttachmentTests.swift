@@ -4,6 +4,7 @@ import LatchServiceProtocol
 import UniformTypeIdentifiers
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 final class ComposerAttachmentTests: XCTestCase {
     private func png(width: Int, height: Int) throws -> Data {
@@ -130,7 +131,7 @@ final class ComposerAttachmentTests: XCTestCase {
             let image = try XCTUnwrap(ComposerAttachment.attachments(from: pasteboard { $0.setData(try! png(width: 8, height: 8), forType: .png) }).first)
             let notes = ComposerAttachment.fromFile(file)
 
-            await model.send("What changed?", attachments: [image, notes])
+            await model.send("What changed?", attachments: [image.prompt, notes.prompt])
 
             let blocks = await client.promptBlocks
             XCTAssertEqual(blocks.count, 3)

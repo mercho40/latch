@@ -22,7 +22,7 @@ Latch is not another agent harness. It is a native client and secure bridge for 
 ## Initial platforms
 
 - **macOS:** Swift + AppKit
-- **iOS/iPadOS:** Swift + UIKit, using SwiftUI selectively where it simplifies non-critical UI
+- **iOS/iPadOS:** Swift + UIKit, using SwiftUI selectively where it simplifies non-critical UI (the app built so far uses none)
 - **Agent integration:** Agent Client Protocol (ACP)
 - **First conformance target:** `fx acp`, through the same generic command profile available to every ACP server
 
@@ -72,6 +72,8 @@ A user can:
                                                         └──────────────────┘
 ```
 
+Part of this exists in a different shape. `latch-server` runs agents on a Linux or macOS machine you control, as an ordinary process (on Linux, a systemd user service), and both apps connect to it over TCP: the Mac through Tailscale or an SSH tunnel, the iPhone and iPad through Tailscale or, when allowed, a local network; see [Running latch-server](server.md) and [Latch for iPhone and iPad](ios.md). So the iOS app talks to the server, not to the Mac: to follow agents from a phone, they run on a server, which can be the Mac itself. Agents on a server keep running when either app quits or is suspended, and the apps attach to them again when they next open. Agents on the Mac itself still run under the XPC service embedded in the app, not a `launchd` service, stop when the app quits, and are out of the phone's reach.
+
 ### Components
 
 #### Latch Agent
@@ -119,11 +121,13 @@ A lightweight background service managed by `launchd` that:
 - Do not bundle the Tailscale SDK or make Tailscale a product dependency
 - Defer NAT traversal and a hosted relay until the local product is validated
 
+Built so far, ahead of the local-network work: a server reached over Tailscale or an SSH tunnel, with a bearer token and no encryption of its own. It runs on Linux as well as macOS. `latch-server pair --qr` prints the pairing string as a QR code the iPhone's Camera opens in Latch, but what it carries is the server's token, not a device key. Bonjour discovery, device keys and TLS are not built.
+
 A future relay must never receive plaintext prompts, source code, tool output, or approval contents.
 
 ## Security model
 
-This is the model for the paired, multi-device product. What the shipped Mac app enforces today is in [SECURITY.md](../.github/SECURITY.md).
+This is the model for the paired, multi-device product. What the shipped apps and `latch-server` enforce today is in [SECURITY.md](../.github/SECURITY.md); `latch-server` has one token per server rather than per device, and no revocation short of rotating it.
 
 - The coding agent and repository remain on the Mac.
 - The iOS app receives only data intentionally forwarded by the Latch Agent.
@@ -156,18 +160,36 @@ The generic ACP v1 path is complete. Direct `fx acp` conformance remains blocked
 
 Done: AppKit shell and session UI, workspace management, local IPC through an embedded XPC service. Pending: a background service that outlives the app (`SMAppService`), and cleanup of agents when the app or service is killed outright.
 
-### M2 — paired iPhone client
+### Remote server (built, ahead of M2)
 
-- Bonjour discovery and secure pairing
-- Session list and transcript streaming
-- Prompt, cancel, approve, and deny actions
-- Reconnection and basic offline state
+- [x] `latch-server`, for Linux (static binaries for x86_64 and aarch64) and macOS, run by hand or as a systemd user service
+- [x] Plain TCP with a bearer token; loopback by default, a tailnet address only on a Tailscale interface, anything else only when explicitly allowed
+- [x] A replay hub that keeps each agent's events, so a client that drops, sleeps or changes network reconnects and catches up without running a command twice
+- [x] Mac client: servers in Settings, remote sessions in the window and sidebar, and reconnect with backoff
+- [x] Quitting Latch detaches from remote agents rather than stopping them, and relaunching re-attaches
+- [x] Editing a server in Settings, such as pasting a rotated token's pairing string, keeps its sessions and re-attaches them
+- [x] Linux package tests and static builds in CI; an iOS build check of the protocol and client
+- [x] Runtimes listed with a title and the agent they run, and a load's history kept in the journal, so another device can name a runtime and take it up with its conversation
+- [x] `latch-server pair --qr`, a terminal QR code of the pairing string
+
+Not built: device keys and TLS; per-device tokens and revoking one device; a folder browser for the server; file and folder attachments to remote agents (images work); runtimes that survive a server restart; listing and taking up another device's runtimes in the Mac app.
+
+### M2 — paired iPhone client (in progress)
+
+- [ ] Bonjour discovery and secure pairing
+- [x] Session list and transcript streaming
+- [x] Prompt, cancel, approve, and deny actions
+- [x] Reconnection and basic offline state
+
+Built as a client of `latch-server` rather than of the Mac: a UIKit app for iPhone and iPad that lists each server's sessions, takes up runtimes another device started with their history, starts new ones, streams Markdown replies and tool activity, sends prompts and photos, switches model, effort and mode, answers permission requests, and catches up after suspension or a dropped link. Pairing is by the server's `latch://` string or its QR code, and the token is kept in the Keychain. See [Latch for iPhone and iPad](ios.md).
+
+Not built: Bonjour discovery; pairing with device keys and TLS; background push; an App Store or TestFlight build.
 
 ### M3 — usable alpha
 
-- Tailscale-compatible remote connections using a manually configured address
-- In-app attention alerts while the iOS client is connected
-- Session restoration
+- Tailscale-compatible remote connections using a manually configured address (done through `latch-server`)
+- In-app attention alerts while the iOS client is connected (done in the iOS app: a banner and the icon's badge)
+- Session restoration (done: both apps restore their sessions and attach again to agents left on a server)
 - Diagnostics and exportable logs with redaction
 - An update notice in the app, on top of the ad-hoc-signed releases and installer that exist today
 - Threat-model review
@@ -177,12 +199,13 @@ Background iOS push notifications are deferred until Latch has an optional relay
 ## Architecture decisions
 
 1. **Deployment targets:** macOS 15 and iOS/iPadOS 18.
-2. **Repository layout:** one Xcode project containing the application targets, backed by local Swift packages for the ACP client, transport protocol, models, and reusable UI-independent logic.
+2. **Repository layout:** an Xcode project per application, backed by local Swift packages for the ACP client, transport protocol, models, and reusable UI-independent logic (`LatchSessionKit`, shared by both apps).
 3. **Local IPC:** an XPC Mach service between the macOS app and Latch Agent. The remote transport remains a separate Network.framework protocol.
 4. **Distribution:** direct ad-hoc-signed macOS builds with Hardened Runtime, installed by script from GitHub releases, outside the Mac App Store and without App Sandbox. There is no Apple Developer ID, so builds are not notarized. Repository access remains explicit and user-selected.
 5. **Background service:** bundle Latch Agent inside the macOS application and register it as a per-user launch agent with `SMAppService`. The app owns installation, status, updates, and removal.
 6. **Initial remote access:** work over user-managed Tailscale connections without bundling its SDK. LAN use requires no third-party service.
 7. **License:** Apache-2.0, with no Contributor License Agreement.
+8. **Server transport:** newline-delimited JSON over plain TCP with a 256-bit bearer token. Encryption comes from the network path, Tailscale or SSH, not from Latch; TLS and per-device keys remain planned for pairing.
 
 These decisions can be revisited only when a prototype exposes a concrete platform constraint.
 
@@ -191,7 +214,7 @@ These decisions can be revisited only when a prototype exposes a concrete platfo
 Before building the full interface, validate these assumptions:
 
 - ACP exposes enough structured permission information for a safe mobile approval UI.
-- An ACP process can survive client reconnections without losing the active session.
+- An ACP process can survive client reconnections without losing the active session. (`latch-server` does this, and the iOS app attaches again after suspension or a dropped link; its remote smoke checks a dropped link in the Simulator.)
 - The background service can reliably supervise multiple workspace processes.
 - Streaming remains responsive across iPhone network transitions.
 - Users value remote approvals and monitoring enough without remote code editing.

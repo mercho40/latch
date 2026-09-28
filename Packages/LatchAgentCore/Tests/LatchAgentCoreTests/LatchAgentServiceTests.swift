@@ -222,6 +222,78 @@ final class LatchAgentServiceTests: XCTestCase {
         _ = try await service.execute(.stopRuntime(id: runtimeID))
     }
 
+    func testRejectsPermissionOptionTheRequestDidNotOffer() async throws {
+        let service = LatchAgentService()
+        let runtimeID = AgentRuntimeID("permission-option-runtime")
+        var events = service.events.makeAsyncIterator()
+        _ = try await service.execute(.startRuntime(id: runtimeID, profile: ACPCommandProfile(
+            executablePath: "/bin/sh", arguments: ["-c", permissionServerScript], workingDirectoryPath: "/tmp"
+        )))
+        _ = try await service.execute(.newSession(runtimeID: runtimeID, cwd: "/tmp/project"))
+
+        let promptTask = Task { try await service.execute(.prompt(runtimeID: runtimeID, text: "Read the file")) }
+        guard case let .permissionRequested(_, requestID, _)? = await events.next() else {
+            return XCTFail("Expected a brokered permission request event")
+        }
+
+        let invented = await service.handle(LatchAgentRequest(command: .resolvePermission(
+            runtimeID: runtimeID, requestID: requestID, outcome: .selected(optionID: "allow-always")
+        )))
+        guard case .failure(let failure) = invented.result else { return XCTFail("Expected a failure") }
+        XCTAssertEqual(failure, LatchAgentFailure(
+            code: .commandFailed, message: "The selected option was not offered by this permission request."
+        ))
+        do {
+            _ = try await service.execute(.resolvePermission(
+                runtimeID: runtimeID, requestID: requestID, outcome: .selected(optionID: "")
+            ))
+            XCTFail("Expected an option the request did not offer to be rejected")
+        } catch AgentRuntimeRegistryError.invalidPermissionOption(let id) {
+            XCTAssertEqual(id, requestID)
+        }
+
+        // The rejected answers left the request pending, so an offered option still resolves it.
+        let resolved = try await service.execute(.resolvePermission(
+            runtimeID: runtimeID, requestID: requestID, outcome: .selected(optionID: "reject-once")
+        ))
+        XCTAssertEqual(resolved, .permissionResolved(runtimeID: runtimeID, requestID: requestID))
+        guard case let .permissionClosed(_, closedRequestID)? = await events.next() else {
+            return XCTFail("Expected the permission to close")
+        }
+        XCTAssertEqual(closedRequestID, requestID)
+        let completed = try await promptTask.value
+        XCTAssertEqual(completed, .promptCompleted(
+            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "end_turn")
+        ))
+        _ = try await service.execute(.stopRuntime(id: runtimeID))
+    }
+
+    func testCancelsPermissionRequestWithDuplicateOptionIDs() async throws {
+        let service = LatchAgentService()
+        let runtimeID = AgentRuntimeID("permission-duplicate-runtime")
+        var events = service.events.makeAsyncIterator()
+        _ = try await service.execute(.startRuntime(id: runtimeID, profile: ACPCommandProfile(
+            executablePath: "/bin/sh", arguments: ["-c", duplicateOptionServerScript], workingDirectoryPath: "/tmp"
+        )))
+        _ = try await service.execute(.newSession(runtimeID: runtimeID, cwd: "/tmp/project"))
+
+        // Read events before awaiting the prompt: a published request would never be answered.
+        let promptTask = Task { try await service.execute(.prompt(runtimeID: runtimeID, text: "Read the file")) }
+        // The agent sends this update only after it has its answer, so it comes first only if the
+        // request was never published.
+        guard case let .sessionUpdate(_, notification)? = await events.next(),
+              case let .messageChunk(chunk) = notification.event else {
+            _ = try? await service.execute(.stopRuntime(id: runtimeID))
+            return XCTFail("Expected the agent's update, not a published permission request")
+        }
+        XCTAssertEqual(chunk.text, "answered")
+        let completed = try await promptTask.value
+        XCTAssertEqual(completed, .promptCompleted(
+            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "cancelled")
+        ))
+        _ = try await service.execute(.stopRuntime(id: runtimeID))
+    }
+
     func testCancellingPromptCancelsPendingPermission() async throws {
         let service = LatchAgentService()
         let runtimeID = AgentRuntimeID("permission-cancel-runtime")
@@ -284,6 +356,32 @@ final class LatchAgentServiceTests: XCTestCase {
               printf '%s\n' '{"jsonrpc":"2.0","id":10,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1","title":"Read file"},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
               ;;
             *\"id\":10*)
+              case "$line" in
+                *\"selected\"*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}' ;;
+                *) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}' ;;
+              esac
+              ;;
+          esac
+        done
+        """#
+    }
+
+    /// Asks for permission with two options sharing one ID, then reports the answer before ending the turn.
+    private var duplicateOptionServerScript: String {
+        #"""
+        while IFS= read -r line; do
+          case "$line" in
+            *\"method\":\"initialize\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false},"agentInfo":{"name":"mock-agent","version":"1.0.0"}}}'
+              ;;
+            *\"method\":\"session*new\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session-1"}}'
+              ;;
+            *\"method\":\"session*prompt\"*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":10,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1","title":"Read file"},"options":[{"optionId":"once","name":"Allow","kind":"allow_once"},{"optionId":"once","name":"Reject","kind":"reject_once"}]}}'
+              ;;
+            *\"id\":10*)
+              printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answered"}}}}'
               case "$line" in
                 *\"selected\"*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}' ;;
                 *) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}' ;;

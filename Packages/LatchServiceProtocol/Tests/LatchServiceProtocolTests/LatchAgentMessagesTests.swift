@@ -113,6 +113,20 @@ final class LatchAgentMessagesTests: XCTestCase {
         }
     }
 
+    func testDecodingRejectsAnEmptyRuntimeID() throws {
+        let id = AgentRuntimeID("runtime-1")
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(id), as: UTF8.self), #"{"rawValue":"runtime-1"}"#)
+        XCTAssertEqual(try JSONDecoder().decode(AgentRuntimeID.self, from: Data(#"{"rawValue":"runtime-1"}"#.utf8)), id)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(AgentRuntimeID.self, from: Data(#"{"rawValue":""}"#.utf8))) {
+            guard case DecodingError.dataCorrupted = $0 else { return XCTFail("Unexpected error: \($0)") }
+        }
+        // A command carrying one fails to decode as a whole rather than trapping.
+        var command = String(decoding: try JSONEncoder().encode(LatchAgentCommand.stopRuntime(id: id)), as: UTF8.self)
+        command = command.replacingOccurrences(of: #""runtime-1""#, with: #""""#)
+        XCTAssertThrowsError(try JSONDecoder().decode(LatchAgentCommand.self, from: Data(command.utf8)))
+    }
+
     func testCommandProfileCreatesProcessConfiguration() {
         let profile = ACPCommandProfile(
             executablePath: "/usr/bin/env",

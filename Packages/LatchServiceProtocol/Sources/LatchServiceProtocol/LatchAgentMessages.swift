@@ -9,7 +9,23 @@ public struct AgentRuntimeID: Hashable, Codable, Sendable, CustomStringConvertib
         self.rawValue = rawValue
     }
 
+    /// Decoded IDs are untrusted, so an empty one is a decoding error rather than a precondition failure.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawValue = try container.decode(String.self, forKey: .rawValue)
+        guard !rawValue.isEmpty else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .rawValue, in: container, debugDescription: "A runtime ID cannot be empty."
+            )
+        }
+        self.rawValue = rawValue
+    }
+
     public var description: String { rawValue }
+
+    private enum CodingKeys: String, CodingKey {
+        case rawValue
+    }
 }
 
 public struct AgentRuntimeSnapshot: Codable, Equatable, Sendable {

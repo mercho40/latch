@@ -1,8 +1,8 @@
 // Local development app. Developer ID signing and notarization are not configured yet.
 PRODUCT_NAME = Latch
 PRODUCT_BUNDLE_IDENTIFIER = dev.latchapp.mac
-MARKETING_VERSION = 0.1.0
-CURRENT_PROJECT_VERSION = 1
+MARKETING_VERSION = 0.2.0
+CURRENT_PROJECT_VERSION = 2
 MACOSX_DEPLOYMENT_TARGET = 15.0
 SDKROOT = macosx
 SUPPORTED_PLATFORMS = macosx

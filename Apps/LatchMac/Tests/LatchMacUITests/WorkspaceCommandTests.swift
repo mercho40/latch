@@ -190,7 +190,7 @@ final class WorkspaceCommandTests: XCTestCase {
 /// A dragging session carrying file URLs. `NSDraggingInfo` is a protocol, so the drop path
 /// can be exercised without a real drag. `NSDraggingInfo` is not main-actor isolated, so
 /// neither is this.
-private final class DragStub: NSObject, NSDraggingInfo, @unchecked Sendable {
+final class DragStub: NSObject, NSDraggingInfo, @unchecked Sendable {
     private let urls: [URL]
     private let name: NSPasteboard.Name
 

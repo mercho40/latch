@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [Packages/LatchACP, Packages/LatchServiceProtocol, Packages/LatchAgentCore]
+        package: [Packages/LatchACP, Packages/LatchServiceProtocol, Packages/LatchAgentCore, Packages/LatchSessionKit]
     steps:
       - uses: actions/checkout@v5
       - run: swift --version
@@ -35,9 +35,106 @@ jobs:
       - run: xcodebuild -version
       # Window tests and the smoke test need a window server; hosted macOS runners have a logged-in GUI session.
       - run: swift test --package-path Apps/LatchMac
-      # Scripts/test-mac-app.sh is not run here: actool in Xcode 26.6, the newest on hosted runners,
-      # throws while compiling Latch.icon. Add it back once the runner image carries Xcode 27.
+      # The bundle is built and smoked in the mac-app job: actool before Xcode 27 throws on Latch.icon.
       - run: bash Scripts/test-xpc-process.sh
+
+  mac-app:
+    name: Mac app bundle and smoke
+    # The Xcode 27 image, in preview on GitHub; macos-26 carries Xcode 26 only.
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: xcodebuild -version
+      # Builds the bundle, checks its icon, signature and entitlements, and runs the smoke and
+      # the remote smoke. Without focus the permission sheet falls back to Escape with a note.
+      - run: bash Scripts/test-mac-app.sh
+
+  ios:
+    name: iOS build check
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      # The wire types and the client stay buildable for an iOS app; the agent runtime is gated to macOS and Linux.
+      - run: >-
+          swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteProtocol
+          --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+      - run: >-
+          swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteClient
+          --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+      # The app's code, with LatchSessionKit and LatchAgentCore, without the icon actool needs Xcode 27 for.
+      - run: >-
+          swift build --package-path Apps/LatchiOS
+          --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+
+  ios-app:
+    name: iOS app build, tests and smoke
+    # The app compiles Latch.icon, which needs actool from Xcode 27: the xcode-27 image.
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          xcodebuild -version
+          major="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
+          if (( ${major:-0} < 27 )); then
+            echo "::error::Xcode $major cannot compile Latch.icon; the iOS app needs Xcode 27 or later."
+            exit 1
+          fi
+      - run: xcrun simctl list runtimes
+      # Builds the app and its tests for the Simulator; runs the tests and the in-app smoke only
+      # when the runner has an iOS Simulator runtime, and says so when it does not.
+      - run: bash Scripts/test-ios-app.sh
+
+  linux:
+    name: Linux package tests
+    runs-on: ${{ matrix.runner }}
+    container: swift:6.4.0-noble
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v5
+      - run: swift --version
+      - run: swift test --package-path Packages/LatchACP
+      - run: swift test --package-path Packages/LatchServiceProtocol
+      - run: swift test --package-path Packages/LatchAgentCore
+
+  linux-static:
+    name: Static Linux build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    container: swift:6.4.0-noble
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v5
+      - run: >-
+          swift sdk install
+          https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
+          --checksum 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
+      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk x86_64-swift-linux-musl -c release --product latch-server
+      - run: swift build --package-path Packages/LatchAgentCore --swift-sdk aarch64-swift-linux-musl -c release --product latch-server
+      # musl's default thread stack is 128 KiB, which nested JSON overflows; Package.swift asks
+      # for 8 MiB through PT_GNU_STACK, as Scripts/build-linux-server.sh also checks.
+      - run: |
+          for arch in x86_64 aarch64; do
+            binary="$(swift build --package-path Packages/LatchAgentCore --swift-sdk "$arch-swift-linux-musl" -c release --show-bin-path)/latch-server"
+            readelf -lW "$binary" | grep "GNU_STACK .* 0x0*800000 " > /dev/null ||
+              { echo "::error::latch-server-$arch: PT_GNU_STACK does not ask for 8 MiB stacks"; exit 1; }
+          done
+      # The binary for the runner's own architecture must start and serve.
+      - run: >-
+          "$(swift build --package-path Packages/LatchAgentCore --swift-sdk "$(uname -m)-swift-linux-musl" -c release --show-bin-path)/latch-server"
+          --version
+      - run: >-
+          LATCH_SERVER_BINARY="$(swift build --package-path Packages/LatchAgentCore --swift-sdk "$(uname -m)-swift-linux-musl" -c release --show-bin-path)/latch-server"
+          swift test --package-path Packages/LatchAgentCore --filter LatchServerExecutableTests
 
   site:
     name: Site budget
@@ -55,7 +152,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      # .github/gitleaks.toml keeps the default rules and allows the fake tokens tests use.
       - name: Scan full history with gitleaks
         run: |
           docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.21.2 \
-            git /repo --redact --no-banner --exit-code 1
+            git /repo --config /repo/.github/gitleaks.toml --redact --no-banner --exit-code 1

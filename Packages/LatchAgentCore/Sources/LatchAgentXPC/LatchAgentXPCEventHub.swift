@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LatchServiceProtocol
 
@@ -151,3 +152,4 @@ public actor LatchAgentXPCEventHub {
         sendNext(id)
     }
 }
+#endif

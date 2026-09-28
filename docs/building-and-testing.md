@@ -6,7 +6,7 @@ Everything here runs without model access unless it says otherwise.
 
 Open `Apps/LatchMac/Latch.xcodeproj`, select the shared **Latch** scheme, and Run to build the macOS application. The target reuses the same entry point and `LatchMacUI` Swift package as the command-line preview; there is no separate UI implementation.
 
-The local-development app uses bundle ID `dev.latchapp.mac`, requires macOS 15, and is ad-hoc signed with hardened runtime enabled and App Sandbox disabled. No signing account is required. The version is `MARKETING_VERSION` in the two xcconfigs; see [Releasing](#releasing). The app icon is an Icon Composer document at `Apps/LatchMac/Resources/Latch.icon`; `actool` compiles it into the layered macOS 26 appearance plus an `icns` fallback for macOS 15. iOS targets and a background service that outlives the app remain pending. There is no Developer ID signing or notarization, and none is planned.
+The local-development app uses bundle ID `dev.latchapp.mac`, requires macOS 15, and is ad-hoc signed with hardened runtime enabled and App Sandbox disabled. No signing account is required. The version is `MARKETING_VERSION` in the two xcconfigs; see [Releasing](#releasing). The app icon is an Icon Composer document at `Apps/LatchMac/Resources/Latch.icon`; `actool` compiles it into the layered macOS 26 appearance plus an `icns` fallback for macOS 15. A background service that outlives the app remains pending. The iOS app has its own project; see [iOS app](#ios-app). There is no Developer ID signing or notarization, and none is planned.
 
 The SwiftPM preview is still available:
 
@@ -28,7 +28,7 @@ The smoke test opens a real window, exercises AppKit controls and permission she
 With a working local Codex login, an opt-in live test drives the native `SessionModel` against the pinned Codex adapter in a temporary workspace. It checks pre-prompt model and effort changes, a streamed no-tools reply, cancellation, disconnect/reconnect, and a real permission round trip (one approved write, one rejected write). It uses network access and model quota and skips during normal runs:
 
 ```sh
-LATCH_LIVE_CODEX=1 swift test --package-path Apps/LatchMac --filter LiveCodexIntegrationTests
+LATCH_LIVE_CODEX=1 swift test --package-path Packages/LatchSessionKit --filter LiveCodexIntegrationTests
 ```
 
 ## Performance benchmarks
@@ -36,8 +36,8 @@ LATCH_LIVE_CODEX=1 swift test --package-path Apps/LatchMac --filter LiveCodexInt
 Run the opt-in local performance comparisons (no network or model quota):
 
 ```sh
-LATCH_HISTORY_BENCHMARK=1 swift test --package-path Apps/LatchMac -c release --filter ChatHistoryRegressionTests
-LATCH_STREAMING_BENCHMARK=1 swift test --package-path Apps/LatchMac -c release --filter TranscriptRenderSchedulerTests
+LATCH_HISTORY_BENCHMARK=1 swift test --package-path Packages/LatchSessionKit -c release --filter ChatHistoryRegressionTests
+LATCH_STREAMING_BENCHMARK=1 swift test --package-path Apps/LatchMac -c release --filter TranscriptStreamingBenchmarkTests
 ```
 
 The history benchmark compares the frozen previous implementation against incremental bookkeeping, including retained snapshots. The rendering benchmark compares per-chunk and coalesced AppKit updates for one and eight sessions with simulated eight-chunk frames; it measures CPU work, not display FPS or end-to-end agent latency. Normal tests cover Unicode, eviction, state/transcript notification routing, pending-render cancellation, and final content.
@@ -52,7 +52,7 @@ bash Scripts/test-mac-app.sh --release
 open .build/LatchMacApp/Build/Products/Debug/Latch.app
 ```
 
-These scripts check bundle metadata, the ad-hoc signature, hardened runtime, and absence of the sandbox entitlement for both the app and the embedded XPC service, then run the app's mock-agent smoke test and require it to have gone through a separate service process. Nothing is installed or registered as a background service. The built apps remain under `.build/LatchMacApp/Build/Products/{Debug,Release}`. Release executables are arm64-only, stripped before signing, with separate dSYMs; the Release script checks the slice and the dSYM UUIDs, and still runs the actual Release smoke code. Debug builds remain unstripped.
+These scripts check bundle metadata, the ad-hoc signature, hardened runtime, and absence of the sandbox entitlement for both the app and the embedded XPC service, then run the app's mock-agent smoke test and require it to have gone through a separate service process, then the [remote smoke](#remote-smoke-test) against a `latch-server` on loopback. Nothing is installed or registered as a background service. The built apps remain under `.build/LatchMacApp/Build/Products/{Debug,Release}`. Release executables are arm64-only, stripped before signing, with separate dSYMs; the Release script checks the slice and the dSYM UUIDs, and still runs the actual Release smoke code. Debug builds remain unstripped.
 
 The bundle smoke runs its executable directly with the terminal environment. Finder and Dock launches are also supported by filesystem-only discovery of common local agent locations and Node installations (including fnm, nvm, and Volta); Latch does not run shell startup files. For tools outside those locations, use Custom ACP Agent and choose an executable or wrapper. The mock smoke covers silent first launch, hidden built-in commands, draft retry, compact composer bounds at minimum and large window sizes, and genuine permission sheets; it does not validate live provider authentication or network setup.
 
@@ -121,13 +121,160 @@ swift test --package-path Packages/LatchServiceProtocol
 LATCH_LIVE_CODEX_TEST=1 swift test --package-path Packages/LatchAgentCore
 ```
 
+## Linux and latch-server
+
+### Package tests on Linux
+
+With [Apple's container tool](https://github.com/apple/container) installed and running (`container system start`):
+
+```sh
+bash Scripts/test-linux.sh
+bash Scripts/test-linux.sh LatchAgentCore
+bash Scripts/test-linux.sh --static
+```
+
+The script runs the `LatchACP`, `LatchServiceProtocol` and `LatchAgentCore` suites, or only the packages named, in one `swift:6.4.0-noble` container with 4 CPUs and 4 GB. Build products go under `.build/linux`, apart from the macOS builds; run one invocation at a time, because they share it. `--static` also installs the Swift 6.4.0 Static Linux SDK, checksum pinned, into a `latch-swiftpm` volume so it is downloaded once; builds `latch-server` for x86_64 and aarch64 musl; and runs `LatchServerExecutableTests` against the binary for the container's architecture. The first run pulls the image and needs network access.
+
+Some tests exist on one platform only. `LinuxChildProcessTests` cover the Linux spawner: an agent spawned from a Swift concurrency thread starts with no blocked or ignored signals and no descriptor but its standard streams, stops on SIGTERM without being force-killed, and is reported gone promptly when a background child still holds its output. The client tests need Network.framework and run only on macOS.
+
+### Server and protocol tests
+
+`LatchAgentServerTests`, in `LatchAgentCore`, cover the replay hub and its journal, the socket layer byte for byte through a plain POSIX client, the token file, the listen policy, the command line, and agent resolution. On macOS, `RemoteServerClientTests` also runs `LatchRemoteRuntimeChannel` against the real server with a shell mock agent. Their mock agents follow the single-key `case` rule in [AGENTS.md](../AGENTS.md).
+
+`LatchServerExecutableTests` runs the built `latch-server` as a process: `--version`, `token` and `pair`, two first runs agreeing on one token, SIGTERM stopping agents and exiting cleanly, SIGHUP closing connections after a rotation, and a deeply nested hello. It looks for the binary next to the test bundle, or at `LATCH_SERVER_BINARY`:
+
+```sh
+LATCH_SERVER_BINARY=/path/to/latch-server swift test --package-path Packages/LatchAgentCore --filter LatchServerExecutableTests
+```
+
+In `LatchServiceProtocol`, `LatchRemoteProtocolTests` pin the JSON of every frame, command, response and event with golden fixtures, check that unknown types, kinds, codes and keys still decode, and cover framing, tokens, pairing strings and the address checks. `LatchRemoteClientTests` run the client against a fake server: the destination check, backoff, reconnects, re-attaching, and turns that end while the link is down.
+
+### Static binaries
+
+```sh
+bash Scripts/build-linux-server.sh
+```
+
+builds static musl `latch-server` binaries in `.build/linux-server/latch-server-x86_64` and `latch-server-aarch64`, with debug info stripped and the symbol table kept. It checks that the one for this machine starts and that both ask for 8 MiB thread stacks. It pins the same image and SDK as `Scripts/test-linux.sh`; change both together. [Running latch-server](server.md) covers installing one.
+
+### iOS build check
+
+The wire types and the client stay buildable for an iOS app, and so does the app's code:
+
+```sh
+swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteProtocol \
+  --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteClient \
+  --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+swift build --package-path Apps/LatchiOS \
+  --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+```
+
+The last needs no Xcode 27: it builds the `LatchiOSUI` library, not the app and its icon.
+
+### App tests against latch-server
+
+In `Packages/LatchSessionKit`, `RemoteSessionLiveTests` and `RemoteSessionReattachTests` run sessions through the model, and in `Apps/LatchMac` their window counterparts (`RemoteSessionLiveWindowTests` and the window cases of `RemoteSessionReattachTests`) run them through the real window, against `latch-server`'s hub and network layer, listening on 127.0.0.1 inside the test process, with shell mock agents. The live tests cover streaming, permissions, dropped links, a server that never answers, a refused token and an edited server, a server shutting down, and an agent stopped by another client. The re-attach tests run Latch twice against one server: quitting mid-turn, idle, or with a permission pending, then relaunching; a turn that ended while Latch was closed; a restarted server; an agent that exited or was stopped; evicted output; and closing and undoing. `RemoteSessionTests` and `ServersSettingsTests` cover remote locations, saving, the sidebar, attachments and the Servers pane.
+
+### Remote smoke test
+
+After the XPC smoke, `Scripts/test-mac-app.sh` builds `latch-server` for this Mac, starts it on a free loopback port with a throwaway config directory, and runs the bundled app with `--smoke-test-remote latch://127.0.0.1:PORT?token=… FOLDER`. The app adds that server, with a custom agent command running a shell mock agent it writes into the folder, and, through the real window, composer and sheet:
+
+- creates a remote session, selected under the server in the sidebar;
+- streams a reply, and approves a permission request in its sheet;
+- drops the link mid-turn, checks that the banner says it is reconnecting while the agent finishes the turn on the server, then reconnects and checks that the output from while the link was down is replayed and that the prompt ran once;
+- quits through the normal path, and checks that the quit saved the session's runtime, with the sequence it had reached, in a real session store on disk.
+
+The smoke waits 30 seconds between reconnects, so the link comes back only when it asks. After the app has exited, the script checks that the agent is still running and that the server has not logged it stopped, then sends the server SIGTERM and requires it to exit 0 within ten seconds, log the runtime as stopped, and take the agent with it. The smoke does not relaunch the app; re-attaching is covered by `RemoteSessionReattachTests`. CI runs it in the Mac app bundle job.
+
+### Testing against a Linux server locally
+
+To try the Mac app against the Linux build, run a static binary in Apple's container tool. The container runs as root, hence `--allow-root`, and has to listen on its own network address rather than loopback:
+
+```sh
+bash Scripts/build-linux-server.sh
+container run -d --name latch-linux -v "$PWD/.build/linux-server:/opt/latch" swift:6.4.0-noble \
+  /opt/latch/latch-server-aarch64 --allow-root --allow-unencrypted-network --listen 0.0.0.0:7428
+container ls                      # the IP column is the container's address, such as 192.168.64.2/24
+container exec latch-linux /opt/latch/latch-server-aarch64 pair --host CONTAINER-IP --allow-root
+```
+
+`CONTAINER-IP` is that address without its prefix length, such as `192.168.64.2`; `pair` refuses `192.168.64.2/24`. The subcommand has to come first, before any option. Paste the pairing string into Settings → Servers. The container's address is neither loopback nor Tailscale, so Latch refuses to send the token until the server's Allow unencrypted network is on; the traffic stays on the Mac's virtual network. Alternatively, forward a port on the Mac's 127.0.0.1 to the container's address and pair with `--host 127.0.0.1`, which needs no exception; `ssh -N -L 7428:CONTAINER-IP:7428 localhost` is one such forward, and needs Remote Login on in System Settings → General → Sharing. Do not rely on `container run --publish 127.0.0.1:…`: with container 1.4.1 it accepted connections on the Mac but never forwarded them. The image has no agents; give the server a custom agent command in Settings, or install one in the container.
+
+The remote smoke can run against such a server too, through a loopback forward, since it never allows an unencrypted network: `Latch.app/Contents/MacOS/Latch --smoke-test-remote 'latch://127.0.0.1:PORT?token=…' FOLDER`. The app writes the mock agent into `FOLDER` on the Mac and the server runs it from its own filesystem, so mount the folder into the container at the same absolute path, symbolic links resolved (`/private/tmp`, not `/tmp`). The mount must be writable: the agent writes its process ID and logs into the folder, and the smoke reads them there to follow the turn and check that the prompt ran once.
+
+### CI
+
+Besides the macOS package tests, the app tests with the XPC probe and the site budget, CI runs:
+
+- **Linux package tests:** the three package suites in `swift:6.4.0-noble` on x86_64 and arm64 runners.
+- **Static Linux build:** both musl binaries on an x86_64 and an arm64 runner. Each must ask for 8 MiB thread stacks in `PT_GNU_STACK`, and on each runner the binary for its architecture must print its version and pass `LatchServerExecutableTests`.
+- **iOS build check:** the three builds above; the last compiles the app's code with `LatchSessionKit` and `LatchAgentCore`.
+- **Mac app bundle and smoke:** `Scripts/test-mac-app.sh`, on GitHub's `xcode-27` image, since `actool` before Xcode 27 cannot compile the icon and the `macos-26` image carries Xcode 26 only. Without focus, the smoke's permission check falls back to Escape and prints a note.
+- **iOS app:** `Scripts/test-ios-app.sh`, described under [iOS app](#ios-app), on the same `xcode-27` image; the job fails if the Xcode there is older than 27. When the runner has no iOS Simulator runtime, the script builds and checks the app and says it ran nothing.
+- **Secret scan:** gitleaks over the whole history, with `.github/gitleaks.toml`, which keeps the default rules and allows the fake tokens the tests use. Give a new fixture token the same form, or add it there.
+
+The `xcode-27` image is a preview on GitHub and may queue.
+
+The macOS package tests include `LatchSessionKit`.
+
+## iOS app
+
+The iPhone and iPad app is `Apps/LatchiOS/Latch.xcodeproj`, scheme **Latch iOS**, bundle ID `dev.latchapp.ios`, iOS 18 and later. Its code is the `LatchiOSUI` library in `Apps/LatchiOS/Package.swift`; the app target has only an entry point. It needs Xcode 27, for the same `actool` reason as the Mac app. [Latch for iPhone and iPad](ios.md#getting-the-app) covers running it on a device with your own team and bundle ID in `Configuration/Local.xcconfig`.
+
+### Simulator runtime
+
+The tests and smoke tests need an iOS Simulator runtime. Xcode may not have one; install the current one with:
+
+```sh
+xcodebuild -downloadPlatform iOS
+```
+
+### The verification script
+
+```sh
+bash Scripts/test-ios-app.sh
+bash Scripts/test-ios-app.sh --release
+bash Scripts/test-ios-app.sh --screenshots /tmp/latch-ios-shots
+```
+
+The script builds the app for the Simulator in the chosen configuration, Debug by default, and the tests, which are always Debug because they import `LatchiOSUI` with `@testable`. Build products go under `.build/LatchiOSApp`. It checks the built app's metadata, the `latch` URL scheme, a single scene, the local-network usage string, the compiled layered icon, and that the binary carries a keychain access group for the bundle ID it was built with. Without a Simulator runtime it stops there, with a note saying how to install one.
+
+With a runtime, it uses the newest one installed, and reuses or creates two devices on it, **Latch iPhone** and **Latch iPad**, an 11-inch iPad when the runtime has one, booting them if needed and shutting down on exit only those it booted. Then:
+
+- **Tests.** `LatchiOSUITests`, a target of the Xcode project hosted by the app, run on Latch iPhone. Hosted, they have the app's entitlements, so the Keychain test uses the real Keychain. The app's scene sees the test configuration and shows an empty window, reading no saved servers or sessions.
+- **Launch smoke.** On each device, with the app installed afresh, `--smoke-test` waits for the window, the split view and the "No Servers" state with its Add Server button, in the sessions list on iPhone and in the session column on iPad, where the sidebar must not repeat it; prints one `IOS SMOKE:` line; and exits.
+- **Remote smoke,** Debug only. The script builds `latch-server` for this Mac, starts it on a free loopback port with a throwaway config directory (the Simulator shares the Mac's loopback and files), and on each device, installed afresh, runs `--smoke-test-remote latch://127.0.0.1:PORT?token=… FOLDER`. Through its own screens, the app adds the server through the Keychain store, starts a custom agent from New Session, streams a reply, answers a permission sheet with the agent's option, drops the link mid-turn and checks that the turn completes once with nothing repeated, adopts a runtime another connection launched and prompted and checks its history, leaves and returns through the scene delegate and checks that both sessions attach again and take a prompt, then removes the server and its Keychain token. Its agent is `RemoteMockAgent`, a shell script the app writes into the folder, which the server runs. The script then requires the smoke to have gone over the network to that port, the server to have launched two agents per device and stopped none, since removing a server only detaches, and to have refused or failed nothing; finally it sends SIGTERM and requires the server to exit 0 and stop all four agents.
+
+`--release` builds and checks the Release app and runs the launch smoke on it. The tests still run from a Debug build, and the remote smoke and screenshots, which are Debug only, are skipped.
+
+### Screenshots and fixtures
+
+`--screenshots DIR`, with a Debug build, launches the app with `--ui-fixture <screen>` for each screen: made-up servers and sessions, with a scripted agent, and nothing saved or reached. It captures each on the iPhone and the iPad in light and dark, five more at an accessibility text size, and New Session and the permission sheet at the largest, 80 screenshots in all, as `<device>-<screen>-<appearance>[-<size>].png`. The screens are `onboarding`, `sessions`, `new-session`, `servers`, `server-add`, `server-edit`, `banner`, `conversation`, `markdown`, `streaming`, `photos`, `slash`, `permission`, `reconnecting`, `error` and `empty`, and `split` on the iPad. In them vps's home folder is known, as after a handshake, so its paths read as `~/…`, and where the sample conversation is shown whole, the photo sent with its last prompt shows as the picture this device kept of it. Screenshots of the running app show glass and blur as they are. The script puts each device's appearance and text size back afterwards, and terminates the app there.
+
+Two snapshot suites in the tests, `ShellSnapshotTests` and `SessionSnapshotTests`, render screens to PNGs for review, in `/tmp/latch-ios-shell` and `/tmp/latch-ios-session`, or in `LATCH_SNAPSHOT_DIR` when it is set. Nothing is compared. They skip unless `LATCH_SNAPSHOTS` is set in the test process. Both variables are read there, and `xcodebuild` passes a variable to it only when prefixed with `TEST_RUNNER_`, as in `TEST_RUNNER_LATCH_SNAPSHOT_DIR`:
+
+```sh
+TEST_RUNNER_LATCH_SNAPSHOTS=1 xcodebuild -project Apps/LatchiOS/Latch.xcodeproj -scheme 'Latch iOS' \
+  -derivedDataPath .build/LatchiOSApp -destination 'platform=iOS Simulator,name=Latch iPhone' \
+  test -only-testing:LatchiOSUITests/SessionSnapshotTests
+```
+
+Snapshots draw a window's layer, where glass and blur come out as their tint only; the fixtures show them. In the tests a sheet's presentation never finishes, so the session screen's tests present and dismiss the permission sheet through `presentSheet` and `dismissSheet`, which they replace; presenting over another controller is left to the smoke tests.
+
+### Session layer tests
+
+`swift test --package-path Packages/LatchSessionKit` runs on macOS; the package is not part of the Linux suites. It covers the session model, streaming and history, configuration, the permission queue, saved sessions and server profiles, prompt attachments, and remote sessions against a real hub and socket layer on loopback: see [App tests against latch-server](#app-tests-against-latch-server). The opt-in live Codex test and the history benchmark above are in it too.
+
 ## Releasing
 
-Releases are built locally, because hosted CI runners cannot compile the app icon yet, and are ad-hoc signed: there is no Developer ID and no notarization.
+Releases are built locally, with Xcode 27 and Apple's container tool running, and are ad-hoc signed: there is no Developer ID and no notarization. A release carries the Mac app and `latch-server` for Linux; the iOS app is built by whoever runs it.
 
-1. Set `MARKETING_VERSION` in both `Apps/LatchMac/Configuration/App.xcconfig` and `AgentService.xcconfig`, commit, and push `main`.
-2. Rehearse with `bash Scripts/release.sh --dry-run 0.2.0`. It runs the Release bundle verification and smoke test, archives the app with `ditto`, unpacks the archive again to check the signature survived, and leaves the zip, its `.sha256`, and the dSYMs in `.build/release/v0.2.0`.
-3. Publish with `bash Scripts/release.sh 0.2.0`. It refuses unless the tree is clean, `main` matches `origin/main`, the tag is new, and both xcconfigs carry the version; then it tags, pushes the tag, and creates the GitHub release with generated notes and the checksum.
+1. Set `MARKETING_VERSION` in `Apps/LatchMac/Configuration/App.xcconfig`, `AgentService.xcconfig` and `Apps/LatchiOS/Configuration/App.xcconfig`, and `LatchServerVersion.current` in `Packages/LatchAgentCore/Sources/LatchAgentServer/LatchServerVersion.swift`. Increase `CURRENT_PROJECT_VERSION` in the same three xcconfigs by one. Update the version in the README's "Early development" note and in `site/index.html`'s heading. Commit, and push `main`.
+2. Rehearse with `bash Scripts/release.sh --dry-run 0.2.0`. It runs the Release bundle verification and smoke test, archives the app with `ditto`, unpacks the archive again to check the signature survived, then builds `latch-server` for Linux with `Scripts/build-linux-server.sh`, packs each architecture's binary alone into `latch-server-0.2.0-linux-x86_64.tar.gz` and `latch-server-0.2.0-linux-aarch64.tar.gz`, checks that each is an ELF executable for its architecture, and runs the aarch64 one from its tarball in a container, where `--version` must print the release's version. It leaves the zip, the tarballs, a `.sha256` for each, and the dSYMs in `.build/release/v0.2.0`.
+3. Publish with `bash Scripts/release.sh 0.2.0`. It refuses unless the tree is clean, `main` matches `origin/main`, the tag is new, the three xcconfigs and `LatchServerVersion` carry the version, and the container tool is running; then it tags, pushes the tag, and creates the GitHub release with generated notes, a line on the server tarballs, and every checksum.
+
+The Mac zip's name and its `.sha256` are what `Scripts/install.sh` downloads; keep both as they are.
 
 Do not mark a release as a pre-release: `Scripts/install.sh` follows GitHub's "latest release", which skips pre-releases. To test the installer without publishing, point it at a local copy of the release layout:
 

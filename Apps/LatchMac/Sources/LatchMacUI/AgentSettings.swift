@@ -1,4 +1,5 @@
 import Foundation
+import LatchAgentCore
 
 /// Agent preferences that outlive a session: which agents the composer picker offers, and
 /// the command a custom ACP agent runs. A session still owns the harness it connected on —

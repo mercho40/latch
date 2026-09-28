@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LatchAgentCore
 import LatchServiceProtocol
@@ -209,3 +210,4 @@ private final class EventTestClient {
         listener.invalidate()
     }
 }
+#endif

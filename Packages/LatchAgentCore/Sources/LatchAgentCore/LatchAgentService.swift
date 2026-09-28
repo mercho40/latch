@@ -1,6 +1,8 @@
+import Foundation
 import LatchACP
 import LatchServiceProtocol
 
+#if os(macOS) || os(Linux)
 /// Transport-neutral command boundary for the macOS Latch Agent.
 ///
 /// XPC and Network.framework adapters can encode messages as data and delegate execution here.
@@ -12,10 +14,12 @@ public actor LatchAgentService {
 
     public init(
         registry: AgentRuntimeRegistry = AgentRuntimeRegistry(),
+        // The version of the bundle this runs in, the Mac's XPC service, which carries the
+        // app's; latch-server passes its own.
         clientInfo: ACPImplementation = ACPImplementation(
             name: "latch-agent",
             title: "Latch Agent",
-            version: "0.1.0"
+            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         )
     ) {
         self.registry = registry
@@ -42,7 +46,7 @@ public actor LatchAgentService {
         } catch {
             return LatchAgentReply(
                 requestID: request.requestID,
-                result: .failure(publicFailure(for: error))
+                result: .failure(Self.publicFailure(for: error))
             )
         }
     }
@@ -106,7 +110,9 @@ public actor LatchAgentService {
         await registry.stopAll()
     }
 
-    private func publicFailure(for error: any Error) -> LatchAgentFailure {
+    /// What a client may see of a failed command: agent RPC display text after redaction, or
+    /// a fixed message. Never native errors, paths, or stderr.
+    public static func publicFailure(for error: any Error) -> LatchAgentFailure {
         let message: String
         switch error {
         case let error as ACPJSONRPCErrorObject:
@@ -121,9 +127,12 @@ public actor LatchAgentService {
             message = "Runtime not found."
         case AgentRuntimeRegistryError.permissionRequestNotFound:
             message = "Permission request not found."
+        case AgentRuntimeRegistryError.invalidPermissionOption:
+            message = "The selected option was not offered by this permission request."
         default:
             message = "Agent command failed."
         }
         return LatchAgentFailure(code: .commandFailed, message: message)
     }
 }
+#endif

@@ -32,14 +32,23 @@ final class AttentionCenter {
         var allowOptionID: String?
         var rejectOptionID: String?
         var isPrompting: Bool
+        /// Counts the session's turns that have ended. Only a new end is announced: a turn
+        /// that stops being awaited because its link failed, or because Latch is quitting,
+        /// runs on, and has not finished.
+        var turnsEnded: Int
+        /// The last turn ended because its agent was stopped on the server.
+        var lastTurnStopped: Bool
 
         init(workspaceName: String, permission: UUID? = nil, allowOptionID: String? = nil,
-             rejectOptionID: String? = nil, isPrompting: Bool = false) {
+             rejectOptionID: String? = nil, isPrompting: Bool = false, turnsEnded: Int = 0,
+             lastTurnStopped: Bool = false) {
             self.workspaceName = workspaceName
             self.permission = permission
             self.allowOptionID = allowOptionID
             self.rejectOptionID = rejectOptionID
             self.isPrompting = isPrompting
+            self.turnsEnded = turnsEnded
+            self.lastTurnStopped = lastTurnStopped
         }
     }
 
@@ -72,10 +81,10 @@ final class AttentionCenter {
             if let stale = previous?.permission, stale != state.permission {
                 presenter?.withdraw(id: Self.permissionID(stale))
             }
-            if previous?.isPrompting == true, !state.isPrompting, !isSessionVisible(id) {
+            if let previous, state.turnsEnded != previous.turnsEnded, !isSessionVisible(id) {
                 presenter?.post(id: Self.finishedID(id), title: "Latch · \(state.workspaceName)",
-                                body: "The agent finished its turn.", actions: [],
-                                userInfo: ["session": id.uuidString])
+                                body: state.lastTurnStopped ? "The agent was stopped on its server." : "The agent finished its turn.",
+                                actions: [], userInfo: ["session": id.uuidString])
             }
             if state.isPrompting, previous?.isPrompting != true {
                 presenter?.withdraw(id: Self.finishedID(id))

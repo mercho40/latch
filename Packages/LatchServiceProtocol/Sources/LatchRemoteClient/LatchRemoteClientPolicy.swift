@@ -1,0 +1,104 @@
+#if canImport(Network)
+import Foundation
+import LatchRemoteProtocol
+import Network
+
+/// Decides, once TCP is up and before anything is written, whether the token may go to the peer.
+public enum LatchRemoteDestinationPolicy {
+    /// The bytes of an IP endpoint's address, or nil for anything else.
+    public static func address(of endpoint: NWEndpoint?) -> [UInt8]? {
+        guard case let .hostPort(host, _)? = endpoint else { return nil }
+        switch host {
+        case let .ipv4(address): return Array(address.rawValue)
+        case let .ipv6(address): return Array(address.rawValue)
+        case .name: return nil
+        @unknown default: return nil
+        }
+    }
+
+    /// The interface a connected path runs over. A connection's path lists only the one it uses.
+    public static func interfaceName(of path: NWPath?) -> String? {
+        path?.availableInterfaces.first?.name
+    }
+
+    /// Loopback peers always qualify, and tailnet peers when the path runs through a tunnel
+    /// from a tailnet address of this device's own; any other peer, or one whose address is
+    /// unknown, only when the user allowed an unencrypted network for this server.
+    ///
+    /// A tailnet address alone proves nothing: with Tailscale down, traffic to `100.64.0.0/10`
+    /// follows the default route, and whoever answers there would read the token. Tailscale
+    /// on macOS and iOS runs over a `utun` interface, the same rule the server applies to
+    /// its own tailnet address. So does every other VPN, and iOS runs one at a time: with
+    /// another one on, Tailscale is off and a full tunnel carries tailnet addresses into that
+    /// VPN's network. Tailscale gives this device a tailnet address on its interface, which
+    /// other VPNs do not, so the connection must come from one as well. A VPN that hands out
+    /// addresses in `100.64.0.0/10` itself would still pass.
+    public static func mayAuthenticate(peerAddress: [UInt8]?, localAddress: [UInt8]?, interfaceName: String?,
+                                       allowUnencryptedNetwork: Bool) -> Bool {
+        if allowUnencryptedNetwork { return true }
+        guard let peerAddress, let classification = LatchRemoteAddressPolicy.classify(peerAddress) else { return false }
+        switch classification {
+        case .loopback: return true
+        case .tailnet:
+            guard interfaceName?.hasPrefix("utun") == true, let localAddress else { return false }
+            return LatchRemoteAddressPolicy.classify(localAddress) == .tailnet
+        case .unspecified, .other: return false
+        }
+    }
+
+    /// A numeric form of the address for messages; IPv4-mapped IPv6 prints as IPv4.
+    public static func describe(_ address: [UInt8]?) -> String {
+        guard let address, let bytes = LatchRemoteAddressPolicy.unmapped(address) else { return "an unknown address" }
+        if bytes.count == 4, let ipv4 = IPv4Address(Data(bytes)) { return "\(ipv4)" }
+        if let ipv6 = IPv6Address(Data(bytes)) { return "\(ipv6)" }
+        return "an unknown address"
+    }
+}
+
+/// The wait before each reconnect: `initial`, doubling after every failed attempt, capped at
+/// `maximum`, and jittered by the channel.
+public struct LatchRemoteBackoff: Equatable, Sendable {
+    public var initial: Duration
+    public var maximum: Duration
+
+    public init(initial: Duration = .seconds(1), maximum: Duration = .seconds(30)) {
+        precondition(initial > .zero && maximum >= initial)
+        self.initial = initial
+        self.maximum = maximum
+    }
+
+    /// The delay after `failures` attempts that did not get connected; 0 is the first retry.
+    public func delay(afterFailures failures: Int) -> Duration {
+        var delay = initial
+        for _ in 0..<max(0, failures) {
+            delay *= 2
+            if delay >= maximum { return maximum }
+        }
+        return delay
+    }
+
+    /// `delay(afterFailures:)` scaled by a random factor between one half and one, so the
+    /// clients of a server that dropped them all at once, or turned some of a burst away, do
+    /// not all come back together again.
+    public func jitteredDelay(afterFailures failures: Int, factor: Double = Double.random(in: 0.5...1)) -> Duration {
+        delay(afterFailures: failures) * min(max(factor, 0.5), 1)
+    }
+}
+
+/// Admits each runtime event once: sequences only move forward, and gaps are allowed because
+/// the server may drop replayed history or evict what a slow client never read.
+struct LatchRemoteSequenceCursor: Equatable, Sendable {
+    /// The last admitted sequence; 0 before the first event.
+    private(set) var last: UInt64
+
+    init(after last: UInt64 = 0) {
+        self.last = last
+    }
+
+    mutating func admit(_ sequence: UInt64) -> Bool {
+        guard sequence > last else { return false }
+        last = sequence
+        return true
+    }
+}
+#endif

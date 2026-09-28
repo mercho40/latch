@@ -2,7 +2,7 @@
 # Install or update Latch from a GitHub release:
 #   curl -fsSL https://latchapp.dev/install.sh | sh
 #
-# LATCH_VERSION=0.1.0   install that release instead of the latest
+# LATCH_VERSION=0.2.0   install that release instead of the latest
 # LATCH_INSTALL_DIR=... install somewhere other than /Applications
 #
 # curl does not mark what it downloads as quarantined, so the ad-hoc-signed app opens without a

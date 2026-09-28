@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LatchServiceProtocol
 
@@ -132,3 +133,4 @@ public final class LatchAgentXPCClient: @unchecked Sendable {
         }
     }
 }
+#endif

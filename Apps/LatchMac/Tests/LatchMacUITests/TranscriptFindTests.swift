@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 /// ⌘F searches the conversation on screen: every visible message, in reading order.
 @MainActor

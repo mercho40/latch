@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LatchAgentCore
 import LatchAgentXPC
@@ -147,3 +148,4 @@ final class TestListenerDelegate: NSObject, NSXPCListenerDelegate {
         return true
     }
 }
+#endif

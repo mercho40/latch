@@ -1,4 +1,5 @@
 import AppKit
+import LatchAgentCore
 
 /// The Agents pane: one row per harness Latch can launch, saying what state it is in, with a
 /// switch for whether the agent menu offers it. The custom agent's command is the only thing

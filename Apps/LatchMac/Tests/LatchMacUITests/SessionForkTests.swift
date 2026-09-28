@@ -1,6 +1,8 @@
 import AppKit
+import LatchAgentCore
 import XCTest
 @testable import LatchMacUI
+@testable import LatchSessionKit
 
 /// A session that already holds a transcript owns its harness: switching forks a sibling
 /// session in the same workspace instead of discarding the original's context.

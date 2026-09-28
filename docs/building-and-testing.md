@@ -6,7 +6,7 @@ Everything here runs without model access unless it says otherwise.
 
 Open `Apps/LatchMac/Latch.xcodeproj`, select the shared **Latch** scheme, and Run to build the macOS application. The target reuses the same entry point and `LatchMacUI` Swift package as the command-line preview; there is no separate UI implementation.
 
-The local-development app uses bundle ID `dev.latchapp.mac`, requires macOS 15, and is ad-hoc signed with hardened runtime enabled and App Sandbox disabled. No signing account is required. The version is `MARKETING_VERSION` in the two xcconfigs; see [Releasing](#releasing). The app icon is an Icon Composer document at `Apps/LatchMac/Resources/Latch.icon`; `actool` compiles it into the layered macOS 26 appearance plus an `icns` fallback for macOS 15. iOS targets and a background service that outlives the app remain pending. There is no Developer ID signing or notarization, and none is planned.
+The local-development app uses bundle ID `dev.latchapp.mac`, requires macOS 15, and is ad-hoc signed with hardened runtime enabled and App Sandbox disabled. No signing account is required. The version is `MARKETING_VERSION` in the two xcconfigs; see [Releasing](#releasing). The app icon is an Icon Composer document at `Apps/LatchMac/Resources/Latch.icon`; `actool` compiles it into the layered macOS 26 appearance plus an `icns` fallback for macOS 15. A background service that outlives the app remains pending. The iOS app has its own project; see [iOS app](#ios-app). There is no Developer ID signing or notarization, and none is planned.
 
 The SwiftPM preview is still available:
 
@@ -206,6 +206,57 @@ Besides the macOS package tests, the app tests with the XPC probe, the site budg
 - **Linux package tests:** the three package suites in `swift:6.4.0-noble` on x86_64 and arm64 runners.
 - **Static Linux build:** both musl binaries; the x86_64 one must print its version and pass `LatchServerExecutableTests`.
 - **iOS build check:** the two builds above.
+- **iOS app:** `Scripts/test-ios-app.sh`, described under [iOS app](#ios-app), on a runner with Xcode 27 or later selected. When the runner has no such Xcode, the job skips the script and leaves a notice, since `actool` before 27 cannot compile the icon; when it has no iOS Simulator runtime, the script builds and checks the app and says it ran nothing.
+
+The macOS package tests include `LatchSessionKit`.
+
+## iOS app
+
+The iPhone and iPad app is `Apps/LatchiOS/Latch.xcodeproj`, scheme **Latch iOS**, bundle ID `dev.latchapp.ios`, iOS 18 and later. Its code is the `LatchiOSUI` library in `Apps/LatchiOS/Package.swift`; the app target has only an entry point. It needs Xcode 27, for the same `actool` reason as the Mac app. [Latch for iPhone and iPad](ios.md#getting-the-app) covers running it on a device with your own team and bundle ID in `Configuration/Local.xcconfig`.
+
+### Simulator runtime
+
+The tests and smoke tests need an iOS Simulator runtime. Xcode may not have one; install the current one with:
+
+```sh
+xcodebuild -downloadPlatform iOS
+```
+
+### The verification script
+
+```sh
+bash Scripts/test-ios-app.sh
+bash Scripts/test-ios-app.sh --release
+bash Scripts/test-ios-app.sh --screenshots /tmp/latch-ios-shots
+```
+
+The script builds the app for the Simulator in the chosen configuration, Debug by default, and the tests, which are always Debug because they import `LatchiOSUI` with `@testable`. Build products go under `.build/LatchiOSApp`. It checks the built app's metadata, the `latch` URL scheme, a single scene, the local-network usage string, the compiled layered icon, and that the binary carries a keychain access group for the bundle ID it was built with. Without a Simulator runtime it stops there, with a note saying how to install one.
+
+With a runtime, it uses the newest one installed, and reuses or creates two devices on it, **Latch iPhone** and **Latch iPad**, an 11-inch iPad when the runtime has one, booting them if needed and shutting down on exit only those it booted. Then:
+
+- **Tests.** `LatchiOSUITests`, a target of the Xcode project hosted by the app, run on Latch iPhone. Hosted, they have the app's entitlements, so the Keychain test uses the real Keychain. The app's scene sees the test configuration and shows an empty window, reading no saved servers or sessions.
+- **Launch smoke.** On each device, with the app installed afresh, `--smoke-test` waits for the window, the split view and the sessions list's "No servers yet" state, prints one `IOS SMOKE:` line, and exits.
+- **Remote smoke,** Debug only. The script builds `latch-server` for this Mac, starts it on a free loopback port with a throwaway config directory (the Simulator shares the Mac's loopback and files), and on each device, installed afresh, runs `--smoke-test-remote latch://127.0.0.1:PORT?token=… FOLDER`. Through its own screens, the app adds the server through the Keychain store, starts a custom agent from New Session, streams a reply, answers a permission sheet with the agent's option, drops the link mid-turn and checks that the turn completes once with nothing repeated, adopts a runtime another connection launched and prompted and checks its history, leaves and returns through the scene delegate and checks that both sessions attach again and take a prompt, then removes the server and its Keychain token. Its agent is `RemoteMockAgent`, a shell script the app writes into the folder, which the server runs. The script then requires the smoke to have gone over the network to that port, the server to have launched two agents per device and stopped none, since removing a server only detaches, and to have refused or failed nothing; finally it sends SIGTERM and requires the server to exit 0 and stop all four agents.
+
+`--release` builds and checks the Release app and runs the launch smoke on it. The tests still run from a Debug build, and the remote smoke and screenshots, which are Debug only, are skipped.
+
+### Screenshots and fixtures
+
+`--screenshots DIR`, with a Debug build, launches the app with `--ui-fixture <screen>` for each screen: made-up servers and sessions, with a scripted agent, and nothing saved or reached. It captures each on the iPhone and the iPad in light and dark, and five at an accessibility text size, as `<device>-<screen>-<appearance>[-<size>].png`. The screens are `onboarding`, `sessions`, `new-session`, `servers`, `server-add`, `server-edit`, `banner`, `conversation`, `markdown`, `streaming`, `photos`, `slash`, `permission`, `reconnecting`, `error` and `empty`, and `split` on the iPad. Screenshots of the running app show glass and blur as they are. The script puts each device's appearance and text size back afterwards, and terminates the app there.
+
+Two snapshot suites in the tests, `ShellSnapshotTests` and `SessionSnapshotTests`, render screens to PNGs for review, in `/tmp/latch-ios-shell` and `/tmp/latch-ios-session`, or in `LATCH_SNAPSHOT_DIR` when it is set. Nothing is compared. They skip unless `LATCH_SNAPSHOTS` is set in the test process. Both variables are read there, and `xcodebuild` passes a variable to it only when prefixed with `TEST_RUNNER_`, as in `TEST_RUNNER_LATCH_SNAPSHOT_DIR`:
+
+```sh
+TEST_RUNNER_LATCH_SNAPSHOTS=1 xcodebuild -project Apps/LatchiOS/Latch.xcodeproj -scheme 'Latch iOS' \
+  -derivedDataPath .build/LatchiOSApp -destination 'platform=iOS Simulator,name=Latch iPhone' \
+  test -only-testing:LatchiOSUITests/SessionSnapshotTests
+```
+
+Snapshots draw a window's layer, where glass and blur come out as their tint only; the fixtures show them. In the tests a sheet's presentation never finishes, so the session screen's tests present and dismiss the permission sheet through `presentSheet` and `dismissSheet`, which they replace; presenting over another controller is left to the smoke tests.
+
+### Session layer tests
+
+`swift test --package-path Packages/LatchSessionKit` runs on macOS; the package is not part of the Linux suites. It covers the session model, streaming and history, configuration, the permission queue, saved sessions and server profiles, prompt attachments, and remote sessions against a real hub and socket layer on loopback: see [App tests against latch-server](#app-tests-against-latch-server). The opt-in live Codex test and the history benchmark above are in it too.
 
 ## Releasing
 

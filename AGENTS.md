@@ -1,19 +1,20 @@
 # Notes for coding agents
 
-Latch is a native macOS client for ACP coding agents. Read [README.md](README.md) for what it does and [docs/architecture.md](docs/architecture.md) for how; this file is what you would otherwise learn the hard way.
+Latch is a native macOS client for ACP coding agents, with an iPhone and iPad app for agents on a `latch-server`. Read [README.md](README.md) for what it does and [docs/architecture.md](docs/architecture.md) for how; this file is what you would otherwise learn the hard way.
 
 ## Layout
 
 - `Apps/LatchMac` — the app. `Sources/LatchMacUI` holds the AppKit UI and the local agent clients; `Sources/Latch` is the entry point and `Sources/LatchAgentXPCService` the embedded service's. The Xcode project and the SwiftPM package build the same sources.
+- `Apps/LatchiOS` — the iOS app. `Sources/LatchiOSUI` holds everything; `Sources/LatchiOS` is the entry point. `Latch.xcodeproj` builds the app and its tests (`Tests/LatchiOSUITests`, hosted by the app; scheme `Latch iOS`); `Package.swift` only declares the library. Every session is remote: the app never runs an agent.
 - `Packages/LatchSessionKit` — the session layer without UI, shared with the iOS app: `SessionModel`, saved sessions, server profiles, and remote sessions' client and connector. No UI framework, for macOS and iOS; each app wires its own wake-up to `ChannelRemoteSessionConnector.probeAll()`. `LatchSessionKitTestSupport` runs a real `latch-server` on loopback for its tests and the app's.
 - `Packages/LatchACP` → `Packages/LatchServiceProtocol` → `Packages/LatchAgentCore` — ACP client, wire types, then the service and its XPC layer. `LatchServiceProtocol` also holds the network protocol (`LatchRemoteProtocol`) and its Network.framework client (`LatchRemoteClient`); `LatchAgentCore` also builds `latch-server` (`LatchAgentServer`) for Linux and macOS, and its presets for iOS without the runtime. See [docs/server.md](docs/server.md).
 - The UI never touches an agent runtime in-process. Local sessions go through `LatchAgentXPCClient`, even in the SwiftPM preview; remote sessions through `LatchRemoteClient`.
 
 ## Constraints
 
-- AppKit only: no SwiftUI, no web views, no third-party dependencies.
+- AppKit on the Mac, UIKit on iOS: no SwiftUI, no web views, no third-party dependencies.
 - Swift 6 language mode. `@unchecked Sendable` appears only where a lock or an XPC/process boundary already guards the state; do not add one to quiet a diagnostic.
-- The app: macOS 15 deployment target, arm64 only. The packages also build on Linux (x86_64 and aarch64), and the protocol and client for iOS.
+- The Mac app: macOS 15 deployment target, arm64 only. The iOS app: iOS 18, iPhone and iPad. The packages also build on Linux (x86_64 and aarch64), except `LatchSessionKit`, which is for macOS and iOS.
 - No model names, effort levels, or permission modes are hard-coded; they come from the connected agent.
 
 ## Verify
@@ -50,3 +51,6 @@ A change to anything the user sees is not verified until the bundle script passe
 - **Remote commands are re-sent after a reconnect only because each is idempotent on the server** (turn IDs, same-ID launches, recorded session replies). A new remote command needs that property before the client may retry it; the no-blind-retries rule above still stands everywhere else.
 - **The static musl build needs large thread stacks.** musl's 128 KiB default overflows on deeply nested JSON; `RemoteServer` gives its threads 1 MiB and `latch-server` links with an 8 MiB `PT_GNU_STACK`. `Scripts/build-linux-server.sh` checks the latter; keep both.
 - **The iOS app keeps server tokens only in the Keychain.** Simulator builds are signed ad hoc with `Configuration/Latch.entitlements`, and the tests are hosted by the app for the same reason. A build made with `CODE_SIGNING_ALLOWED=NO` has no keychain access group and stops at launch; there is no file to fall back to.
+- **In the iOS tests a sheet's presentation never finishes.** The test host never completes a presentation transition, so anything waiting for one waits forever. The session screen's tests replace `presentSheet` and `dismissSheet`; check real presentation in the running app (`--smoke-test-remote`, `--ui-fixture`) instead.
+- **The iOS snapshot suites render nothing unless `LATCH_SNAPSHOTS` is set** in the test process: pass `TEST_RUNNER_LATCH_SNAPSHOTS=1` to `xcodebuild`. Otherwise they skip.
+- **One run at a time on the shared simulators.** `Scripts/test-ios-app.sh` reuses the devices named Latch iPhone and Latch iPad, uninstalls the app from them before each smoke, changes their appearance for screenshots, and shuts down those it booted; its builds share `.build/LatchiOSApp`. Two runs, or a run and someone's Xcode session on those devices, break each other.

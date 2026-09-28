@@ -1,6 +1,6 @@
 # Using Latch
 
-Behaviour of the macOS app as it ships today.
+Behaviour of the macOS app as it ships today. The iPhone and iPad app is described in [Latch for iPhone and iPad](ios.md).
 
 ## Sessions and agents
 

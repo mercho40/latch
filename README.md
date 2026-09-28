@@ -21,25 +21,26 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
 - **A fast native transcript.** Incremental Markdown rendering keeps a streamed frame cheap however long the answer gets, with ⌘F find, per-message copy, and system fonts and colors throughout.
 - **Process isolation.** Agents run under an XPC service embedded in the app, not in the UI process. The service admits only the app's own code signature.
 - **Agents on a server.** Run [`latch-server`](docs/server.md) on a Linux or macOS machine and connect to it over Tailscale or an SSH tunnel. Its agents keep running when the Mac sleeps or changes network, and when Latch quits; Latch catches up when it reconnects or next opens.
+- **An iPhone and iPad app.** [Latch for iPhone and iPad](docs/ios.md) drives agents on a `latch-server`: it lists their sessions, takes up one another device started, streams replies, sends prompts and photos, and answers approvals. Pair it by scanning the code `latch-server pair --host NAME --qr` prints with the Camera. You build it yourself.
 
 ## What does not exist yet
 
-Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and a native iPhone or iPad app pairs with it to monitor sessions and answer approvals. **The iOS app and device pairing are not built.** `latch-server` is the first half: it takes a token, not a paired device key, and relies on Tailscale or SSH for encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
+Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and your phone follows it. The iOS app exists, but only as a client of `latch-server`: it cannot reach agents the Mac runs itself. There is no App Store or TestFlight build, and no push notifications, so a request that arrives while the app is suspended waits until you open it. Pairing hands over the server's token, one for every device, not a per-device key, and Tailscale, or an SSH tunnel for the Mac, provides the encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
 
 Other known gaps:
 
 - Releases are ad-hoc signed, not notarized, and there is no update mechanism beyond running the installer again.
 - Agents on this Mac stop when the app quits; the background service that would keep them running is not implemented. Agents on a `latch-server` keep running, but not through a restart of the server; after one, Retry, or the next launch of Latch, starts the agent again and resumes its saved session, if the agent can load one.
 - If the app or its service is killed outright, running local agent processes are not cleaned up.
-- Remote sessions cannot attach files or folders, and a folder on the server is typed, not browsed.
+- Remote sessions, on the Mac and the phone, cannot attach files or folders, and a folder on the server is typed, not browsed. The Mac does not list or take up agents another device started.
 - Permission approval and model/effort/mode switching are covered by mock-agent tests and an opt-in live Codex test, but have not been validated across every provider.
 - The Markdown renderer covers a subset of CommonMark. HTML and remote resources are never rendered or loaded.
-- The app is Apple silicon only.
+- The Mac app is Apple silicon only.
 
 ## Requirements
 
-- macOS 15 or later on Apple silicon
-- Xcode 27. The packages and their tests also build with Xcode 26.6, which is what CI uses, but its `actool` fails on the app's Icon Composer icon, so the app bundle needs 27.
+- macOS 15 or later on Apple silicon; for the iOS app, iOS or iPadOS 18 or later
+- Xcode 27. The packages and their tests also build with Xcode 26.6, which is what CI uses, but its `actool` fails on the app's Icon Composer icon, so either app bundle needs 27.
 - At least one ACP agent. For Codex, sign in with `codex login`; for Claude Code, set up your Claude login and Node.js 22+. First-time setup of either may download its ACP adapter through npm. OpenCode and fx use their installed commands and existing authentication.
 
 ## Install
@@ -67,6 +68,8 @@ The script builds the app, checks its signature and entitlements, and runs the U
 swift run --package-path Apps/LatchMac Latch
 ```
 
+The iPhone and iPad app is built from `Apps/LatchiOS/Latch.xcodeproj` with the **Latch iOS** scheme. It runs in the Simulator without an account; on a device it needs your own signing team, and a bundle ID of your own. [Latch for iPhone and iPad](docs/ios.md#getting-the-app) covers both.
+
 ## Tests
 
 None of these need network or model access:
@@ -75,22 +78,26 @@ None of these need network or model access:
 swift test --package-path Packages/LatchACP
 swift test --package-path Packages/LatchServiceProtocol
 swift test --package-path Packages/LatchAgentCore
+swift test --package-path Packages/LatchSessionKit
 swift test --package-path Apps/LatchMac
+bash Scripts/test-ios-app.sh
 ```
 
-With Apple's container tool, `bash Scripts/test-linux.sh` runs the package tests on Linux. [Building and testing](docs/building-and-testing.md) covers that, the bundle verification scripts, the cross-process XPC probe, benchmarks, and the opt-in live tests.
+The last builds the iOS app and, with an iOS Simulator runtime installed, runs its tests and smoke tests in the Simulator. With Apple's container tool, `bash Scripts/test-linux.sh` runs the package tests on Linux. [Building and testing](docs/building-and-testing.md) covers that, the bundle verification scripts, the cross-process XPC probe, benchmarks, and the opt-in live tests.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
 | `Apps/LatchMac` | The macOS app: Xcode project, the `LatchMacUI` package, and the XPC service host |
+| `Apps/LatchiOS` | The iPhone and iPad app: Xcode project and the `LatchiOSUI` package |
 | `Packages/LatchACP` | ACP client: JSON-RPC over stdio, process transport, sessions, and a command-line probe |
 | `Packages/LatchServiceProtocol` | Codable commands, events, and versioned envelopes between clients and the service; the network protocol and its Network.framework client |
 | `Packages/LatchAgentCore` | Runtime registry, the agent service, its XPC adapter, host, client, and event hub, and `latch-server` |
-| `Scripts` | Bundle, XPC and Linux verification, the Linux server build, the release script, and the installer |
+| `Packages/LatchSessionKit` | The session layer both apps share: the session model, saved sessions, server profiles, and the remote session client |
+| `Scripts` | Mac and iOS bundle, XPC and Linux verification, the Linux server build, the release script, and the installer |
 | `site` | [latchapp.dev](https://latchapp.dev): one static page, no build step |
-| `docs` | [Using Latch](docs/using-latch.md) · [Running latch-server](docs/server.md) · [Architecture](docs/architecture.md) · [Building and testing](docs/building-and-testing.md) · [Roadmap](docs/roadmap.md) |
+| `docs` | [Using Latch](docs/using-latch.md) · [Running latch-server](docs/server.md) · [Latch for iPhone and iPad](docs/ios.md) · [Architecture](docs/architecture.md) · [Building and testing](docs/building-and-testing.md) · [Roadmap](docs/roadmap.md) |
 
 There are no third-party dependencies.
 

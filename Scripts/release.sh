@@ -83,7 +83,7 @@ for arch in x86_64 aarch64; do
     stage="$check/linux-$arch"
     mkdir -p "$stage"
     /usr/bin/install -m 755 "$binary" "$stage/latch-server"
-    COPYFILE_DISABLE=1 /usr/bin/tar -czf "$out/$tarball" --no-mac-metadata --uid 0 --gid 0 --uname root --gname root \
+    COPYFILE_DISABLE=1 /usr/bin/tar -czf "$out/$tarball" --no-mac-metadata --no-xattrs --uid 0 --gid 0 --uname root --gname root \
         -C "$stage" latch-server
     listing="$(/usr/bin/tar -tzf "$out/$tarball")"
     [[ "$listing" == latch-server ]] || fail "$tarball holds $(echo "$listing" | tr '\n' ' ')rather than latch-server alone"

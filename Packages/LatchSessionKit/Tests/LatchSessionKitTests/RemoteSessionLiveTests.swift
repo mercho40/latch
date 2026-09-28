@@ -126,7 +126,10 @@ final class RemoteSessionLiveTests: XCTestCase {
         }
     }
 
-    func testAnIdleSessionLeavesAnotherClientsPermissionToThem() async throws {
+    /// Another client's prompt is followed as a turn of this session's own: it works, offers
+    /// Stop rather than a prompt the server would refuse, and shows the agent's request. It
+    /// answers nothing unasked, and the other client's decision closes its sheet.
+    func testAnIdleSessionFollowsAnotherClientsTurnAndLeavesTheirDecisionToThem() async throws {
         try await LoopbackServer.run { server in
             let model = try await connectedModel(server, connector(server))
             let id = try await server.onlyRuntime()
@@ -140,19 +143,30 @@ final class RemoteSessionLiveTests: XCTestCase {
                 if case let .event(sequence, .permissionRequested(raised, _)) = event { requested = (raised, sequence); break }
             }
             let (raised, sequence) = try XCTUnwrap(requested)
-            // This session has the request too. Give it time to answer, which it must not.
             try await eventually("this session taking the request in") { model.appliedSequence >= sequence }
+            XCTAssertEqual(model.phase, .prompting, "The other client's turn is followed here")
+            XCTAssertEqual(model.status, "Working…")
+            XCTAssertEqual(texts(model).first, "permission please")
+            try await eventually("the request shown here too") { model.permissions.current != nil }
+            await model.send("mine")
+            XCTAssertEqual(server.lines(in: "prompts.log"), 1, "Nothing is sent while another client's turn runs")
+            // Give it time to answer, which it must not do unasked.
             try await Task.sleep(for: .milliseconds(300))
             let pending = try await server.summary(id)?.pendingPermissionCount
             XCTAssertEqual(pending, 1)
             XCTAssertEqual(server.lines(in: "decisions.log"), 0)
+            let ended = model.turnsEnded
             _ = try await other.send(.resolvePermission(runtimeID: id, requestID: raised, outcome: .selected(optionID: "allow-once")))
             let outcome = try await turn.value
             XCTAssertEqual(outcome.stopReason, "end_turn", "The other client's decision, not a refusal from this session")
             XCTAssertNil(outcome.error)
             XCTAssertEqual(server.lines(in: "decisions.log"), 1)
+            try await eventually("the turn's end here") { model.phase == .ready }
             XCTAssertNil(model.permissions.current)
-            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(model.turnsEnded, ended + 1)
+            XCTAssertEqual(model.status, "Ready · end_turn")
+            XCTAssertNil(model.errorMessage)
+            try await eventually("the reply") { self.texts(model) == ["permission please", "askingallowed"] }
         }
     }
 
@@ -208,6 +222,21 @@ final class RemoteSessionLiveTests: XCTestCase {
             XCTAssertFalse(model.errorIsConnectionFailure)
             let id = try await server.onlyRuntime()
             try await eventually("the runtime stopping") { try await server.summary(id)?.lifecycle == .exited }
+        }
+    }
+
+    /// A folder the server does not have is not found by trying again: the advice says what does.
+    func testAFolderTheServerDoesNotHaveSaysToStartANewSession() async throws {
+        try await LoopbackServer.run { server in
+            let connector = connector(server)
+            let model = SessionModel(makeClient: { connector.makeClient(serverID: server.profile.id) })
+            let gone = server.workspace.appendingPathComponent("does-not-exist").path
+            await model.connect(remote: .custom(server.agentCommand), path: gone)
+            XCTAssertEqual(model.phase, .disconnected)
+            XCTAssertEqual(model.errorMessage, "There is no folder at \(gone) on the server.")
+            XCTAssertEqual(model.errorAdvice,
+                           "A session keeps the folder it was started in. Start a new session in a folder that exists.")
+            XCTAssertFalse(model.errorIsConnectionFailure)
         }
     }
 

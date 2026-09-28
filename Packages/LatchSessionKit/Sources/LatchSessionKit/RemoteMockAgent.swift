@@ -1,3 +1,4 @@
+#if DEBUG
 /// An ACP agent in `sh` for remote sessions. Every `case` matches one JSON key, never two:
 /// Latch's encoder orders keys differently in every process. The prompt's text picks the
 /// turn; a load replays `earlier question`, `earlier answer` and a tool row, as a saved
@@ -9,7 +10,7 @@
 /// minute, or once the process that started the agent has gone, so a test run that dies
 /// mid-turn leaves no agent behind. The Mac app's tests and the iOS app's remote smoke run it;
 /// `SmokeAgent.remoteScript` is the Mac bundle smoke's cut-down copy: a change to the JSON
-/// Latch writes must keep both matching.
+/// Latch writes must keep both matching. Debug builds only: nothing shipped writes it.
 public enum RemoteMockAgent {
     public static let script = #"""
     PATH=/usr/bin:/bin:$PATH
@@ -74,3 +75,4 @@ public enum RemoteMockAgent {
     done
     """#
 }
+#endif

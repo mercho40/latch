@@ -23,10 +23,13 @@ public struct SavedSession: Codable, Equatable, Sendable {
     /// same snapshot as the messages, so the two always agree. Nil for a session on this Mac,
     /// and for one that was closed: closing stops the runtime.
     public var remote: RemoteBinding? = nil
+    /// The name the agent gave itself when it last connected, such as "Mock Agent", for a
+    /// custom command whose own name says little. The iPhone and iPad keep it; the Mac saves nil.
+    public var agentName: String? = nil
 
     public init(id: UUID, workspacePath: String, title: String, agentID: String, customCommand: String, draft: String,
                 messages: [ChatMessage], agentSessionID: String? = nil, lastActiveAt: Date? = nil, serverID: UUID? = nil,
-                remote: RemoteBinding? = nil) {
+                remote: RemoteBinding? = nil, agentName: String? = nil) {
         self.id = id
         self.workspacePath = workspacePath
         self.title = title
@@ -38,6 +41,7 @@ public struct SavedSession: Codable, Equatable, Sendable {
         self.lastActiveAt = lastActiveAt
         self.serverID = serverID
         self.remote = remote
+        self.agentName = agentName
     }
 
     public struct RemoteBinding: Codable, Equatable, Sendable {

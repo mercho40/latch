@@ -545,6 +545,8 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
     private func mapFailures<Value>(server: String, _ body: () async throws -> Value) async throws -> Value {
         do {
             return try await body()
+        } catch let error as LatchRemoteError where error.code == .workspaceNotFound {
+            throw RemoteWorkspaceNotFound(message: error.message)
         } catch let error as LatchRemoteError {
             throw Self.agentFailure(error)
         } catch let error as LatchRemoteClientError {
@@ -618,6 +620,13 @@ private extension ChatAttachment {
 
 /// A server that cannot be reached, as a session reports it.
 struct RemoteServerFailure: RemoteConnectionFailure, LocalizedError, Equatable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// A session's folder that is not on its server. The folder is fixed when a session is made,
+/// so no retry finds it.
+struct RemoteWorkspaceNotFound: LocalizedError, Equatable {
     let message: String
     var errorDescription: String? { message }
 }

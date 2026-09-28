@@ -42,6 +42,9 @@ public final class SessionModel {
     /// session, which is neither a crash nor a failure to start.
     public private(set) var stoppedOnServer = false
     public static let idleSavedStatus = "Saved · Not connected"
+    /// The name the agent gave itself when it last started or was attached to, such as
+    /// "Claude Code"; kept once it stops, for a custom command whose own name says little.
+    public private(set) var agentName: String?
     /// Turns that have come to an end while this session followed them, so each end is
     /// announced once. A turn whose link failed under it has not ended: it runs on, and a
     /// re-attach follows it again.
@@ -110,6 +113,10 @@ public final class SessionModel {
     private var interruptedPrompt: (turn: UUID, blocks: [ACPPromptBlock])?
     /// The runtime was launched on, or attached to, a server, which keeps it when Latch quits.
     private var runtimeIsRemote = false
+    /// The last journal sequence an attach's backlog could hold. A turn that started at or
+    /// before it has been followed or finished already; one after it started while this
+    /// session looked on.
+    private var backlogThrough: UInt64 = 0
     /// The binding an attach in flight is for, until its record arrives.
     private var attaching: (id: AgentRuntimeID, binding: SavedSession.RemoteBinding)?
     /// What the last remote connection asked for, so a change to the server's settings can
@@ -495,6 +502,7 @@ public final class SessionModel {
         bindingKeptFromLink = false
         interruptedPrompt = nil
         runtimeIsRemote = true
+        backlogThrough = record.lastSequence
         runtimeID = id
         if let bound = record.sessionID { savedAgentSessionID = bound }
         sessionID = record.sessionID ?? savedAgentSessionID
@@ -544,6 +552,7 @@ public final class SessionModel {
         applyState(of: record)
         acceptsImages = record.initialization?.agentCapabilities.acceptsImages ?? false
         let title = record.initialization?.agentInfo?.title ?? record.initialization?.agentInfo?.name ?? record.agentTitle
+        agentName = title
         status = "Connected · \(title)"
         phase = .ready
         if record.lifecycle == .exited {
@@ -781,9 +790,13 @@ public final class SessionModel {
             }
             pendingStateUpdates.removeAll()
             phase = .ready
-            if case .remote = launch { runtimeIsRemote = true }
+            if case .remote = launch {
+                runtimeIsRemote = true
+                backlogThrough = 0
+            }
             if case let .runtimeStarted(_, initialization) = result {
-                status = "Connected · \(initialization.agentInfo?.title ?? initialization.agentInfo?.name ?? "ACP agent")"
+                agentName = initialization.agentInfo?.title ?? initialization.agentInfo?.name
+                status = "Connected · \(agentName ?? "ACP agent")"
                 acceptsImages = initialization.agentCapabilities.acceptsImages
             } else { status = "Connected" }
         } catch {
@@ -796,7 +809,11 @@ public final class SessionModel {
             status = resumingID == nil ? "Not connected" : "Saved · Resume failed"
             errorMessage = error.localizedDescription
             errorIsConnectionFailure = error is RemoteConnectionFailure
-            if resumingID != nil { errorAdvice = "Your saved history is unchanged. Retry, or start a new session." }
+            if error is RemoteWorkspaceNotFound {
+                errorAdvice = "A session keeps the folder it was started in. Start a new session in a folder that exists."
+            } else if resumingID != nil {
+                errorAdvice = "Your saved history is unchanged. Retry, or start a new session."
+            }
         }
         onChange?()
     }
@@ -1186,6 +1203,15 @@ public final class SessionModel {
             if turn == turnID, phase == .prompting, let runtimeID {
                 turnBoundary = SavedSession.RemoteBinding(runtimeID: runtimeID.rawValue, cursor: appliedSequence,
                                                           boundaryMessageID: history.messages.last?.id, boundaryTurnID: turn)
+            } else if phase == .ready, runtimeIsRemote, sequence > backlogThrough, let runtimeID {
+                // Another client prompted the runtime this session follows. The server runs
+                // one turn at a time, so this session follows that one to its end, as an
+                // attach follows the turn its record shows running, rather than offer a
+                // prompt the server would refuse.
+                followTurn(turn, runtimeID: runtimeID, boundary: SavedSession.RemoteBinding(
+                    runtimeID: runtimeID.rawValue, cursor: appliedSequence,
+                    boundaryMessageID: history.messages.last?.id, boundaryTurnID: turn))
+                onChange?()
             }
         case let .turnEnded(id, _, sequence) where id == runtimeID,
              let .skipped(id, sequence) where id == runtimeID:

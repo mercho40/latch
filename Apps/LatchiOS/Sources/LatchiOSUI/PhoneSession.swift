@@ -102,8 +102,24 @@ final class PhoneSession {
         return command.flatMap { $0.isEmpty ? nil : $0 } ?? "Custom"
     }
 
-    /// The row's second line.
-    var subtitle: String { "\(agentTitle) · \(location.folderName)" }
+    /// The row's second line. The space before the dot does not break, so a line that wraps
+    /// ends with the dot rather than starts with it.
+    var subtitle: String { "\(agentTitle)\u{00A0}· \(location.folderName)" }
+
+    /// What the agent is asking, for the banner that says a decision waits.
+    var pendingRequestTitle: String? {
+        guard let request = model.permissions.current?.request else { return nil }
+        let title = PermissionRequestViewController.describe(request).title
+        return title.isEmpty ? nil : title
+    }
+
+    /// Names the session as the user chose. A blank name changes nothing.
+    func rename(to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != title else { return }
+        title = String(trimmed.prefix(120))
+        notify(transcript: false)
+    }
 
     /// When the conversation last moved, for sorting.
     var lastActiveAt: Date { stubbedStatus?.lastActiveAt ?? model.lastActiveAt ?? .distantPast }
@@ -116,8 +132,8 @@ final class PhoneSession {
             phase: model.phase, status: model.status, needsApproval: model.permissions.current != nil,
             linkState: model.linkState, hasError: model.errorMessage != nil,
             connectionFailure: model.errorIsConnectionFailure, stoppedOnServer: model.stoppedOnServer,
-            stoppedHere: stoppedHere, promptStartedAt: model.promptStartedAt, lastActiveAt: model.lastActiveAt,
-            hasUnseenReply: hasUnseenReply)
+            stoppedHere: stoppedHere, stopping: model.cancellationRequested, promptStartedAt: model.promptStartedAt,
+            lastActiveAt: model.lastActiveAt, hasUnseenReply: hasUnseenReply)
     }
 
     func rowStatus(now: Date) -> SessionRowStatus { SessionRowStatus.make(statusInput, now: now) }

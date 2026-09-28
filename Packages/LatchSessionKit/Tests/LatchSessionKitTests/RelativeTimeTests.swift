@@ -45,6 +45,12 @@ final class RelativeTimeTests: XCTestCase {
         XCTAssertEqual(RelativeTime.duration(-4), "0s")
     }
 
+    func testSpokenDurationIsInWordsAndCutShort() {
+        XCTAssertEqual(RelativeTime.spokenDuration(8), "8 seconds")
+        XCTAssertEqual(RelativeTime.spokenDuration(75), "1 minute, 15 seconds")
+        XCTAssertEqual(RelativeTime.spokenDuration(3_830), "1 hour, 3 minutes")
+    }
+
     func testOlderSavedSessionsLoadWithoutATime() throws {
         let older = #"{"id":"00000000-0000-0000-0000-000000000001","workspacePath":"/tmp","title":"T","agentID":"codex","customCommand":"","draft":"","messages":[]}"#
         XCTAssertNil(try JSONDecoder().decode(SavedSession.self, from: Data(older.utf8)).lastActiveAt)

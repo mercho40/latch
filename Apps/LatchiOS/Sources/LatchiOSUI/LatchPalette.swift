@@ -21,13 +21,31 @@ enum LatchPalette {
     }
 
     /// The panel behind a code block, a table's header and the tool details: one step off the
-    /// page in either appearance.
+    /// page in either appearance, two with Increase Contrast.
     static let codeBackground = UIColor { traits in
-        traits.userInterfaceStyle == .dark ? .secondarySystemBackground : UIColor(white: 0, alpha: 0.04)
+        let high = traits.accessibilityContrast == .high
+        return traits.userInterfaceStyle == .dark
+            ? (high ? .tertiarySystemBackground : .secondarySystemBackground)
+            : UIColor(white: 0, alpha: high ? 0.08 : 0.04)
     }
 
     /// Behind inline `code`: a little stronger than a block, because it is a few characters wide.
     static let inlineCode = UIColor { traits in
-        traits.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.12) : UIColor(white: 0, alpha: 0.07)
+        let high = traits.accessibilityContrast == .high
+        return traits.userInterfaceStyle == .dark
+            ? UIColor(white: 1, alpha: high ? 0.18 : 0.12) : UIColor(white: 0, alpha: high ? 0.12 : 0.07)
+    }
+}
+
+extension UIFont.Weight {
+    /// A step heavier with Bold Text, which fonts made at an explicit weight, such as the
+    /// monospaced ones, do not follow by themselves: regular to semibold, semibold to bold.
+    func adjusted(for traits: UITraitCollection) -> UIFont.Weight {
+        guard traits.legibilityWeight == .bold else { return self }
+        switch self {
+        case ..<UIFont.Weight.medium: return .semibold
+        case ..<UIFont.Weight.bold: return .bold
+        default: return .heavy
+        }
     }
 }

@@ -59,11 +59,11 @@ struct ToolCallPresentation: Equatable {
         }
     }
 
-    /// Colour backs up the word, never replaces it.
+    /// Colour backs up the word, never replaces it. A running call is as quiet as a finished
+    /// one, so it never outweighs the reply under it; its spinner says it is live.
     var statusColor: UIColor {
         switch state {
         case .failed, .cancelled: .systemRed
-        case .running, .pending: .label
         default: .secondaryLabel
         }
     }
@@ -88,6 +88,7 @@ struct ToolCallPresentation: Equatable {
     /// and removed lines in green and red on a faint wash, as on the Mac. Nothing in them is
     /// interpreted as Markdown or made a link.
     static func styledDetails(_ text: String, font: UIFont, boldFont: UIFont) -> NSAttributedString {
+        let text = displayedDetails(text)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         paragraph.lineSpacing = 2
@@ -112,13 +113,27 @@ struct ToolCallPresentation: Equatable {
             } else if diffHunk && (line.hasPrefix("+") || line.hasPrefix("-")) {
                 let color: UIColor = line.hasPrefix("+") ? .systemGreen : .systemRed
                 result.addAttributes([.foregroundColor: color, .backgroundColor: color.withAlphaComponent(0.1)], range: range)
-            } else if ["Content:", "Locations:"].contains(line) || line.hasPrefix("Diff: ")
-                        || line.hasPrefix("rawInput (") || line.hasPrefix("rawOutput (") {
+            } else if ["Content:", "Locations:", "Input:", "Output:"].contains(line) || line.hasPrefix("Diff: ") {
                 result.addAttribute(.font, value: boldFont, range: range)
             }
             position = end
         }
         return result
+    }
+}
+
+extension ToolCallPresentation {
+    /// The details as shown here: the shared history's headings for the agent's raw input and
+    /// output, such as "rawInput (structural JSON preview):", read "Input:" and "Output:".
+    /// The history itself, and what the Mac shows, keep theirs.
+    static func displayedDetails(_ text: String) -> String {
+        text.components(separatedBy: "\n").map { line in
+            for (prefix, heading) in [("rawInput (", "Input:"), ("rawOutput (", "Output:")]
+            where line.hasPrefix(prefix) && line.hasSuffix("):") {
+                return heading
+            }
+            return line
+        }.joined(separator: "\n")
     }
 }
 

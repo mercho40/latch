@@ -42,9 +42,16 @@ enum LaunchSmoke {
         guard root.sessions.viewIfLoaded?.window === window else {
             return "the sessions list is not on screen"
         }
-        guard let empty = root.sessions.contentUnavailableConfiguration as? UIContentUnavailableConfiguration,
-              empty.text == "No servers yet", empty.buttonProperties.primaryAction != nil else {
-            return "the sessions list has no Add Server empty state"
+        // Pairing is explained once: by the list when it is all there is, and beside a sidebar
+        // by the session column.
+        let explaining = root.isCollapsed ? root.sessions : root.placeholder
+        guard let empty = explaining.contentUnavailableConfiguration as? UIContentUnavailableConfiguration,
+              empty.text == "No Servers", empty.buttonProperties.primaryAction != nil else {
+            return root.isCollapsed ? "the sessions list has no Add Server empty state"
+                : "the session column has no Add Server empty state"
+        }
+        if !root.isCollapsed, root.sessions.contentUnavailableConfiguration != nil {
+            return "the sidebar repeats the session column's Add Server"
         }
         return nil
     }

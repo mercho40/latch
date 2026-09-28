@@ -2,6 +2,7 @@ import LatchACP
 import LatchSessionKit
 import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// What the session screen shows about its session besides the model, and what it asks of
 /// whoever hosts it. The screen never connects, stops or saves anything itself: those go
@@ -12,9 +13,11 @@ struct SessionDetailContext {
     var title: String
     /// The server's name as the Servers list has it now.
     var serverName: String
-    /// The folder on the server as the reader should see it, such as `~/project`. The
-    /// subtitle shows it and Copy Path copies it.
+    /// The folder on the server, whole: Copy Path copies it and VoiceOver reads it.
     var folderPath: String
+    /// The folder as the reader should see it, with the server's home as `~`, such as
+    /// `~/project`: the subtitle and the empty page show it. The whole path until the home is known.
+    var displayPath = ""
     /// The agent's name, such as "Claude Code".
     var agentTitle: String
     /// The draft the composer starts with.
@@ -35,6 +38,11 @@ struct SessionDetailContext {
     /// Whether the session's server is still in Servers, so its settings can be opened and
     /// its agent started again.
     var hasServer: () -> Bool = { true }
+    /// The user named the session.
+    var onRename: ((String) -> Void)?
+
+    /// The folder to show: `displayPath`, or the whole path while there is none.
+    var shownPath: String { displayPath.isEmpty ? folderPath : displayPath }
 }
 
 /// One session: its conversation, a composer pinned above the keyboard, a banner for the
@@ -46,7 +54,8 @@ struct SessionDetailContext {
 ///
 ///     model.onChange = { [weak screen] in screen?.modelDidChange() }
 ///     model.onTranscriptChange = { [weak screen] in screen?.transcriptDidChange() }
-final class SessionDetailViewController: UIViewController, PHPickerViewControllerDelegate {
+final class SessionDetailViewController: UIViewController, PHPickerViewControllerDelegate, UINavigationItemRenameDelegate,
+    UIDropInteractionDelegate {
     let model: SessionModel
     var context: SessionDetailContext {
         didSet { contextChanged() }
@@ -85,6 +94,14 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     }
     /// Copy Path writes here. Tests substitute a pasteboard of their own.
     var pasteboard = UIPasteboard.general
+    /// Keeps the photos sent from here, so a prompt shows them rather than their names.
+    var sentImages = SentImageCache.shared
+    /// Thumbnails of the last prompt sent, until the transcript shows the message they went with.
+    private var pendingThumbnails: (names: [String], images: [UIImage?], after: Set<UUID>)?
+    /// Opened from New Session: the composer takes the keyboard once the screen is up.
+    private var focusesComposer = false
+    /// The slash suggestions were dismissed with Escape, until the draft changes.
+    private var suggestionsDismissed = false
 
     init(model: SessionModel, context: SessionDetailContext) {
         self.model = model
@@ -92,6 +109,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         announcedTurns = model.turnsEnded
         super.init(nibName: nil, bundle: nil)
         navigationItem.largeTitleDisplayMode = .never
+        navigationItem.renameDelegate = self
+        navigationItem.titleMenuProvider = { [weak self] suggested in self?.titleMenu(suggested) }
         refreshTitle()
     }
 
@@ -104,12 +123,30 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     /// The transcript changed. Coalesced, so a streaming reply renders at most every 50 ms.
     func transcriptDidChange() { renderScheduler.request() }
 
+    /// Puts the keyboard in the composer when the screen next appears, as after New Session.
+    func focusComposerOnAppear() {
+        focusesComposer = true
+        if viewIfLoaded?.window != nil { focusComposer() }
+    }
+
+    private func focusComposer() {
+        focusesComposer = false
+        guard composer.isEditable else { return }
+        // VoiceOver moves its cursor to the field instead of raising a keyboard over the page.
+        if UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .screenChanged, argument: composer.textView)
+        } else {
+            composer.textView.becomeFirstResponder()
+        }
+    }
+
     // MARK: Building
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         transcript.agentTitle = context.agentTitle
+        transcript.sentImages = sentImages
         let collection = transcript.collectionView
         collection.backgroundView = emptyView
         transcript.onScroll = { [weak self] in self?.refreshJumpButton() }
@@ -125,6 +162,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         composer.onTextChange = { [weak self] text in
             guard let self else { return }
             attachmentNotice = nil
+            suggestionsDismissed = false
             context.onDraftChange(text)
             // A keystroke changes what the composer offers, never the conversation.
             banner.show(currentBanner)
@@ -135,6 +173,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         composer.onAttach = { [weak self] in self?.chooseImages() }
         composer.onRemoveAttachment = { [weak self] id in self?.removeAttachment(id) }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
+        composer.onPasteImages = { [weak self] providers in self?.load(providers) }
+        composer.canHandleKey = { [weak self] key in self?.canHandle(key) ?? false }
+        composer.onKey = { [weak self] key in self?.handle(key) }
         suggestions.onChoose = { [weak self] command in self?.choose(command) }
         suggestions.isHidden = true
         banner.onAction = { [weak self] id in self?.bannerAction(id) }
@@ -157,6 +198,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         jumpButton.showsLargeContentViewer = true
         jumpButton.largeContentTitle = "Jump to Latest"
         jumpButton.addAction(UIAction { [weak self] _ in self?.transcript.scrollToBottom(animated: true) }, for: .primaryActionTriggered)
+        jumpButton.isPointerInteractionEnabled = true
         jumpButton.alpha = 0
         jumpButton.isHidden = true
 
@@ -199,12 +241,21 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             jumpButton.widthAnchor.constraint(equalToConstant: 44),
             jumpButton.heightAnchor.constraint(equalToConstant: 44),
         ])
+        // The navigation bar's edge follows the conversation, which is not this view.
+        setContentScrollView(collection, for: .top)
         if #available(iOS 26.0, *) {
-            let edge = UIScrollEdgeElementContainerInteraction()
-            edge.scrollView = collection
-            edge.edge = .bottom
-            composer.addInteraction(edge)
+            // The page's soft edges run under what floats over it: the composer at the bottom,
+            // and the banner at the top, so nothing scrolled under the bar peeks round the card.
+            collection.topEdgeEffect.style = .soft
+            for (floating, edge) in [(composer, UIRectEdge.bottom), (banner, .top)] as [(UIView, UIRectEdge)] {
+                let interaction = UIScrollEdgeElementContainerInteraction()
+                interaction.scrollView = collection
+                interaction.edge = edge
+                floating.addInteraction(interaction)
+            }
         }
+        // Photos dropped anywhere on the page go in the composer, as the Mac's window takes them.
+        view.addInteraction(UIDropInteraction(delegate: self))
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: SessionDetailViewController, _) in
             controller.renderedMenu = nil
             controller.refresh()
@@ -221,8 +272,10 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         let top = banner.isShowing ? banner.frame.height : 0
         let insets = UIEdgeInsets(top: top, left: 0, bottom: bottom, right: 0)
         if collection.contentInset != insets {
-            collection.contentInset = insets
-            collection.verticalScrollIndicatorInsets = insets
+            transcript.autoScroll {
+                collection.contentInset = insets
+                collection.verticalScrollIndicatorInsets = insets
+            }
         }
         // The conversation runs the composer's column, in the content's coordinates.
         if composer.frame.width > 0 {
@@ -240,6 +293,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         super.viewDidAppear(animated)
         // A request that arrived while another session was on screen waits for this one.
         refresh()
+        if focusesComposer, presentedViewController == nil { focusComposer() }
     }
 
     // MARK: Refreshing
@@ -254,12 +308,67 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     private func refreshTitle() {
         title = context.title
-        let subtitle = [context.serverName, context.folderPath].filter { !$0.isEmpty }.joined(separator: " · ")
+        let subtitle = [context.serverName, context.shownPath].filter { !$0.isEmpty }.joined(separator: " · ")
         if #available(iOS 26.0, *) {
             navigationItem.subtitle = subtitle
         } else {
-            navigationItem.titleView = SessionTitleView(title: context.title, subtitle: subtitle)
+            let spoken = [context.serverName, context.folderPath].filter { !$0.isEmpty }.joined(separator: ", ")
+            navigationItem.titleView = SessionTitleView(title: context.title, subtitle: subtitle, spoken: spoken)
         }
+    }
+
+    // MARK: Renaming
+
+    /// Tapping the title offers Rename, and what the session menu offers about the folder.
+    private func titleMenu(_ suggested: [UIMenuElement]) -> UIMenu? {
+        let copyPath = UIAction(title: "Copy Path", image: UIImage(systemName: "doc.on.doc"),
+                                attributes: context.folderPath.isEmpty ? .disabled : []) { [weak self] _ in self?.copyPath() }
+        var items = suggested
+        items.append(copyPath)
+        if context.hasServer() {
+            items.append(UIAction(title: "Server Settings", image: UIImage(systemName: "gearshape")) { [weak self] _ in
+                self?.context.onServerSettings()
+            })
+        }
+        return UIMenu(children: items)
+    }
+
+    func navigationItem(_ navigationItem: UINavigationItem, didEndRenamingWith title: String) {
+        context.onRename?(title)
+    }
+
+    func navigationItemShouldBeginRenaming(_ navigationItem: UINavigationItem) -> Bool {
+        context.onRename != nil
+    }
+
+    /// Rename… from the menus asks for the name; tapping the title renames it in place.
+    func beginRenaming() {
+        guard context.onRename != nil else { return }
+        present(Self.renameAlert(title: context.title) { [weak self] name in self?.context.onRename?(name) }, animated: true)
+    }
+
+    /// Rename…'s question, the same from the session's menus and from the list.
+    static func renameAlert(title: String, rename: @escaping (String) -> Void) -> UIAlertController {
+        let alert = UIAlertController(title: "Rename Session", message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = title
+            field.clearButtonMode = .whileEditing
+            field.autocapitalizationType = .sentences
+            field.accessibilityLabel = "Name"
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        let action = UIAlertAction(title: "Rename", style: .default) { [weak alert] _ in
+            guard let name = alert?.textFields?.first?.text else { return }
+            rename(name)
+        }
+        alert.addAction(action)
+        alert.preferredAction = action
+        return alert
+    }
+
+    private func copyPath() {
+        guard !context.folderPath.isEmpty else { return }
+        pasteboard.string = context.folderPath
     }
 
     /// Everything but the transcript's text follows the model at once; the text follows too,
@@ -278,8 +387,21 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     private func renderTranscript() {
         guard isViewLoaded else { return }
-        transcript.update(messages: model.messages, isWorking: model.phase == .prompting)
+        keepPendingThumbnails()
+        transcript.update(messages: model.messages, isWorking: model.phase == .prompting,
+                          isStopping: model.cancellationRequested)
         refreshEmptyState()
+    }
+
+    /// The photos just sent go with the first prompt after the send whose attachments they
+    /// are, once the transcript has it.
+    private func keepPendingThumbnails() {
+        guard let pending = pendingThumbnails else { return }
+        guard let message = model.messages.first(where: {
+            $0.role == .user && !pending.after.contains($0.id) && $0.attachments.map(\.name) == pending.names
+        }) else { return }
+        pendingThumbnails = nil
+        sentImages.store(pending.images, for: message.id)
     }
 
     private var isReadOnly: Bool { model.archivedWithoutContext && model.phase == .disconnected }
@@ -297,7 +419,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     private func refreshComposer() {
         composer.isEditable = !isReadOnly
-        composer.placeholder = isReadOnly ? "This conversation is read-only" : "Ask \(context.agentTitle)…"
+        // The title already names the agent: at accessibility sizes the placeholder says less.
+        let large = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
+        composer.placeholder = isReadOnly ? "This conversation is read-only" : large ? "Message" : "Ask \(context.agentTitle)…"
         composer.canAttach = !isReadOnly && attachments.count < ComposerImage.maximumCount
         if model.phase == .prompting {
             composer.setAction(.stop(enabled: canStop))
@@ -308,11 +432,41 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     }
 
     private func refreshSuggestions() {
-        let open = composer.isEditable && !model.commands.isEmpty
+        let open = composer.isEditable && !model.commands.isEmpty && !suggestionsDismissed
             && SlashCommandSuggestionsView.query(in: composer.text).map { suggestions.show(model.commands, query: $0) } == true
         guard open == suggestions.isHidden else { return }
         suggestions.isHidden = !open
+        if open {
+            let count = suggestions.matches.count
+            UIAccessibility.post(notification: .announcement, argument: NSAttributedString(
+                string: count == 1 ? "1 command" : "\(count) commands",
+                attributes: [.accessibilitySpeechQueueAnnouncement: true]))
+        }
         refreshEmptyState()
+    }
+
+    // MARK: Hardware keyboard
+
+    /// Return sends, as in Messages; with the slash suggestions up, the arrows move through
+    /// them, Tab or Return takes one, and Escape puts them away.
+    private func canHandle(_ key: SessionComposerView.Key) -> Bool {
+        let suggesting = !suggestions.isHidden
+        return switch key {
+        case .return: suggesting || canSend
+        case .up, .down, .tab, .escape: suggesting
+        }
+    }
+
+    private func handle(_ key: SessionComposerView.Key) {
+        switch key {
+        case .return where suggestions.isHidden: send()
+        case .return, .tab: if let command = suggestions.highlighted { choose(command) }
+        case .up: suggestions.moveHighlight(by: -1)
+        case .down: suggestions.moveHighlight(by: 1)
+        case .escape:
+            suggestionsDismissed = true
+            refreshSuggestions()
+        }
     }
 
     private func choose(_ command: ACPAvailableCommand) {
@@ -351,8 +505,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         case .ready, .prompting:
             configuration = .empty()
             configuration.image = UIImage(systemName: "text.bubble")
-            configuration.text = "Ask \(context.agentTitle) anything."
-            configuration.secondaryText = context.folderPath.isEmpty ? "Runs on \(serverName)." : "Runs in \(context.folderPath) on \(serverName)."
+            configuration.text = "Ask \(context.agentTitle)"
+            configuration.secondaryText = context.shownPath.isEmpty
+                ? "Works on \(serverName)." : "Works in \(context.shownPath) on \(serverName)."
         case .disconnected, .stopping:
             // The banner says what went wrong, and offers what fixes it.
             guard model.errorMessage == nil, !banner.isShowing else {
@@ -361,12 +516,14 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             }
             configuration = .empty()
             configuration.image = UIImage(systemName: "bolt.horizontal.circle")
-            configuration.text = "Not connected"
+            configuration.text = "Not Connected"
             configuration.secondaryText = context.hasServer()
                 ? "\(context.agentTitle) runs on \(serverName)." : "\(serverName) is no longer in Servers."
             if model.phase == .disconnected, context.hasServer() {
+                // Retry, as the banner and the menu name the same action.
                 var button = UIButton.Configuration.filled()
-                button.title = "Connect"
+                button.title = "Retry"
+                button.cornerStyle = .capsule
                 configuration.button = button
                 configuration.buttonProperties.primaryAction = UIAction { [weak self] _ in self?.context.onRetry() }
             }
@@ -381,11 +538,16 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     private var serverName: String { context.serverName.isEmpty ? "the server" : context.serverName }
 
+    /// Said only while the screen is on show: a screen popped off the stack still hears its
+    /// model, and the list's banner speaks for it then. Queued behind whatever VoiceOver is
+    /// reading, rather than cutting it off.
     private func announceTurnEnd() {
         guard model.turnsEnded != announcedTurns else { return }
         announcedTurns = model.turnsEnded
-        UIAccessibility.post(notification: .announcement,
-                             argument: model.lastTurnEndedByStop ? "\(context.agentTitle) stopped." : "\(context.agentTitle) finished.")
+        guard viewIfLoaded?.window != nil, presentedViewController == nil else { return }
+        let words = model.lastTurnEndedByStop ? "\(context.agentTitle) stopped." : "\(context.agentTitle) finished."
+        UIAccessibility.post(notification: .announcement, argument: NSAttributedString(
+            string: words, attributes: [.accessibilitySpeechQueueAnnouncement: true]))
     }
 
     // MARK: Banner
@@ -414,7 +576,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         }
         if let notice = attachmentNotice, model.errorMessage == nil {
             return SessionBanner(key: "attachments\u{0}\(notice.id)", title: notice.title, message: notice.message,
-                                 severity: .warning)
+                                 severity: .warning, takesFocus: false)
         }
         let disconnected = model.phase == .disconnected
         if disconnected, model.archivedWithoutContext, model.errorMessage == nil {
@@ -433,7 +595,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         } else if let status = exitStatus {
             message = "It exited with status \(status). Retry starts it again."
         } else if model.errorIsConnectionFailure {
-            message = Self.iOSWords(error) + advice
+            // Retry is on the banner: the Mac's advice to retry would only say it again.
+            message = Self.iOSWords(error) + (disconnected && context.hasServer() ? Self.withoutRetryAdvice(advice) : advice)
         } else {
             detail = Self.agentWords(Self.iOSWords(error))
             message = model.errorAdvice ?? ""
@@ -475,9 +638,16 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     }
 
     /// The shared model's advice is written for the Mac, where an agent is picked again from
-    /// a menu; here Retry does that.
+    /// a menu; here Retry does that. The server's name never breaks at its hyphen.
     static func iOSWords(_ message: String) -> String {
         message.replacingOccurrences(of: " Select the agent again to reconnect.", with: " Retry starts it again.")
+            .replacingOccurrences(of: "latch-server", with: "latch\u{2011}server")
+    }
+
+    /// The model's reassurance after a failed resume, which ends by offering the Retry the
+    /// banner already shows.
+    static func withoutRetryAdvice(_ advice: String) -> String {
+        advice.replacingOccurrences(of: " Your saved history is unchanged. Retry, or start a new session.", with: "")
     }
 
     private static let retryAction = SessionBanner.Action(title: "Retry", id: "retry")
@@ -522,15 +692,20 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         let canStartAgent: Bool
         let canStopAgent: Bool
         let folderPath: String
+        let canRename: Bool
+    }
+
+    private var canStartAgent: Bool { model.phase == .disconnected && !isReadOnly && context.hasServer() }
+    private var canStopAgent: Bool {
+        context.canStopAgent?() ?? (model.phase != .disconnected || model.remoteBinding != nil)
     }
 
     private func refreshMenu() {
         let state = MenuState(
             configuration: model.configuration,
             editable: model.phase == .ready && !model.isChangingConfiguration,
-            canStartAgent: model.phase == .disconnected && !isReadOnly && context.hasServer(),
-            canStopAgent: context.canStopAgent?() ?? (model.phase != .disconnected || model.remoteBinding != nil),
-            folderPath: context.folderPath)
+            canStartAgent: canStartAgent, canStopAgent: canStopAgent,
+            folderPath: context.folderPath, canRename: context.onRename != nil)
         guard state != renderedMenu else { return }
         renderedMenu = state
         menuButton.menu = makeMenu(state)
@@ -548,7 +723,10 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         }
         let copyPath = UIAction(title: "Copy Path", image: UIImage(systemName: "doc.on.doc"),
                                 attributes: state.folderPath.isEmpty ? .disabled : []) { [weak self] _ in
-            self?.pasteboard.string = self?.context.folderPath
+            self?.copyPath()
+        }
+        let rename = UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in
+            self?.beginRenaming()
         }
         let stop = UIAction(title: "Stop Agent", image: UIImage(systemName: "stop.circle"),
                             attributes: state.canStopAgent ? .destructive : [.destructive, .disabled]) { [weak self] _ in
@@ -561,7 +739,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         }
         return UIMenu(children: [
             UIMenu(options: .displayInline, children: settings),
-            UIMenu(options: .displayInline, children: [copyPath]),
+            UIMenu(options: .displayInline, children: state.canRename ? [rename, copyPath] : [copyPath]),
             UIMenu(options: .displayInline, children: state.canStartAgent ? [start, stop] : [stop]),
         ])
     }
@@ -637,6 +815,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         }
         let draft = composer.text
         let sent = attachments.map(\.prompt)
+        pendingThumbnails = sent.isEmpty ? nil
+            : (sent.map(\.name), attachments.map(\.thumbnail), Set(model.messages.map(\.id)))
         composer.text = ""
         attachments = []
         composer.setAttachments([])
@@ -649,27 +829,47 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     func stop() {
         guard canStop else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         Task { await model.cancel() }
     }
 
-    override var keyCommands: [UIKeyCommand]? {
-        let send = UIKeyCommand(title: "Send", action: #selector(sendFromKeyboard), input: "\r", modifierFlags: .command)
-        let stop = UIKeyCommand(title: "Stop", action: #selector(stopFromKeyboard), input: ".", modifierFlags: .command)
-        send.wantsPriorityOverSystemBehavior = true
-        stop.wantsPriorityOverSystemBehavior = true
-        return [send, stop]
+    // MARK: Menu bar
+
+    // The Session menu's commands, which `LatchAppDelegate.buildMenu(with:)` lists. They find
+    // this screen through the responder chain, or through the root when the list has focus.
+
+    @objc func sendCommand() { send() }
+    @objc func stopCommand() { stop() }
+    @objc func addPhotosCommand() { chooseImages() }
+    @objc func copyPathCommand() { copyPath() }
+    @objc func renameCommand() { beginRenaming() }
+    @objc func stopAgentCommand() { confirmStopAgent() }
+    @objc func startAgentCommand() {
+        banner.resetDismissal()
+        context.onRetry()
+        refresh()
     }
+    @objc func jumpToLatestCommand() { transcript.scrollToBottom(animated: true) }
+
+    static let menuActions: Set<Selector> = [
+        #selector(sendCommand), #selector(stopCommand), #selector(addPhotosCommand), #selector(copyPathCommand),
+        #selector(renameCommand), #selector(stopAgentCommand), #selector(startAgentCommand), #selector(jumpToLatestCommand),
+    ]
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        let free = presentedViewController == nil
         switch action {
-        case #selector(sendFromKeyboard): canSend
-        case #selector(stopFromKeyboard): canStop
-        default: super.canPerformAction(action, withSender: sender)
+        case #selector(sendCommand): return canSend
+        case #selector(stopCommand): return canStop
+        case #selector(addPhotosCommand): return free && composer.canAttach
+        case #selector(copyPathCommand): return !context.folderPath.isEmpty
+        case #selector(renameCommand): return free && context.onRename != nil
+        case #selector(stopAgentCommand): return free && canStopAgent
+        case #selector(startAgentCommand): return free && canStartAgent
+        case #selector(jumpToLatestCommand): return jumpShown
+        default: return super.canPerformAction(action, withSender: sender)
         }
     }
-
-    @objc private func sendFromKeyboard() { send() }
-    @objc private func stopFromKeyboard() { stop() }
 
     // MARK: Photos
 
@@ -710,8 +910,60 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         let room = max(0, ComposerImage.maximumCount - attachments.count)
         attachments += images.prefix(room)
         attachmentNotice = nil
+        if images.count > room {
+            composer.setAttachments(attachments)
+            return refuseMore()
+        }
         composer.setAttachments(attachments)
         refresh()
+    }
+
+    /// Pasted or dropped photos, read off the main thread, as picked ones are.
+    func load(_ providers: [NSItemProvider]) {
+        let images = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        guard !images.isEmpty else { return }
+        guard composer.canAttach else { return refuseMore() }
+        Task { [weak self] in
+            var loaded: [ComposerImage] = []
+            for provider in images {
+                if let image = await ComposerImage.load(from: provider) { loaded.append(image) }
+            }
+            self?.add(loaded)
+        }
+    }
+
+    private func refuseMore() {
+        attachmentNotice = (UUID(), "You can send up to \(ComposerImage.maximumCount) photos at a time.",
+                            "Send these first, or remove one to add another.")
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        refresh()
+    }
+
+    // MARK: Dropping
+
+    func dropInteraction(_ interaction: UIDropInteraction, canHandle session: any UIDropSession) -> Bool {
+        !isReadOnly && session.hasItemsConforming(toTypeIdentifiers: [UTType.image.identifier])
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: any UIDropSession) -> UIDropProposal {
+        UIDropProposal(operation: composer.canAttach ? .copy : .forbidden)
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidEnter session: any UIDropSession) {
+        composer.isDropTarget = composer.canAttach
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidExit session: any UIDropSession) {
+        composer.isDropTarget = false
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidEnd session: any UIDropSession) {
+        composer.isDropTarget = false
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, performDrop session: any UIDropSession) {
+        composer.isDropTarget = false
+        load(session.items.map(\.itemProvider))
     }
 
     private func removeAttachment(_ id: UUID) {
@@ -795,8 +1047,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 }
 
 /// The title and `server · folder` on two lines, for systems without a navigation subtitle.
+/// VoiceOver hears the whole path.
 private final class SessionTitleView: UIView {
-    init(title: String, subtitle: String) {
+    init(title: String, subtitle: String, spoken: String) {
         super.init(frame: .zero)
         let titleLabel = UILabel()
         titleLabel.text = title
@@ -822,7 +1075,8 @@ private final class SessionTitleView: UIView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         isAccessibilityElement = true
-        accessibilityLabel = [title, subtitle].filter { !$0.isEmpty }.joined(separator: ", ")
+        accessibilityLabel = title
+        accessibilityValue = spoken
         accessibilityTraits = .header
     }
 

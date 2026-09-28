@@ -75,29 +75,25 @@ final class ServersViewController: UICollectionViewController {
             content.textProperties.numberOfLines = 0
             content.secondaryTextProperties.font = ChromeFont.monospaced(.subheadline)
             content.secondaryTextProperties.color = .secondaryLabel
-            // An address is never hyphenated: its middle gives way on one line, and at
-            // accessibility sizes it wraps at any character, with the check's words under it
-            // rather than a mark beside it, so the address has the row's width.
+            // The sessions list's dot leads the row. An address is never hyphenated: its middle
+            // gives way on one line, and at accessibility sizes it wraps at any character. A
+            // failure says why under it, so the reason is on screen, not only in VoiceOver.
             let large = self.traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-            let status = ServerCheckView(self.checks[id])
-            if large {
-                content.secondaryAttributedText = ServerCheckView.detail(address: server.address, self.checks[id])
-                content.secondaryTextProperties.numberOfLines = 0
-                content.secondaryTextProperties.lineBreakMode = .byCharWrapping
-            } else {
-                content.secondaryText = server.address
-                content.secondaryTextProperties.numberOfLines = 1
-                content.secondaryTextProperties.lineBreakMode = .byTruncatingMiddle
-            }
+            let check = self.checks[id]
+            let state = ServerCheckView.state(check)
+            content.image = state.image
+            content.imageProperties.tintColor = state.color
+            content.imageProperties.reservedLayoutSize = CGSize(width: 12, height: 12)
+            content.secondaryAttributedText = ServerCheckView.detail(address: server.address, check, large: large)
+            content.secondaryTextProperties.numberOfLines = large ? 0 : 3
+            content.secondaryTextProperties.lineBreakMode = large ? .byCharWrapping : .byTruncatingTail
             content.textToSecondaryTextVerticalPadding = 2
             content.directionalLayoutMargins.top = 10
             content.directionalLayoutMargins.bottom = 10
             cell.contentConfiguration = content
-            cell.accessories = (large ? [] : [.customView(configuration: .init(customView: status, placement: .trailing(),
-                                                                               reservedLayoutWidth: .actual))])
-                + [.disclosureIndicator()]
+            cell.accessories = [.disclosureIndicator()]
             cell.accessibilityLabel = server.name
-            cell.accessibilityValue = [server.address, status.spoken].compactMap { $0 }.joined(separator: ", ")
+            cell.accessibilityValue = [server.address, ServerCheckView.spoken(check)].compactMap { $0 }.joined(separator: ", ")
         }
         let missingCell = UICollectionView.CellRegistration<UICollectionViewListCell, UUID> { [weak self] cell, _, id in
             guard let self, let stored = self.store.missingTokens.first(where: { $0.id == id }) else { return }
@@ -250,14 +246,14 @@ final class ServersViewController: UICollectionViewController {
         return configuration
     }
 
-    /// Removing forgets the server for good: one added again is a new server, so the sessions
-    /// on this one never connect again. Their agents run on; editing is how an address or
-    /// token changes.
+    /// Removing forgets the server, not its sessions: they stay here, and adding a server at
+    /// the same address offers to reconnect them. Their agents run on; editing is how an
+    /// address or token changes.
     static func removalAlert(name: String, remove: @escaping () -> Void) -> UIAlertController {
         let device = UIDevice.current.model
         let alert = UIAlertController(
             title: "Remove “\(name)”?",
-            message: "Sessions on \(name) stay on this \(device) but can’t connect again, even if you add the server back. "
+            message: "Its sessions stay on this \(device). Add the server again to reconnect them. "
                 + "Their agents keep running on the server. To change its address or token, edit it instead.",
             preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
@@ -277,66 +273,46 @@ extension ServerEditorViewController {
     }
 }
 
-/// Whether a server answered: a spinner while asking, then a mark.
-final class ServerCheckView: UIView {
-    let spoken: String?
-
-    init(_ check: ServersViewController.Check?) {
+/// Whether a server answered, as the Servers list says it.
+enum ServerCheckView {
+    static func state(_ check: ServersViewController.Check?) -> ServerState {
         switch check {
-        case .checking?: spoken = "Checking"
-        case let .reachable(summary)?: spoken = "Connected, \(summary)"
-        case let .failed(reason)?: spoken = "Can’t connect. \(reason)"
-        case nil: spoken = nil
+        case .checking?: .checking
+        case .reachable?: .connected
+        case .failed?: .failed
+        case nil: .unknown
         }
-        super.init(frame: .zero)
-        let view: UIView
-        switch check {
-        case .checking?:
-            let spinner = UIActivityIndicatorView(style: .medium)
-            spinner.startAnimating()
-            view = spinner
-        case .reachable?:
-            let image = UIImageView(image: UIImage(systemName: "checkmark.circle.fill"))
-            image.tintColor = .systemGreen
-            view = image
-        case .failed?:
-            let image = UIImageView(image: UIImage(systemName: "exclamationmark.triangle.fill"))
-            image.tintColor = .systemRed
-            view = image
-        case nil:
-            view = UIView()
-        }
-        (view as? UIImageView)?.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .body)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(view)
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: trailingAnchor),
-            view.topAnchor.constraint(equalTo: topAnchor),
-            view.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    static func spoken(_ check: ServersViewController.Check?) -> String? {
+        switch check {
+        case .checking?: "Checking"
+        case let .reachable(summary)?: "Connected, \(summary)"
+        case let .failed(reason)?: "Can’t connect. \(reason)"
+        case nil: nil
+        }
+    }
 
-    /// The address with the check's result under it, mark and words, for accessibility sizes.
-    static func detail(address: String, _ check: ServersViewController.Check?) -> NSAttributedString {
+    /// The address, then after a failure what happened, under it: "Can’t connect" in red and
+    /// the reason after it. At accessibility sizes, where the dot is small, every state says so.
+    static func detail(address: String, _ check: ServersViewController.Check?, large: Bool) -> NSAttributedString {
         let font = ChromeFont.monospaced(.subheadline)
         let text = NSMutableAttributedString(string: address, attributes: [.font: font, .foregroundColor: UIColor.secondaryLabel])
-        let (symbol, color, words): (String, UIColor, String)
-        switch check {
-        case .checking?: (symbol, color, words) = ("ellipsis.circle", .secondaryLabel, "Checking…")
-        case .reachable?: (symbol, color, words) = ("checkmark.circle.fill", .systemGreen, "Connected")
-        case .failed?: (symbol, color, words) = ("exclamationmark.triangle.fill", .systemRed, "Can’t connect")
-        case nil: return text
-        }
         let body = UIFont.preferredFont(forTextStyle: .subheadline)
-        text.append(NSAttributedString(string: "\n"))
-        if let image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(font: body, scale: .small)) {
-            text.append(NSAttributedString(attachment: NSTextAttachment(image: image.withTintColor(color, renderingMode: .alwaysOriginal))))
+        let secondary: [NSAttributedString.Key: Any] = [.font: body, .foregroundColor: UIColor.secondaryLabel]
+        switch check {
+        case let .failed(reason)?:
+            text.append(NSAttributedString(string: "\n"))
+            text.append(NSAttributedString(string: "Can’t connect", attributes: [.font: body, .foregroundColor: UIColor.systemRed]))
+            text.append(NSAttributedString(string: " · \(reason)", attributes: secondary))
+        // Elsewhere the dot says it, and the row keeps its height as the check finishes.
+        case .checking? where large:
+            text.append(NSAttributedString(string: "\nChecking…", attributes: secondary))
+        case .reachable? where large:
+            text.append(NSAttributedString(string: "\nConnected", attributes: secondary))
+        case .checking?, .reachable?, nil:
+            break
         }
-        text.append(NSAttributedString(string: " \(words)", attributes: [.font: body, .foregroundColor: UIColor.secondaryLabel]))
         return text
     }
 }

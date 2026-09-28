@@ -98,16 +98,73 @@ final class MarkdownContentView: UIView {
     }
 
     /// The reply's text as VoiceOver reads it.
-    var spokenText: String {
-        blocks.map { block in
+    var spokenText: String { spokenAttributedText.string }
+
+    /// The same, with code marked to be read symbol by symbol, and a table read a row at a
+    /// time with each value after its column's name.
+    var spokenAttributedText: NSAttributedString {
+        let result = NSMutableAttributedString()
+        for block in blocks {
+            let piece: NSAttributedString
             switch block {
-            case let .text(text), let .quote(text): text.string.replacingOccurrences(of: "\u{2028}", with: "\n")
-            case let .code(language, code): "\(language.map { "\($0) code" } ?? "Code"): \(code)"
+            case let .text(text), let .quote(text):
+                let spoken = NSMutableAttributedString(string: text.string.replacingOccurrences(of: "\u{2028}", with: "\n"))
+                // Inline code keeps its place: the string's length is unchanged by the swap.
+                text.enumerateAttribute(.inlineCodeBackground, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+                    if value != nil { spoken.addAttribute(.accessibilitySpeechPunctuation, value: true, range: range) }
+                }
+                piece = spoken
+            case let .code(language, code):
+                let spoken = NSMutableAttributedString(string: "\(language.map { "\($0) code" } ?? "Code"): ")
+                spoken.append(NSAttributedString(string: code, attributes: [.accessibilitySpeechPunctuation: true]))
+                piece = spoken
             case let .table(table):
-                ([table.header] + table.rows).map { $0.map(\.string).joined(separator: ", ") }.joined(separator: ". ")
-            case .rule: ""
+                let names = table.header.map(\.string)
+                let columns = names.count == 1 ? "1 column" : "\(names.count) columns"
+                let rows = table.rows.count == 1 ? "1 row" : "\(table.rows.count) rows"
+                let lines = table.rows.map { row in
+                    zip(names, row.map(\.string)).map { name, value in name.isEmpty ? value : "\(name): \(value)" }
+                        .joined(separator: ", ")
+                }
+                piece = NSAttributedString(string: (["Table, \(rows), \(columns)"] + lines).joined(separator: ". "))
+            case .rule:
+                continue
             }
-        }.filter { !$0.isEmpty }.joined(separator: "\n")
+            guard piece.length > 0 else { continue }
+            if result.length > 0 { result.append(NSAttributedString(string: "\n")) }
+            result.append(piece)
+        }
+        return result
+    }
+
+    /// The reply as it reads, for Copy: prose without Markdown, list markers as written,
+    /// code as it is, a table a row to a line with tabs between cells.
+    var plainText: String {
+        blocks.compactMap { block -> String? in
+            switch block {
+            case let .text(text), let .quote(text):
+                // A list item starts with a tab, its marker and a tab, for the paragraph's tab stops.
+                let lines = text.string.replacingOccurrences(of: "\u{2028}", with: "\n").components(separatedBy: "\n")
+                return lines.map { line in
+                    guard line.hasPrefix("\t"), let end = line.dropFirst().firstIndex(of: "\t") else { return line }
+                    return line[line.index(after: line.startIndex)..<end] + " " + line[line.index(after: end)...]
+                }.joined(separator: "\n")
+            case let .code(_, code): return code
+            case let .table(table): return ([table.header] + table.rows).map { $0.map(\.string).joined(separator: "\t") }.joined(separator: "\n")
+            case .rule: return nil
+            }
+        }.joined(separator: "\n\n")
+    }
+
+    /// The reply's text views, in reading order, for Select Text.
+    var textViews: [TranscriptTextView] {
+        blockViews.compactMap { view in
+            switch view {
+            case let text as MarkdownTextBlockView: text.textView
+            case let quote as QuoteBlockView: quote.textView
+            default: nil
+            }
+        }
     }
 
     /// The links a reply offers, for VoiceOver's actions: in prose, quotes and table cells.
@@ -159,18 +216,23 @@ extension MarkdownBlockView where Self: UIView {
     }
 }
 
-/// Selectable, non-editable text that sizes to its content and opens only the links the
-/// renderer allowed. Data detectors stay off: nothing in a reply becomes a link by guessing.
-/// Links are underlined when Differentiate Without Color is on, and inline code is drawn on
-/// a rounded panel.
+/// Non-editable text that sizes to its content and opens only the links the renderer allowed.
+/// Data detectors stay off: nothing in a reply becomes a link by guessing. Links are underlined
+/// when Differentiate Without Color is on, and inline code is drawn on a rounded panel.
+///
+/// Not selectable until asked, as in Messages: a long press opens the message's menu rather
+/// than starting a selection mid-word, and its Select Text makes the text selectable until it
+/// lets go of the keyboard focus. A tap still opens a link.
 final class TranscriptTextView: UITextView, UITextViewDelegate, NSTextLayoutManagerDelegate {
     private lazy var height = heightAnchor.constraint(equalToConstant: 0)
     private var preparedWidth: CGFloat = -1
+    /// Opens a link; tests replace it.
+    var openURL: (URL) -> Void = { UIApplication.shared.open($0) }
 
     init() {
         super.init(frame: .zero, textContainer: nil)
         isEditable = false
-        isSelectable = true
+        isSelectable = false
         isScrollEnabled = false
         backgroundColor = .clear
         textContainerInset = .zero
@@ -185,6 +247,50 @@ final class TranscriptTextView: UITextView, UITextViewDelegate, NSTextLayoutMana
         setContentCompressionResistancePriority(.required, for: .vertical)
         height.priority = .required - 1
         height.isActive = true
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+    }
+
+    /// Makes the text selectable and selects all of it, for the menu's Select Text.
+    func beginSelecting() {
+        isSelectable = true
+        // A text view made selectable a moment ago may take the focus only on the next pass.
+        if becomeFirstResponder() { return selectAll(nil) }
+        Task { @MainActor [weak self] in
+            guard let self, isSelectable, becomeFirstResponder() else { return }
+            selectAll(nil)
+        }
+    }
+
+    /// Selectable only while it holds the focus Select Text gave it.
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { endSelecting() }
+        return resigned
+    }
+
+    func endSelecting() {
+        guard isSelectable else { return }
+        selectedTextRange = nil
+        isSelectable = false
+    }
+
+    /// The allowed link under `point`, if the point is on its text.
+    func link(at point: CGPoint) -> URL? {
+        guard attributedText.length > 0, let position = closestPosition(to: point) else { return nil }
+        let index = offset(from: beginningOfDocument, to: position)
+        for candidate in [index, index - 1] where candidate >= 0 && candidate < attributedText.length {
+            guard let url = attributedText.attribute(.link, at: candidate, effectiveRange: nil) as? URL,
+                  let start = self.position(from: beginningOfDocument, offset: candidate),
+                  let end = self.position(from: start, offset: 1), let range = textRange(from: start, to: end),
+                  firstRect(for: range).insetBy(dx: -4, dy: -4).contains(point) else { continue }
+            return MarkdownRenderer.isAllowed(url) ? url : nil
+        }
+        return nil
+    }
+
+    @objc private func tapped(_ tap: UITapGestureRecognizer) {
+        guard !isSelectable, let url = link(at: tap.location(in: self)) else { return }
+        openURL(url)
     }
 
     @available(*, unavailable)
@@ -259,11 +365,16 @@ final class InlineCodeLayoutFragment: NSTextLayoutFragment {
                 while end > range.location, string.character(at: end - 1) == 0x20 { end -= 1 }
                 guard end > range.location else { return }
                 let startX = line.locationForCharacter(at: range.location).x
-                let endX = line.locationForCharacter(at: end).x
+                // The renderer kerns the run's last character to leave room after the panel.
+                let kern = text.attribute(.kern, at: end - 1, effectiveRange: nil) as? CGFloat ?? 0
+                let endX = line.locationForCharacter(at: end).x - kern
                 let baseline = bounds.minY + line.glyphOrigin.y
-                let rect = CGRect(x: point.x + bounds.minX + startX - Self.outset.width,
+                // Never past the column's leading edge, as at the start of a line.
+                let minX = max(point.x + bounds.minX + startX - Self.outset.width, point.x + bounds.minX)
+                let maxX = point.x + bounds.minX + endX + Self.outset.width
+                let rect = CGRect(x: minX,
                                   y: point.y + baseline - font.ascender - Self.outset.height,
-                                  width: endX - startX + Self.outset.width * 2,
+                                  width: maxX - minX,
                                   height: font.ascender - font.descender + Self.outset.height * 2)
                 context.setFillColor(color.resolvedColor(with: UITraitCollection.current).cgColor)
                 let radius = min(5, rect.height / 3)
@@ -385,7 +496,7 @@ final class RuleBlockView: UIView, MarkdownBlockView {
 final class CodeBlockView: UIView, MarkdownBlockView {
     private let languageLabel = UILabel()
     private let copyButton = UIButton(type: .system)
-    private let scrollView = UIScrollView()
+    let scrollView = FadingScrollView()
     private let codeView = TranscriptTextView()
     private lazy var codeWidth = codeView.widthAnchor.constraint(equalToConstant: 0)
     private lazy var codeHeight = scrollView.heightAnchor.constraint(equalToConstant: 0)
@@ -408,6 +519,9 @@ final class CodeBlockView: UIView, MarkdownBlockView {
         backgroundColor = LatchPalette.codeBackground
         layer.cornerRadius = 12
         layer.cornerCurve = .continuous
+        // A hairline with Increase Contrast, where the panel alone is faint.
+        registerForTraitChanges([UITraitAccessibilityContrast.self]) { (view: CodeBlockView, _) in view.updateBorder() }
+        updateBorder()
 
         languageLabel.font = .preferredFont(forTextStyle: .caption1)
         languageLabel.adjustsFontForContentSizeCategory = true
@@ -423,6 +537,7 @@ final class CodeBlockView: UIView, MarkdownBlockView {
         copyButton.showsLargeContentViewer = true
         copyButton.largeContentTitle = "Copy Code"
         copyButton.addAction(UIAction { [weak self] _ in self?.copyCode() }, for: .primaryActionTriggered)
+        copyButton.isPointerInteractionEnabled = true
 
         scrollView.showsHorizontalScrollIndicator = true
         scrollView.showsVerticalScrollIndicator = false
@@ -501,6 +616,11 @@ final class CodeBlockView: UIView, MarkdownBlockView {
         codeView.prepare(width: codeWidth.constant)
     }
 
+    private func updateBorder() {
+        layer.borderWidth = traitCollection.accessibilityContrast == .high ? 1 : 0
+        layer.borderColor = UIColor.separator.resolvedColor(with: traitCollection).cgColor
+    }
+
     /// `code` with every line longer than `limit` characters cut to it and ended with "…".
     static func cutting(_ code: String, toLinesOf limit: Int) -> String {
         guard code.utf16.count > limit else { return code }
@@ -519,7 +639,8 @@ final class CodeBlockView: UIView, MarkdownBlockView {
         configuration?.image = UIImage(systemName: "checkmark")
         copyButton.configuration = configuration
         copyButton.accessibilityLabel = "Copied"
-        UIAccessibility.post(notification: .announcement, argument: "Copied")
+        UIAccessibility.post(notification: .announcement, argument: NSAttributedString(
+            string: "Copied", attributes: [.accessibilitySpeechQueueAnnouncement: true]))
         copyReset?.cancel()
         copyReset = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.5))
@@ -536,7 +657,7 @@ final class CodeBlockView: UIView, MarkdownBlockView {
 /// the header set in semibold on a tinted row, hairlines between cells. A table wider than
 /// the reply scrolls sideways rather than squeezing its columns.
 final class TableBlockView: UIView, MarkdownBlockView {
-    private let scrollView = UIScrollView()
+    let scrollView = FadingScrollView()
     private let grid = TableGridView()
     private lazy var gridWidth = grid.widthAnchor.constraint(equalToConstant: 0)
     private lazy var gridHeight = grid.heightAnchor.constraint(equalToConstant: 0)
@@ -592,7 +713,7 @@ final class TableGridView: UIView {
 
     init() {
         super.init(frame: .zero)
-        layer.cornerRadius = 10
+        layer.cornerRadius = 12
         layer.cornerCurve = .continuous
         layer.borderWidth = 1 / max(1, UITraitCollection.current.displayScale)
         clipsToBounds = true
@@ -716,5 +837,46 @@ final class TableGridView: UIView {
         }
         lines.frame = bounds
         lines.path = path.cgPath
+    }
+}
+
+/// A scroll view that pans sideways and fades out at an edge with more beyond it, so a code
+/// line or a table cut at the reply's edge reads as continuing rather than clipped. A mask,
+/// not an overlay, so it works on any background; none at all while everything fits.
+final class FadingScrollView: UIScrollView {
+    private let fade = CAGradientLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        fade.startPoint = CGPoint(x: 0, y: 0.5)
+        fade.endPoint = CGPoint(x: 1, y: 0.5)
+        fade.colors = [UIColor.clear, .black, .black, .clear].map(\.cgColor)
+        registerForTraitChanges([UITraitAccessibilityContrast.self]) { (view: FadingScrollView, _) in view.setNeedsLayout() }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// Whether each edge fades now, for tests.
+    private(set) var fadingEdges: (leading: Bool, trailing: Bool) = (false, false)
+
+    /// Runs on every scroll as well as every layout: the mask follows the visible bounds.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let leading = contentOffset.x > -contentInset.left + 1
+        let trailing = contentOffset.x + bounds.width < contentSize.width + contentInset.right - 1
+        fadingEdges = (leading, trailing)
+        guard (leading || trailing), bounds.width > 0 else {
+            if layer.mask != nil { layer.mask = nil }
+            return
+        }
+        // Shorter with Increase Contrast, so less of the text is faint.
+        let length = min(traitCollection.accessibilityContrast == .high ? 12 : 24, bounds.width / 4) / bounds.width
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fade.frame = bounds
+        fade.locations = [0, leading ? length : 0, trailing ? 1 - length : 1, 1].map { NSNumber(value: Double($0)) }
+        if layer.mask !== fade { layer.mask = fade }
+        CATransaction.commit()
     }
 }

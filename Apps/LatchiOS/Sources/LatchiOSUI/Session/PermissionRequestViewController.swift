@@ -7,15 +7,20 @@ import UIKit
 /// the default, by look or by key, and the sheet cannot be swiped away: it closes with a
 /// decision, or on its own when the request does.
 ///
-/// The request always comes first. The options stay pinned below it only while they leave
-/// most of the sheet to the request; when they would not, as at accessibility text sizes,
-/// they follow the details in the scrolling area, so nobody decides without having scrolled
-/// past what is asked. Cancel Request stays in reach either way.
+/// The request always comes first. The options and Cancel Request stay pinned below it only
+/// while they leave most of the sheet to the request; when they would not, as at accessibility
+/// text sizes, all of them follow the details in the scrolling area, together, so nobody
+/// decides without having scrolled past what is asked, and Cancel is never the only choice
+/// in sight.
 final class PermissionRequestViewController: UIViewController {
     let promptID: UUID
     let options: [ACPPermissionOption]
     let requestTitle: String
     let details: String
+    /// The request is a shell command, set in monospace as the transcript sets it.
+    let isCommand: Bool
+    /// The details would only repeat the command in the title, so they are not shown.
+    let detailsRepeatTitle: Bool
     private let agentTitle: String
     private let decide: (String?) -> Void
     private var decided = false
@@ -40,6 +45,12 @@ final class PermissionRequestViewController: UIViewController {
         self.agentTitle = agentTitle
         self.decide = decide
         (requestTitle, details) = Self.describe(prompt.request)
+        let command = Self.command(of: prompt.request)
+        let bare = ToolCallPresentation(text: requestTitle)
+        isCommand = bare.isCommand || command != nil || Self.kind(of: prompt.request) == "execute"
+        // Only when the input is the command alone, and the details say nothing else.
+        detailsRepeatTitle = command.map { $0 == bare.displayTitle } == true
+            && details.components(separatedBy: "\n\n").allSatisfy { $0.hasPrefix("rawInput (") }
         super.init(nibName: nil, bundle: nil)
         isModalInPresentation = true
         // A centred form on an iPad; a sheet from the bottom on an iPhone.
@@ -81,6 +92,18 @@ final class PermissionRequestViewController: UIViewController {
         return (title.trimmingCharacters(in: .whitespacesAndNewlines), details)
     }
 
+    /// The command, when the agent's input is exactly `{"command": …}`.
+    static func command(of request: ACPPermissionRequest) -> String? {
+        guard case let .object(call) = request.toolCall, case let .object(input)? = call["rawInput"],
+              input.count == 1, case let .string(command)? = input["command"] else { return nil }
+        return command
+    }
+
+    private static func kind(of request: ACPPermissionRequest) -> String? {
+        guard case let .object(call) = request.toolCall, case let .string(kind)? = call["kind"] else { return nil }
+        return kind
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -102,13 +125,19 @@ final class PermissionRequestViewController: UIViewController {
         // The title says it for VoiceOver, where focus lands.
         caption.isAccessibilityElement = false
 
-        titleLabel.text = requestTitle.isEmpty ? "Permission Request" : requestTitle
-        titleLabel.font = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .title3)
-            .withSymbolicTraits(.traitBold).map { UIFont(descriptor: $0, size: 0) } ?? .preferredFont(forTextStyle: .title3)
+        let shownTitle = requestTitle.isEmpty ? "Permission Request" : ToolCallPresentation(text: requestTitle).displayTitle
+        titleLabel.text = shownTitle
+        titleLabel.font = isCommand
+            ? UIFontMetrics(forTextStyle: .title3).scaledFont(for: .monospacedSystemFont(ofSize: 18, weight: .semibold))
+            : UIFontDescriptor.preferredFontDescriptor(withTextStyle: .title3)
+                .withSymbolicTraits(.traitBold).map { UIFont(descriptor: $0, size: 0) } ?? .preferredFont(forTextStyle: .title3)
         titleLabel.adjustsFontForContentSizeCategory = true
         titleLabel.numberOfLines = 0
         titleLabel.accessibilityTraits = .header
-        titleLabel.accessibilityLabel = "\(agentTitle) requests permission: \(titleLabel.text ?? "")"
+        // The command is read symbol by symbol: `rm -rf .build` and `rm -rf ~/` differ by little.
+        let spoken = NSMutableAttributedString(string: "\(agentTitle) requests permission: ")
+        spoken.append(NSAttributedString(string: shownTitle, attributes: isCommand ? [.accessibilitySpeechPunctuation: true] : [:]))
+        titleLabel.accessibilityAttributedLabel = spoken
 
         let detailsBox = UIView()
         detailsBox.backgroundColor = LatchPalette.codeBackground
@@ -125,7 +154,9 @@ final class PermissionRequestViewController: UIViewController {
         detailsView.adjustsFontForContentSizeCategory = true
         let font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .monospacedSystemFont(ofSize: 12.5, weight: .regular))
         let bold = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .monospacedSystemFont(ofSize: 12.5, weight: .semibold))
-        detailsView.attributedText = ToolCallPresentation.styledDetails(details, font: font, boldFont: bold)
+        let styled = NSMutableAttributedString(attributedString: ToolCallPresentation.styledDetails(details, font: font, boldFont: bold))
+        styled.addAttribute(.accessibilitySpeechPunctuation, value: true, range: NSRange(location: 0, length: styled.length))
+        detailsView.attributedText = styled
         detailsView.accessibilityLabel = "Tool details"
         detailsView.translatesAutoresizingMaskIntoConstraints = false
         detailsBox.addSubview(detailsView)
@@ -138,7 +169,7 @@ final class PermissionRequestViewController: UIViewController {
 
         // After the details, so the command is the first thing read.
         let explanation = UILabel()
-        explanation.text = "“Always” uses the agent’s scope, not a saved Latch preference. Cancelling this request does not sandbox the agent."
+        explanation.text = "“Always” is remembered by \(agentTitle), not by Latch. Cancel Request declines only this request; it doesn’t restrict the agent."
         explanation.font = .preferredFont(forTextStyle: .footnote)
         explanation.adjustsFontForContentSizeCategory = true
         explanation.textColor = .secondaryLabel
@@ -157,11 +188,12 @@ final class PermissionRequestViewController: UIViewController {
             var configuration = UIButton.Configuration.gray()
             configuration.title = option.permissionLabel
             configuration.buttonSize = .large
-            configuration.cornerStyle = .large
+            configuration.cornerStyle = .capsule
             configuration.titleLineBreakMode = .byWordWrapping
             let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
                 self?.finish(option.optionId)
             })
+            button.isPointerInteractionEnabled = true
             optionStack.addArrangedSubview(button)
             optionButtons.append(button)
         }
@@ -171,6 +203,7 @@ final class PermissionRequestViewController: UIViewController {
         cancel.buttonSize = .large
         cancel.titleLineBreakMode = .byWordWrapping
         cancelButton = UIButton(configuration: cancel, primaryAction: UIAction { [weak self] _ in self?.finish(nil) })
+        cancelButton.isPointerInteractionEnabled = true
         for button in optionButtons + [cancelButton] {
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 50).isActive = true
         }
@@ -181,6 +214,7 @@ final class PermissionRequestViewController: UIViewController {
         content.axis = .vertical
         content.spacing = 16
         content.setCustomSpacing(10, after: detailsBox)
+        detailsBox.isHidden = detailsRepeatTitle || details.isEmpty
         pinned.axis = .vertical
         pinned.spacing = 10
         pinned.addArrangedSubview(optionStack)
@@ -216,6 +250,14 @@ final class PermissionRequestViewController: UIViewController {
         }
         NSLayoutConstraint.activate(constraints)
         pinned.setContentCompressionResistancePriority(.required, for: .vertical)
+        // What scrolls under the pinned options fades into them rather than stopping at a hard line.
+        if #available(iOS 26.0, *) {
+            let edge = UIScrollEdgeElementContainerInteraction()
+            edge.scrollView = scrollView
+            edge.edge = .bottom
+            pinned.addInteraction(edge)
+            scrollView.bottomEdgeEffect.style = .soft
+        }
         arrangeHeading()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: PermissionRequestViewController, _) in
             controller.arrangeHeading()
@@ -243,11 +285,16 @@ final class PermissionRequestViewController: UIViewController {
         guard pin != optionsArePinned else { return }
         optionsArePinned = pin
         optionStack.removeFromSuperview()
+        cancelButton.removeFromSuperview()
         if pin {
-            pinned.insertArrangedSubview(optionStack, at: 0)
+            pinned.addArrangedSubview(optionStack)
+            pinned.addArrangedSubview(cancelButton)
         } else {
+            let last = content.arrangedSubviews.last
             content.addArrangedSubview(optionStack)
-            content.setCustomSpacing(20, after: content.arrangedSubviews[content.arrangedSubviews.count - 2])
+            content.addArrangedSubview(cancelButton)
+            if let last { content.setCustomSpacing(20, after: last) }
+            content.setCustomSpacing(10, after: optionStack)
         }
         view.setNeedsLayout()
     }

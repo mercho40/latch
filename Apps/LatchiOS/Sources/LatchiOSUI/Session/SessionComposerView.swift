@@ -9,7 +9,10 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         case stop(enabled: Bool)
     }
 
-    let textView = UITextView()
+    /// Keys a hardware keyboard sends that the session may take before the text does.
+    enum Key { case `return`, up, down, tab, escape }
+
+    let textView = ComposerTextView()
     let placeholderLabel = UILabel()
     let attachButton = UIButton(type: .system)
     let actionButton = UIButton(type: .system)
@@ -28,8 +31,27 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     var onRemoveAttachment: ((UUID) -> Void)?
     /// After the field grows or shrinks, so the transcript can keep its end in view.
     var onHeightChange: (() -> Void)?
+    /// Photos pasted into the field.
+    var onPasteImages: (([NSItemProvider]) -> Void)? {
+        get { textView.onPasteImages }
+        set { textView.onPasteImages = newValue }
+    }
+    /// Whether the session takes `key` now; when it does not, the text view has it as usual.
+    var canHandleKey: ((Key) -> Bool)? {
+        get { textView.canHandleKey }
+        set { textView.canHandleKey = newValue }
+    }
+    var onKey: ((Key) -> Void)? {
+        get { textView.onKey }
+        set { textView.onKey = newValue }
+    }
 
+    /// The most lines the field grows to before it scrolls. At accessibility sizes fewer,
+    /// so a phone held sideways with the keyboard up still shows some of the conversation.
     static let maximumLines = 6
+    private var maximumLines: Int {
+        traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? 3 : Self.maximumLines
+    }
     private static let fieldRadius: CGFloat = 22
 
     var text: String {
@@ -69,10 +91,11 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         textView.isScrollEnabled = false
         textView.delegate = self
         textView.accessibilityLabel = "Message"
-        textView.accessibilityHint = "Command Return sends on a hardware keyboard."
         placeholderLabel.font = .preferredFont(forTextStyle: .body)
         placeholderLabel.adjustsFontForContentSizeCategory = true
         placeholderLabel.textColor = .placeholderText
+        // Wraps rather than cut the agent's name short at large text sizes.
+        placeholderLabel.numberOfLines = 0
         placeholderLabel.isAccessibilityElement = false
 
         var attach: UIButton.Configuration
@@ -91,6 +114,8 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         attachButton.largeContentTitle = "Add Photos"
         attachButton.largeContentImage = UIImage(systemName: "plus")
         attachButton.addAction(UIAction { [weak self] _ in self?.onAttach?() }, for: .primaryActionTriggered)
+        attachButton.isPointerInteractionEnabled = true
+        actionButton.isPointerInteractionEnabled = true
 
         actionButton.showsLargeContentViewer = true
         actionButton.addAction(UIAction { [weak self] _ in
@@ -111,7 +136,12 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         strip.isHidden = true
         strip.accessibilityLabel = "Photos to send"
 
-        for view in [fieldBackground, strip, textView, placeholderLabel, actionButton] {
+        dropHighlight.backgroundColor = LatchPalette.tint.withAlphaComponent(0.15)
+        dropHighlight.layer.cornerRadius = Self.fieldRadius
+        dropHighlight.layer.cornerCurve = .continuous
+        dropHighlight.isUserInteractionEnabled = false
+        dropHighlight.alpha = 0
+        for view in [fieldBackground, dropHighlight, strip, textView, placeholderLabel, actionButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             field.addSubview(view)
         }
@@ -137,6 +167,10 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             fieldBackground.trailingAnchor.constraint(equalTo: field.trailingAnchor),
             fieldBackground.topAnchor.constraint(equalTo: field.topAnchor),
             fieldBackground.bottomAnchor.constraint(equalTo: field.bottomAnchor),
+            dropHighlight.leadingAnchor.constraint(equalTo: field.leadingAnchor),
+            dropHighlight.trailingAnchor.constraint(equalTo: field.trailingAnchor),
+            dropHighlight.topAnchor.constraint(equalTo: field.topAnchor),
+            dropHighlight.bottomAnchor.constraint(equalTo: field.bottomAnchor),
             strip.leadingAnchor.constraint(equalTo: field.leadingAnchor),
             strip.trailingAnchor.constraint(equalTo: field.trailingAnchor),
             strip.topAnchor.constraint(equalTo: field.topAnchor),
@@ -191,6 +225,17 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     var canAttach = true {
         didSet { attachButton.isEnabled = canAttach }
     }
+
+    /// Photos are being dragged over the page: the field says it takes them.
+    var isDropTarget = false {
+        didSet {
+            guard isDropTarget != oldValue else { return }
+            UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.2) {
+                self.dropHighlight.alpha = self.isDropTarget ? 1 : 0
+            }
+        }
+    }
+    private let dropHighlight = UIView()
 
     func setAction(_ action: Action) {
         guard action != self.action else { return }
@@ -254,7 +299,7 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         placeholderBaseline.constant = inset + font.ascender
         let width = textView.bounds.width > 0 ? textView.bounds.width : 200
         let natural = ceil(textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height)
-        let maximum = ceil(font.lineHeight * CGFloat(Self.maximumLines) + inset * 2)
+        let maximum = ceil(font.lineHeight * CGFloat(maximumLines) + inset * 2)
         let height = max(44, min(natural, maximum))
         textView.isScrollEnabled = natural > maximum
         if abs(textHeight.constant - height) > 0.5 {
@@ -284,6 +329,7 @@ private final class ComposerAttachmentTile: UIView {
         image.clipsToBounds = true
         image.layer.cornerRadius = 10
         image.layer.cornerCurve = .continuous
+        image.accessibilityIgnoresInvertColors = true
         image.isAccessibilityElement = true
         image.accessibilityLabel = "Image, \(attachment.name)"
         let button = UIButton(type: .system)
@@ -318,4 +364,51 @@ private final class ComposerAttachmentTile: UIView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+/// The composer's text: plain text, as typed or pasted, and photos pasted into it, which go
+/// to the composer rather than into the text. On a hardware keyboard it offers the session
+/// Return, the arrows, Tab and Escape first; whatever the session does not take, the text
+/// view handles as usual, so Shift-Return and a Return that ends marked text still type.
+final class ComposerTextView: UITextView {
+    var onPasteImages: (([NSItemProvider]) -> Void)?
+    var canHandleKey: ((SessionComposerView.Key) -> Bool)?
+    var onKey: ((SessionComposerView.Key) -> Void)?
+
+    private static let keys: [(String, SessionComposerView.Key, Selector)] = [
+        ("\r", .return, #selector(returnKey)), (UIKeyCommand.inputUpArrow, .up, #selector(upKey)),
+        (UIKeyCommand.inputDownArrow, .down, #selector(downKey)), ("\t", .tab, #selector(tabKey)),
+        (UIKeyCommand.inputEscape, .escape, #selector(escapeKey)),
+    ]
+
+    override var keyCommands: [UIKeyCommand]? {
+        Self.keys.map { input, _, action in
+            let command = UIKeyCommand(input: input, modifierFlags: [], action: action)
+            command.wantsPriorityOverSystemBehavior = true
+            return command
+        }
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if let key = Self.keys.first(where: { $0.2 == action })?.1 {
+            return markedTextRange == nil && canHandleKey?(key) == true
+        }
+        if action == #selector(paste(_:)), onPasteImages != nil, UIPasteboard.general.hasImages { return true }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    @objc private func returnKey() { onKey?(.return) }
+    @objc private func upKey() { onKey?(.up) }
+    @objc private func downKey() { onKey?(.down) }
+    @objc private func tabKey() { onKey?(.tab) }
+    @objc private func escapeKey() { onKey?(.escape) }
+
+    /// A photo on the pasteboard is attached; text pastes as text.
+    override func paste(_ sender: Any?) {
+        let pasteboard = UIPasteboard.general
+        if let onPasteImages, pasteboard.hasImages, !pasteboard.hasStrings {
+            return onPasteImages(pasteboard.itemProviders)
+        }
+        super.paste(sender)
+    }
 }

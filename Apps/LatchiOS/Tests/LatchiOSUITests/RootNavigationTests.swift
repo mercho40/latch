@@ -86,12 +86,24 @@ final class RootNavigationTests: XCTestCase {
         XCTAssertTrue(root.shown?.session === ordered[1])
     }
 
-    func testKeyCommands() {
+    /// The shortcuts are menu bar commands, each defined once, dimmed where they do not apply.
+    func testTheMenuBarsCommandsAndTheirKeys() {
         let root = RootViewController()
-        let commands = (root.keyCommands ?? []).map { ($0.input ?? "", $0.modifierFlags, $0.title) }
-        XCTAssertEqual(commands.map(\.0), ["n", ",", "[", "]"])
-        XCTAssertTrue(commands.allSatisfy { $0.1 == .command })
-        XCTAssertEqual(commands.map(\.2), ["New Session", "Servers", "Previous Session", "Next Session"])
+        XCTAssertNil(root.keyCommands, "No shortcut outside the menu bar")
+        let session = LatchAppDelegate.sessionMenu
+        let keys = session.children.flatMap { ($0 as? UIMenu)?.children ?? [] }.compactMap { $0 as? UIKeyCommand }
+            .map { ($0.title, $0.input ?? "", $0.modifierFlags) }
+        XCTAssertEqual(keys.map(\.0), ["Send", "Stop", "Add Photos…", "Copy Path", "Previous Session", "Next Session",
+                                        "Previous Session", "Next Session"])
+        XCTAssertEqual(keys.map(\.1), ["\r", ".", "a", "c", UIKeyCommand.inputUpArrow, UIKeyCommand.inputDownArrow, "[", "]"])
+        XCTAssertEqual(keys[3].2, [.command, .alternate], "Finder's Copy as Pathname")
+        XCTAssertEqual(keys[4].2, [.command, .alternate], "The Mac's Previous Session")
+        let commands = session.children.flatMap { ($0 as? UIMenu)?.children ?? [] }.compactMap { $0 as? UICommand }
+        XCTAssertEqual(commands.filter { $0.attributes.contains(.hidden) }.count, 2, "⌘[ and ⌘] still work, unlisted")
+        // No server: nothing to start a session on.
+        XCTAssertFalse(root.canPerformAction(#selector(RootViewController.newSessionCommand), withSender: nil))
+        XCTAssertTrue(root.canPerformAction(#selector(RootViewController.serversCommand), withSender: nil))
+        XCTAssertFalse(root.canPerformAction(#selector(RootViewController.nextSessionCommand), withSender: nil))
     }
 
     func testNewSessionWithoutAServerAsksToAddOne() {
@@ -110,8 +122,14 @@ final class RootNavigationTests: XCTestCase {
         library.onAttention?(session, .needsApproval)
         let banner = try XCTUnwrap(root.attentionBanner)
         XCTAssertEqual(banner.titleLabel.text, "New Session")
-        XCTAssertEqual(banner.messageLabel.text, "The agent is waiting for a permission decision.")
-        XCTAssertEqual(banner.accessibilityLabel, "New Session. The agent is waiting for a permission decision.")
+        XCTAssertEqual(banner.messageLabel.text, "\(session.agentTitle) on vps needs approval.")
+        XCTAssertEqual(banner.accessibilityLabel, "New Session. \(session.agentTitle) on vps needs approval.")
+        XCTAssertEqual(root.banners.duration, .seconds(8), "A decision holds the agent up, so it stays longer")
+        // Beside the sidebar, the banner keeps to the session's column.
+        root.view.layoutIfNeeded()
+        if !root.isCollapsed, let column = root.viewController(for: .secondary)?.navigationController?.view {
+            XCTAssertGreaterThanOrEqual(banner.frame.minX, column.convert(column.bounds, to: root.view).minX)
+        }
         XCTAssertTrue(banner.accessibilityTraits.contains(.button))
         banner.onTap?()
         XCTAssertTrue(root.shown?.session === session)

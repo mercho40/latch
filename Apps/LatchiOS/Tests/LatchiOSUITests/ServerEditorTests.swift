@@ -53,9 +53,27 @@ final class ServerEditorTests: XCTestCase {
         let linked = editor(pairing: try LatchRemotePairing(host: "vps.example", token: token))
         XCTAssertTrue(linked.fromLink)
         XCTAssertEqual(linked.tableView.numberOfSections, sections - 1)
-        XCTAssertEqual(linked.tableView(linked.tableView, titleForHeaderInSection: 0),
+        XCTAssertEqual(linked.tableView(linked.tableView, titleForHeaderInSection: 0), "Server",
+                       "The note goes in the footer, in the footnote style Edit Server uses")
+        let footer = linked.tableView(linked.tableView, viewForFooterInSection: 0) as? UITableViewHeaderFooterView
+        XCTAssertEqual((footer?.contentConfiguration as? UIListContentConfiguration)?.text,
                        "From a pairing link. Check the host, then tap Add.")
         XCTAssertEqual(linked.hostField.text, "vps.example")
+    }
+
+    /// A link's server is checked as the sheet appears, and goes by the name it gives itself.
+    func testALinkIsCheckedAtOnceAndNamedAfterTheServer() async throws {
+        let linked = editor(pairing: try LatchRemotePairing(host: "vps.tailnet.ts.net", token: token), check: { [info] _ in info })
+        XCTAssertEqual(linked.nameField.text, "vps.tailnet.ts.net")
+        linked.viewDidAppear(false)
+        XCTAssertTrue(linked.isTesting)
+        await linked.testFinished()
+        XCTAssertEqual(linked.nameField.text, "vps")
+        let footer = linked.tableView(linked.tableView, viewForFooterInSection: 0) as? UITableViewHeaderFooterView
+        XCTAssertEqual((footer?.contentConfiguration as? UIListContentConfiguration)?.text,
+                       "Found vps · Ubuntu 24.04 · Latch 0.1.0. Tap Add to use it.")
+        linked.viewDidAppear(false)
+        XCTAssertFalse(linked.isTesting, "Once")
     }
 
     func testTheNameFollowsTheHostUntilTyped() {
@@ -262,7 +280,7 @@ final class ServerEditorTests: XCTestCase {
     func testRemovingAServerSaysItsSessionsWillNotReconnect() {
         let alert = ServersViewController.removalAlert(name: "vps") {}
         XCTAssertEqual(alert.title, "Remove “vps”?")
-        XCTAssertTrue(alert.message?.contains("can’t connect again") == true)
+        XCTAssertTrue(alert.message?.contains("Add the server again to reconnect them") == true)
         XCTAssertTrue(alert.message?.contains("keep running") == true)
         XCTAssertEqual(alert.actions.map(\.style), [.cancel, .destructive])
     }

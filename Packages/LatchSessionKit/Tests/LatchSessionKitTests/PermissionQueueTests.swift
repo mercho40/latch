@@ -36,6 +36,13 @@ final class PermissionQueueTests: XCTestCase {
         XCTAssertNil(queue.current)
     }
 
+    func testAlwaysOptionsAreLabelledPlainly() {
+        let labels = ["allow_once", "allow_always", "reject_once", "reject_always"].map {
+            ACPPermissionOption(optionId: $0, name: "Agent's own name", kind: $0).permissionLabel
+        }
+        XCTAssertEqual(labels, ["Allow Once", "Always Allow", "Reject Once", "Always Reject"])
+    }
+
     @MainActor func testTaskCancellationRemovesPendingDecision() async throws {
         let queue = PermissionQueue()
         let task = Task { await queue.request(request) }

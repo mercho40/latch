@@ -43,6 +43,8 @@ struct SessionRowStatus: Equatable {
         var stoppedOnServer = false
         /// Stop Agent was chosen here, and the session has not connected since.
         var stoppedHere = false
+        /// Stop was chosen for the running turn, and the agent has not ended it yet.
+        var stopping = false
         var promptStartedAt: Date?
         var lastActiveAt: Date?
         var hasUnseenReply = false
@@ -73,13 +75,16 @@ struct SessionRowStatus: Equatable {
             return SessionRowStatus(mark: .failed, text: input.status, spoken: input.status)
         }
         switch input.phase {
+        case .prompting where input.stopping:
+            return SessionRowStatus(mark: .working, text: "Stopping…", spoken: "Stopping")
         case .prompting where input.status == "Working…":
             // How long the turn has run, so a long one looks long.
             guard let started = input.promptStartedAt else {
                 return SessionRowStatus(mark: .working, text: "Working…", spoken: "Working")
             }
-            let elapsed = RelativeTime.duration(now.timeIntervalSince(started))
-            return SessionRowStatus(mark: .working, text: elapsed, spoken: "Working, \(elapsed)")
+            let elapsed = now.timeIntervalSince(started)
+            return SessionRowStatus(mark: .working, text: RelativeTime.duration(elapsed),
+                                    spoken: "Working, \(RelativeTime.spokenDuration(elapsed))")
         case .connecting, .stopping, .prompting:
             return SessionRowStatus(mark: .working, text: input.status, spoken: input.status)
         case .ready, .disconnected:

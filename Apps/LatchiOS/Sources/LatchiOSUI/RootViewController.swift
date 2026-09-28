@@ -30,6 +30,8 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     let library: SessionLibrary
     let servers: any PhoneServerStore
     let check: ServerCheck
+    /// Each server's home folder and where removed servers were.
+    let memory: ServerMemory
     private let makeSessionViewController: SessionViewControllerFactory
     private let badge: ApprovalBadge?
     /// The session in the secondary column, and the screen showing it.
@@ -54,11 +56,14 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
 
     /// `makeSessionViewController` builds the screen for a session; tests pass their own.
     init(library: SessionLibrary, servers: any PhoneServerStore, check: @escaping ServerCheck, badge: ApprovalBadge?,
-         defaults: UserDefaults = .standard,
+         defaults: UserDefaults = .standard, memory: ServerMemory? = nil,
          makeSessionViewController: @escaping SessionViewControllerFactory = SessionDetailViewController.make) {
+        let memory = memory ?? ServerMemory(defaults: defaults)
         self.library = library
         self.servers = servers
-        self.check = check
+        self.memory = memory
+        // Every check, from any screen, leaves the server's home for the paths shown on it.
+        self.check = memory.recording(check)
         self.badge = badge
         self.makeSessionViewController = makeSessionViewController
         sessions = SessionsViewController(library: library, defaults: defaults)
@@ -68,9 +73,7 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         preferredSplitBehavior = .tile
         // UIKit wraps each column in its own navigation controller.
         setViewController(sessions, for: .primary)
-        placeholder.isEmpty = servers.servers.isEmpty
-        placeholder.onAddServer = { [weak self] in self?.sessions.addServer() }
-        setViewController(placeholder, for: .secondary)
+        setViewController(makePlaceholder(), for: .secondary)
         wire()
     }
 
@@ -88,6 +91,13 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         sessions.onOpen = { [weak self] session in self?.show(session) }
         sessions.onShownAlone = { [weak self] in self?.listShownAlone() }
         sessions.confirm = { [weak self] confirmation, go in self?.confirm(confirmation, go) }
+        sessions.rename = { [weak self] session in
+            self?.presentOnTop(SessionDetailViewController.renameAlert(title: session.title) { [weak session] name in
+                session?.rename(to: name)
+            })
+        }
+        library.onServerRemoved = { [weak self] server in self?.memory.recordRemoval(of: server) }
+        library.onForget = { session in SentImageCache.shared.remove(session.model.messages.map(\.id)) }
         library.isSessionVisible = { [weak self] id in self?.isShowing(id) ?? false }
         library.onChange = { [weak self] in self?.libraryChanged() }
         library.onSessionChange = { [weak self] session in self?.sessions.sessionChanged(session) }
@@ -128,7 +138,13 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     /// Expanding again, the open session is beside the list, so it is the one selected.
     public func splitViewControllerDidExpand(_ svc: UISplitViewController) {
         if let shown { library.open(shown.session) }
+        sessions.reload(animated: false)
         sessions.selectShownSession()
+    }
+
+    /// Collapsed, the list is all there is, so it explains pairing itself.
+    public func splitViewControllerDidCollapse(_ svc: UISplitViewController) {
+        sessions.reload(animated: false)
     }
 
     /// Back at the list on iPhone: no session is open, so a relaunch starts at the list too.
@@ -172,7 +188,7 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
 
     private func libraryChanged() {
         sessions.reload()
-        placeholder.isEmpty = servers.servers.isEmpty
+        placeholder.hasServers = !servers.servers.isEmpty
         // A renamed server's name, in the open session's title, and a removed one's notice.
         if let shown, let screen = shown.controller as? SessionDetailViewController {
             screen.follow(shown.session, in: self)
@@ -203,14 +219,19 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
             }
             return
         }
-        placeholder = SessionPlaceholderViewController()
-        placeholder.isEmpty = servers.servers.isEmpty
-        placeholder.onAddServer = { [weak self] in self?.sessions.addServer() }
-        setViewController(placeholder, for: .secondary)
+        setViewController(makePlaceholder(), for: .secondary)
         if isCollapsed { show(.primary) }
     }
 
-    /// ⌘[ and ⌘]: the next session in the list's order.
+    private func makePlaceholder() -> SessionPlaceholderViewController {
+        placeholder = SessionPlaceholderViewController()
+        placeholder.hasServers = !servers.servers.isEmpty
+        placeholder.onAddServer = { [weak self] in self?.sessions.addServer() }
+        placeholder.onNewSession = { [weak self] in self?.presentNewSession() }
+        return placeholder
+    }
+
+    /// ⌥⌘↑ and ⌥⌘↓, or ⌘[ and ⌘]: the next session in the list's order.
     func step(by offset: Int) {
         let ordered = library.orderedSessions
         guard !ordered.isEmpty else { return }
@@ -240,23 +261,32 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     /// New Session in its sheet, or nil with no server to start one on.
     func newSessionSheet(serverID: UUID? = nil) -> UINavigationController? {
         guard !servers.servers.isEmpty else { return nil }
-        let controller = NewSessionViewController(servers: servers.servers, serverID: serverID, check: check) {
+        let controller = NewSessionViewController(servers: servers.servers, serverID: serverID, check: check, memory: memory) {
             [weak library] id in
             // Adopted sessions count too: they name the agent and folder that are in use there.
             library?.sessions(on: id).first.map { .init(serverID: id, path: $0.path, agent: $0.agent) }
         }
+        controller.recentFolders = { [weak library] id in library?.recentFolders(on: id) ?? [] }
         controller.onCreate = { [weak self] choice in
             guard let self else { return }
-            show(library.create(serverID: choice.serverID, path: choice.path, agent: choice.agent))
+            let session = library.create(serverID: choice.serverID, path: choice.path, agent: choice.agent)
+            show(session)
+            // Started from New Session, the next thing is the first prompt.
+            (shown?.controller as? SessionDetailViewController)?.focusComposerOnAppear()
         }
         let navigation = UINavigationController(rootViewController: controller)
         if traitCollection.userInterfaceIdiom == .pad {
             navigation.modalPresentationStyle = .formSheet
-            // Three rows need no more than this; a full form sheet would be mostly empty.
+            // As tall as the form, which the sheet sets from its table; a full form sheet
+            // would be mostly empty at the default text size.
             navigation.preferredContentSize = CGSize(width: 540, height: 400)
         } else if let sheet = navigation.sheetPresentationController {
             sheet.detents = [.medium(), .large()]
             sheet.prefersGrabberVisible = true
+            // At accessibility sizes the medium detent shows only the menus, not the folder.
+            if traitCollection.preferredContentSizeCategory.isAccessibilityCategory {
+                sheet.selectedDetentIdentifier = .large
+            }
         }
         return navigation
     }
@@ -295,11 +325,70 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         } else {
             ServerEditorViewController(store: servers, pairing: pairing, check: check)
         }
+        let isNew = serverID == nil
         editor.onSave = { [weak self] server in
             guard let self else { return }
-            Task { await self.library.refreshRuntimes(for: [server.id]) }
+            guard isNew else {
+                Task { await self.library.refreshRuntimes(for: [server.id]) }
+                return
+            }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            afterPresentationsSettle { [weak self] in self?.serverAdded(server) }
         }
         return ServerEditorViewController.sheet(editor)
+    }
+
+    /// Runs `body` once nothing is on its way on or off screen: nothing can be presented
+    /// while a sheet is still going.
+    private func afterPresentationsSettle(_ body: @escaping () -> Void) {
+        var top: UIViewController = self
+        while let presented = top.presentedViewController { top = presented }
+        if (top.isBeingDismissed || top.isBeingPresented), let transition = top.transitionCoordinator {
+            transition.animate(alongsideTransition: nil) { _ in body() }
+        } else {
+            body()
+        }
+    }
+
+    /// A server just added: sessions left from when it was removed are offered back, and
+    /// otherwise the next step is shown, which is the agents it already runs, or New Session.
+    private func serverAdded(_ server: ServerProfile) {
+        let left = library.orphanedSessions.filter { memory.removedServer(id: $0.serverID)?.address == server.address }
+        if !left.isEmpty { return offerReconnection(left, to: server) }
+        Task {
+            await library.refreshRuntimes(for: [server.id])
+            guard presentedViewController == nil, servers.server(id: server.id) != nil else { return }
+            if !library.adoptableRuntimes(on: server.id).isEmpty {
+                sessions.expandRuntimes(on: server.id)
+                sessions.scrollToServer(server.id)
+            } else if library.sessions(on: server.id).isEmpty {
+                presentNewSession(serverID: server.id)
+            }
+        }
+    }
+
+    private func offerReconnection(_ left: [PhoneSession], to server: ServerProfile) {
+        let device = UIDevice.current.model
+        let formerName = memory.removedServer(id: left[0].serverID)?.name ?? server.name
+        let count = left.count == 1 ? "1 session" : "\(left.count) sessions"
+        let alert = UIAlertController(
+            title: "Reconnect \(count) on “\(server.name)”?",
+            message: "“\(formerName)” had \(count) on this \(device) when it was removed. Reconnected, "
+                + (left.count == 1 ? "it picks up its agent" : "they pick up their agents") + " if still running there.",
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Not Now", style: .cancel) { [weak self] _ in
+            Task { await self?.library.refreshRuntimes(for: [server.id]) }
+        })
+        let reconnect = UIAlertAction(title: "Reconnect", style: .default) { [weak self] _ in
+            guard let self else { return }
+            let formerIDs = Set(left.map(\.serverID))
+            library.move(left, to: server.id)
+            formerIDs.forEach(memory.forgetRemoval)
+            Task { await self.library.refreshRuntimes(for: [server.id]) }
+        }
+        alert.addAction(reconnect)
+        alert.preferredAction = reconnect
+        presentOnTop(alert)
     }
 
     private func confirm(_ confirmation: SessionsViewController.Confirmation, _ go: @escaping () -> Void) {
@@ -331,13 +420,17 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
 
     private func announce(_ session: PhoneSession, _ attention: SessionLibrary.Attention) {
         let waiting = SessionStatusView.mark(for: .waiting)
+        let agent = session.agentTitle
+        let server = servers.server(id: session.serverID)?.name ?? "its server"
         let (message, symbol, tint): (String, String, UIColor) = switch attention {
-        case .needsApproval: ("The agent is waiting for a permission decision.",
-                              waiting?.symbol ?? "exclamationmark.circle.fill", waiting?.color ?? .systemOrange)
-        case .finished: ("The agent finished its turn.", "checkmark.circle.fill", .systemGreen)
-        case .stoppedOnServer: ("The agent was stopped on its server.", "stop.circle.fill", .secondaryLabel)
+        case .needsApproval:
+            ("\(agent) on \(server) needs approval" + (session.pendingRequestTitle.map { ": \($0)" } ?? "."),
+             waiting?.symbol ?? "exclamationmark.circle.fill", waiting?.color ?? .systemOrange)
+        case .finished: ("\(agent) finished.", "checkmark.circle.fill", .systemGreen)
+        case .stoppedOnServer: ("\(agent) was stopped on \(server).", "stop.circle.fill", .secondaryLabel)
         }
-        banners.show(title: session.title, message: message, symbol: symbol, tint: tint) { [weak self, weak session] in
+        banners.show(title: session.title, message: message, symbol: symbol, tint: tint,
+                     urgent: attention == .needsApproval) { [weak self, weak session] in
             guard let self, let session, self.library.session(id: session.id) != nil else { return }
             self.show(session)
         }
@@ -345,7 +438,29 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
 
     var attentionBanner: AttentionBannerView? { banners.current }
 
+    /// Under the navigation bar's buttons, never over them. Beside a sidebar, across the
+    /// session's column, so the sidebar's own buttons stay in reach.
+    private func bannerPlacement() -> (top: CGFloat, column: CGRect)? {
+        guard view.bounds.width > 0 else { return nil }
+        if !isCollapsed, let navigation = viewController(for: .secondary)?.navigationController, navigation.view.window != nil {
+            let bar = navigation.navigationBar.convert(navigation.navigationBar.bounds, to: view)
+            var column = navigation.view.convert(navigation.view.bounds, to: view)
+            // The session's column runs under the sidebar: the banner keeps to the part beside it.
+            if let sidebar = viewController(for: .primary)?.navigationController?.view, sidebar.window != nil, !sidebar.isHidden {
+                let edge = sidebar.convert(sidebar.bounds, to: view).maxX
+                if edge > column.minX, edge < column.maxX { column = CGRect(x: edge, y: column.minY, width: column.maxX - edge, height: column.height) }
+            }
+            return (bar.maxY + 8, column)
+        }
+        return (view.safeAreaInsets.top + 52, view.bounds)
+    }
+
     // MARK: Keyboard
+
+    public override func viewDidLoad() {
+        super.viewDidLoad()
+        banners.placement = { [weak self] in self?.bannerPlacement() }
+    }
 
     public override var canBecomeFirstResponder: Bool { true }
     private var didAppear = false
@@ -357,27 +472,46 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         didAppear = true
     }
 
-    public override var keyCommands: [UIKeyCommand]? {
-        [UIKeyCommand(title: "New Session", action: #selector(newSessionCommand), input: "n", modifierFlags: .command),
-         UIKeyCommand(title: "Servers", action: #selector(serversCommand), input: ",", modifierFlags: .command),
-         UIKeyCommand(title: "Previous Session", action: #selector(previousSessionCommand), input: "[", modifierFlags: .command),
-         UIKeyCommand(title: "Next Session", action: #selector(nextSessionCommand), input: "]", modifierFlags: .command)]
-    }
+    // The menu bar's commands, which `LatchAppDelegate.buildMenu(with:)` lists: they reach
+    // here through the responder chain, and the open session's through its screen.
 
     @objc func newSessionCommand() { presentNewSession() }
     @objc func serversCommand() { presentServers() }
     @objc func previousSessionCommand() { step(by: -1) }
     @objc func nextSessionCommand() { step(by: 1) }
+
+    public override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        switch action {
+        case #selector(newSessionCommand): !servers.servers.isEmpty && presentedViewController == nil
+        case #selector(serversCommand): presentedViewController == nil
+        case #selector(previousSessionCommand), #selector(nextSessionCommand):
+            !library.orderedSessions.isEmpty && presentedViewController == nil
+        default: super.canPerformAction(action, withSender: sender)
+        }
+    }
+
+    /// The open session's commands work from the menu bar wherever the keyboard is, as long
+    /// as nothing is presented over it: the session screen may not be in the responder chain,
+    /// as when the list has the focus.
+    public override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
+        if SessionDetailViewController.menuActions.contains(action), presentedViewController == nil,
+           let screen = shown?.controller as? SessionDetailViewController, screen.viewIfLoaded?.window != nil,
+           screen.canPerformAction(action, withSender: sender) {
+            return screen
+        }
+        return super.target(forAction: action, withSender: sender)
+    }
 }
 
 /// The secondary column before a session is chosen. Never seen on iPhone, where the
 /// collapsed stack starts at the sessions list. While there is no server it explains
-/// pairing, which has more room here than in the sidebar.
+/// pairing, alone: the sidebar beside it stays empty rather than say it twice.
 final class SessionPlaceholderViewController: UIViewController {
-    var isEmpty = false {
-        didSet { if isEmpty != oldValue, isViewLoaded { refresh() } }
+    var hasServers = true {
+        didSet { if hasServers != oldValue, isViewLoaded { refresh() } }
     }
     var onAddServer: () -> Void = {}
+    var onNewSession: () -> Void = {}
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -386,11 +520,19 @@ final class SessionPlaceholderViewController: UIViewController {
     }
 
     private func refresh() {
-        guard !isEmpty else {
-            return contentUnavailableConfiguration = SessionsViewController.noServers { [weak self] in self?.onAddServer() }
+        guard hasServers else {
+            return contentUnavailableConfiguration = SessionsViewController.noServers(
+                addServer: { [weak self] in self?.onAddServer() })
         }
         var configuration = UIContentUnavailableConfiguration.empty()
+        configuration.image = UIImage(systemName: "bubble.left.and.text.bubble.right")
         configuration.text = "No Session Selected"
+        configuration.secondaryText = "Choose a session, or start one on a server."
+        var button = UIButton.Configuration.gray()
+        button.title = "New Session"
+        button.cornerStyle = .capsule
+        configuration.button = button
+        configuration.buttonProperties.primaryAction = UIAction { [weak self] _ in self?.onNewSession() }
         contentUnavailableConfiguration = configuration
     }
 }

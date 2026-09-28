@@ -29,6 +29,14 @@ public enum RelativeTime {
         return "\(seconds)s"
     }
 
+    /// A running turn's length in words, for VoiceOver, which reads "1m" as a metre: "1 minute,
+    /// 12 seconds". Cut short as `duration` is, never rounded up.
+    public static func spokenDuration(_ interval: TimeInterval) -> String {
+        Duration.seconds(max(0, Int(interval))).formatted(.units(
+            allowed: [.hours, .minutes, .seconds], width: .wide, maximumUnitCount: 2,
+            fractionalPart: .hide(rounded: .towardZero)))
+    }
+
     /// For VoiceOver, which should hear "3 hours ago", not "3h".
     public static func spoken(_ date: Date, now: Date) -> String {
         guard now.timeIntervalSince(date) >= 60 else { return "just now" }

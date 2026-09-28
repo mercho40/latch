@@ -12,11 +12,39 @@ final class RootViewControllerTests: XCTestCase {
         XCTAssertEqual(root.style, .doubleColumn)
         XCTAssertTrue(root.viewController(for: .primary) === root.sessions)
         XCTAssertTrue(root.viewController(for: .secondary) === root.placeholder)
-        root.sessions.loadViewIfNeeded()
-        let empty = try XCTUnwrap(root.sessions.contentUnavailableConfiguration as? UIContentUnavailableConfiguration)
-        XCTAssertEqual(empty.text, "No servers yet")
+        // One explanation of pairing, with one Add Server: in the session column while there
+        // is one beside the list, and in the list when it is all there is.
+        root.placeholder.loadViewIfNeeded()
+        let empty = try XCTUnwrap(root.placeholder.contentUnavailableConfiguration as? UIContentUnavailableConfiguration)
+        XCTAssertEqual(empty.text, "No Servers")
         XCTAssertEqual(empty.button.title, "Add Server")
         XCTAssertNotNil(empty.buttonProperties.primaryAction)
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = root
+        window.isHidden = false
+        defer { window.isHidden = true }
+        window.layoutIfNeeded()
+        root.sessions.reload(animated: false)
+        let list = root.sessions.contentUnavailableConfiguration as? UIContentUnavailableConfiguration
+        if root.isCollapsed {
+            XCTAssertEqual(list?.text, "No Servers")
+        } else {
+            XCTAssertNil(list, "The sidebar leaves it to the column beside it")
+        }
+    }
+
+    func testNoSessionSelectedExplainsAndOffersNewSession() throws {
+        let placeholder = SessionPlaceholderViewController()
+        var newSessions = 0
+        placeholder.onNewSession = { newSessions += 1 }
+        placeholder.loadViewIfNeeded()
+        let configuration = try XCTUnwrap(placeholder.contentUnavailableConfiguration as? UIContentUnavailableConfiguration)
+        XCTAssertEqual(configuration.text, "No Session Selected")
+        XCTAssertEqual(configuration.secondaryText, "Choose a session, or start one on a server.")
+        XCTAssertNotNil(configuration.image)
+        XCTAssertEqual(configuration.button.title, "New Session")
+        configuration.buttonProperties.primaryAction?.performWithSender(nil, target: nil)
+        XCTAssertEqual(newSessions, 1)
     }
 
     /// Collapsed, the stack starts at the list rather than an empty session.

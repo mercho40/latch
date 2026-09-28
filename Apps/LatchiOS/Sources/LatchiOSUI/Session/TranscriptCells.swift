@@ -9,6 +9,8 @@ struct TranscriptCellContext {
     let cache: MarkdownCache
     var isExpanded: (UUID) -> Bool
     var toggle: (UUID) -> Void
+    /// The pictures kept for a prompt's attachments, in order; nil where there is none.
+    var thumbnails: (UUID) -> [UIImage?] = { _ in [] }
 }
 
 /// A transcript row: no background, no selection, content running the readable width.
@@ -26,6 +28,31 @@ class TranscriptCell: UICollectionViewListCell {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// Text views that Select Text makes selectable, in reading order.
+    var textViews: [TranscriptTextView] { [] }
+
+    /// Select Text: the text nearest `point`, in the cell's coordinates, becomes selectable
+    /// and wholly selected. Every other text view in the cell becomes selectable too, so a
+    /// selection can be started again in any of them.
+    func beginSelecting(near point: CGPoint) {
+        let views = textViews.filter { !$0.isHidden && $0.window != nil }
+        guard !views.isEmpty else { return }
+        let nearest = views.min { distance($0, point) < distance($1, point) } ?? views[0]
+        views.forEach { $0.isSelectable = true }
+        nearest.beginSelecting()
+    }
+
+    private func distance(_ view: UIView, _ point: CGPoint) -> CGFloat {
+        let frame = view.convert(view.bounds, to: self)
+        if frame.contains(point) { return 0 }
+        return abs(frame.midY - point.y)
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        textViews.forEach { $0.endSelecting() }
+    }
 
     /// Pins `view` to the content view's edges, inset vertically by `verticalInsets`.
     func pin(_ view: UIView, leading: Bool = true, trailing: Bool = true) {
@@ -53,8 +80,8 @@ class TranscriptCell: UICollectionViewListCell {
         return super.preferredLayoutAttributesFitting(layoutAttributes)
     }
 
-    static func copyAction(_ text: @escaping () -> String) -> UIAccessibilityCustomAction {
-        UIAccessibilityCustomAction(name: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+    static func copyAction(_ name: String = "Copy", _ text: @escaping () -> String) -> UIAccessibilityCustomAction {
+        UIAccessibilityCustomAction(name: name, image: UIImage(systemName: "doc.on.doc")) { _ in
             UIPasteboard.general.string = text()
             return true
         }
@@ -62,10 +89,13 @@ class TranscriptCell: UICollectionViewListCell {
 }
 
 /// The user's prompt: a bubble in the tint's soft tone at the trailing edge, as wide as its
-/// text up to four fifths of the row (and never wider than a phone's), with the images that
-/// went with it listed above.
+/// text up to four fifths of the row (and never wider than a phone's). Photos sent from this
+/// device sit above it as pictures, as in Messages; any other attachment, or a photo whose
+/// picture is not kept here, is listed by name inside it.
 final class UserMessageCell: TranscriptCell {
-    private let bubble = UIView()
+    let bubble = UIView()
+    private let column = UIStackView()
+    private let pictures = UIStackView()
     private let stack = UIStackView()
     private let chips = UIStackView()
     let textView = TranscriptTextView()
@@ -96,10 +126,24 @@ final class UserMessageCell: TranscriptCell {
             stack.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -padding.bottom),
             textWidth,
         ])
-        pin(bubble, leading: false)
-        bubble.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 40).isActive = true
+        pictures.axis = .horizontal
+        pictures.spacing = 4
+        column.axis = .vertical
+        column.alignment = .trailing
+        column.spacing = 4
+        column.addArrangedSubview(pictures)
+        column.addArrangedSubview(bubble)
+        pin(column, leading: false)
+        column.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 40).isActive = true
         isAccessibilityElement = true
     }
+
+    override var textViews: [TranscriptTextView] { [textView] }
+
+    /// A photo's side, square as in Messages.
+    static let pictureSide: CGFloat = 64
+    /// The most pictures in the row; any more are counted in a last tile.
+    static let maximumPictures = 4
 
     func configure(_ message: ChatMessage, context: TranscriptCellContext) {
         text = message.text
@@ -111,15 +155,60 @@ final class UserMessageCell: TranscriptCell {
         ]))
         textView.isHidden = message.text.isEmpty
         chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for attachment in message.attachments {
-            chips.addArrangedSubview(AttachmentChip(attachment, renderer: context.renderer))
+        pictures.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let kept = context.thumbnails(message.id)
+        var shown: [UIImage] = []
+        for (index, attachment) in message.attachments.enumerated() {
+            if attachment.kind == .image, index < kept.count, let picture = kept[index] {
+                shown.append(picture)
+            } else {
+                chips.addArrangedSubview(AttachmentChip(attachment, renderer: context.renderer))
+            }
         }
-        chips.isHidden = message.attachments.isEmpty
+        for picture in shown.prefix(shown.count > Self.maximumPictures ? Self.maximumPictures - 1 : Self.maximumPictures) {
+            pictures.addArrangedSubview(Self.tile(image: picture, extra: nil))
+        }
+        if shown.count > Self.maximumPictures {
+            pictures.addArrangedSubview(Self.tile(image: shown[Self.maximumPictures - 1],
+                                                  extra: shown.count - Self.maximumPictures + 1))
+        }
+        pictures.isHidden = shown.isEmpty
+        chips.isHidden = chips.arrangedSubviews.isEmpty
+        // Photos alone need no empty bubble under them.
+        bubble.isHidden = textView.isHidden && chips.isHidden
         let names = message.attachments.map(\.name)
         accessibilityLabel = "You: " + ([message.text] + (names.isEmpty ? [] : ["Attached: " + names.joined(separator: ", ")]))
             .filter { !$0.isEmpty }.joined(separator: ". ")
         accessibilityCustomActions = [Self.copyAction { [weak self] in self?.text ?? "" }]
         setNeedsLayout()
+    }
+
+    /// A picture in the row: square, filled, on the content panels' 12 point corners. The
+    /// last one may carry how many more there are.
+    private static func tile(image: UIImage, extra: Int?) -> UIView {
+        let view = UIImageView(image: image)
+        view.contentMode = .scaleAspectFill
+        view.clipsToBounds = true
+        view.layer.cornerRadius = 12
+        view.layer.cornerCurve = .continuous
+        view.accessibilityIgnoresInvertColors = true
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: pictureSide),
+            view.heightAnchor.constraint(equalToConstant: pictureSide),
+        ])
+        if let extra {
+            let dim = UILabel()
+            dim.text = "+\(extra)"
+            dim.font = ChromeFont.preferred(.headline, weight: .semibold)
+            dim.textColor = .white
+            dim.textAlignment = .center
+            dim.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+            dim.frame = CGRect(x: 0, y: 0, width: pictureSide, height: pictureSide)
+            dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(dim)
+        }
+        return view
     }
 
     override func prepare(width: CGFloat) {
@@ -167,10 +256,10 @@ final class AttachmentChip: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 }
 
-/// The agent's reply: Markdown across the full width, selectable.
+/// The agent's reply: Markdown across the full width.
 final class AssistantMessageCell: TranscriptCell {
     let markdown = MarkdownContentView()
-    private var text = ""
+    private(set) var text = ""
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -188,15 +277,28 @@ final class AssistantMessageCell: TranscriptCell {
 
     private var agentTitle = ""
 
+    override var textViews: [TranscriptTextView] { markdown.textViews }
+
     // Worked out when VoiceOver asks, not on every streamed frame.
     override var accessibilityLabel: String? {
         get { "\(agentTitle): \(markdown.spokenText)" }
         set {}
     }
 
+    /// The same words, with code read out symbol by symbol: in a command, `~/` and `&&` matter.
+    override var accessibilityAttributedLabel: NSAttributedString? {
+        get {
+            let label = NSMutableAttributedString(string: "\(agentTitle): ")
+            label.append(markdown.spokenAttributedText)
+            return label
+        }
+        set {}
+    }
+
     override var accessibilityCustomActions: [UIAccessibilityCustomAction]? {
         get {
-            var actions = [Self.copyAction { [weak self] in self?.text ?? "" }]
+            var actions = [Self.copyAction { [weak self] in self?.markdown.plainText ?? "" },
+                           Self.copyAction("Copy as Markdown") { [weak self] in self?.text ?? "" }]
             let code = markdown.codeBlocks
             for (index, block) in code.prefix(4).enumerated() {
                 let name = code.count == 1 ? "Copy Code" : "Copy \(block.language.map { "\($0) " } ?? "")Code \(index + 1)"
@@ -249,8 +351,10 @@ final class ToolCallCell: TranscriptCell {
     override init(frame: CGRect) {
         super.init(frame: frame)
         detailsBox.backgroundColor = LatchPalette.codeBackground
-        detailsBox.layer.cornerRadius = 10
+        detailsBox.layer.cornerRadius = 12
         detailsBox.layer.cornerCurve = .continuous
+        registerForTraitChanges([UITraitAccessibilityContrast.self]) { (cell: ToolCallCell, _) in cell.updateBorder() }
+        updateBorder()
         detailsView.translatesAutoresizingMaskIntoConstraints = false
         detailsView.accessibilityLabel = "Details"
         detailsBox.addSubview(detailsView)
@@ -271,18 +375,34 @@ final class ToolCallCell: TranscriptCell {
         }, for: .primaryActionTriggered)
     }
 
+    /// A hairline round the details with Increase Contrast, where the panel alone is faint.
+    private func updateBorder() {
+        let high = traitCollection.accessibilityContrast == .high
+        detailsBox.layer.borderWidth = high ? 1 : 0
+        detailsBox.layer.borderColor = UIColor.separator.resolvedColor(with: traitCollection).cgColor
+    }
+
+    override var textViews: [TranscriptTextView] { detailsBox.isHidden ? [] : [detailsView] }
+
+    private(set) var tool = ToolCallPresentation(text: "")
+
     func configure(_ message: ChatMessage, context: TranscriptCellContext) {
         text = message.text
         id = message.id
         toggle = context.toggle
         let tool = ToolCallPresentation(text: message.text)
+        self.tool = tool
         isExpanded = context.isExpanded(message.id)
         header.show(tool, expanded: isExpanded, hasDetails: !tool.details.isEmpty, traits: context.renderer.traits)
         detailsBox.isHidden = !isExpanded || tool.details.isEmpty
         if !detailsBox.isHidden {
             let font = context.renderer.monospaced(12.5, for: .footnote)
             let bold = context.renderer.monospaced(12.5, for: .footnote, weight: .semibold)
-            detailsView.setText(ToolCallPresentation.styledDetails(tool.details, font: font, boldFont: bold))
+            let details = NSMutableAttributedString(attributedString: ToolCallPresentation.styledDetails(
+                tool.details, font: font, boldFont: bold))
+            // Read symbol by symbol, as code is.
+            details.addAttribute(.accessibilitySpeechPunctuation, value: true, range: NSRange(location: 0, length: details.length))
+            detailsView.setText(details)
         }
         header.accessibilityCustomActions = [Self.copyAction { [weak self] in self?.text ?? "" }]
         setNeedsLayout()
@@ -294,9 +414,12 @@ final class ToolCallCell: TranscriptCell {
 }
 
 /// The tappable row of a tool call. Its whole width is the target. At accessibility text
-/// sizes the title moves under the symbol and status and wraps, as a list cell's does.
+/// sizes the status and chevron move under the symbol and title, which wraps, as a list
+/// cell's does. While the tool runs, a spinner takes the symbol's place.
 final class ToolCallHeader: UIControl {
     private let symbol = UIImageView()
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let symbolColumn = UIView()
     private let titleLabel = UILabel()
     private let statusLabel = UILabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
@@ -308,7 +431,22 @@ final class ToolCallHeader: UIControl {
         super.init(frame: frame)
         symbol.tintColor = .secondaryLabel
         symbol.contentMode = .center
-        symbol.setContentHuggingPriority(.required, for: .horizontal)
+        spinner.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+        spinner.color = .secondaryLabel
+        spinner.hidesWhenStopped = true
+        for view in [symbol, spinner] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            symbolColumn.addSubview(view)
+            NSLayoutConstraint.activate([
+                view.centerXAnchor.constraint(equalTo: symbolColumn.centerXAnchor),
+                view.centerYAnchor.constraint(equalTo: symbolColumn.centerYAnchor),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            symbolColumn.widthAnchor.constraint(equalToConstant: 22),
+            symbolColumn.heightAnchor.constraint(greaterThanOrEqualTo: symbol.heightAnchor),
+        ])
+        symbolColumn.setContentHuggingPriority(.required, for: .horizontal)
         titleLabel.textColor = .secondaryLabel
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -328,10 +466,10 @@ final class ToolCallHeader: UIControl {
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
-            symbol.widthAnchor.constraint(greaterThanOrEqualToConstant: 22),
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
+        hoverStyle = UIHoverStyle(effect: .highlight, shape: .rect(cornerRadius: 12))
     }
 
     @available(*, unavailable)
@@ -339,28 +477,33 @@ final class ToolCallHeader: UIControl {
 
     private var stacked: Bool?
 
-    /// One row, or at accessibility sizes the symbol and status, with the chevron at the
-    /// end, over the title.
+    /// One row, or at accessibility sizes the symbol and title, which wraps, over the status
+    /// with the chevron at the end, so the row reads in the order it is spoken.
     private func arrange(stacked: Bool) {
         guard stacked != self.stacked else { return }
         self.stacked = stacked
         (stack.arrangedSubviews + firstRow.arrangedSubviews).forEach { $0.removeFromSuperview() }
         if stacked {
-            [symbol, statusLabel, spacer, chevron].forEach(firstRow.addArrangedSubview)
+            firstRow.alignment = .firstBaseline
+            [symbolColumn, titleLabel].forEach(firstRow.addArrangedSubview)
+            let secondRow = UIStackView(arrangedSubviews: [statusLabel, spacer, chevron])
+            secondRow.spacing = 8
+            secondRow.alignment = .center
+            secondRow.isLayoutMarginsRelativeArrangement = true
+            secondRow.directionalLayoutMargins = .init(top: 0, leading: 30, bottom: 0, trailing: 0)
             stack.axis = .vertical
             stack.alignment = .fill
             stack.spacing = 4
-            [firstRow, titleLabel].forEach(stack.addArrangedSubview)
+            [firstRow, secondRow].forEach(stack.addArrangedSubview)
             titleLabel.numberOfLines = 4
         } else {
             stack.axis = .horizontal
             stack.alignment = .center
             stack.spacing = 8
-            [symbol, titleLabel, statusLabel, chevron].forEach(stack.addArrangedSubview)
-            stack.setCustomSpacing(10, after: symbol)
+            [symbolColumn, titleLabel, statusLabel, chevron].forEach(stack.addArrangedSubview)
+            stack.setCustomSpacing(10, after: symbolColumn)
             titleLabel.numberOfLines = 1
         }
-        titleLabel.lineBreakMode = .byTruncatingMiddle
     }
 
     func show(_ tool: ToolCallPresentation, expanded: Bool, hasDetails: Bool, traits: UITraitCollection) {
@@ -373,7 +516,24 @@ final class ToolCallHeader: UIControl {
             ? UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .monospacedSystemFont(ofSize: 14, weight: .regular),
                                                                     compatibleWith: traits)
             : font
-        titleLabel.text = tool.displayTitle
+        // Never hyphenated: a file name or a command broken at a hyphen reads as two words. A
+        // wrapped command or path breaks at any character instead.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.hyphenationFactor = 0
+        paragraph.usesDefaultHyphenation = false
+        let breaksAnywhere = stacked == true && (tool.isCommand || tool.displayTitle.contains("/"))
+        paragraph.lineBreakMode = stacked == true ? (breaksAnywhere ? .byCharWrapping : .byWordWrapping) : .byTruncatingMiddle
+        titleLabel.attributedText = NSAttributedString(string: tool.displayTitle, attributes: [
+            .font: titleLabel.font as Any, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph,
+        ])
+        titleLabel.lineBreakMode = paragraph.lineBreakMode
+        if tool.state == .running {
+            spinner.startAnimating()
+            symbol.isHidden = true
+        } else {
+            spinner.stopAnimating()
+            symbol.isHidden = false
+        }
         statusLabel.font = UIFont.preferredFont(forTextStyle: .footnote, compatibleWith: traits)
         statusLabel.text = tool.statusText
         statusLabel.textColor = tool.statusColor
@@ -384,9 +544,23 @@ final class ToolCallHeader: UIControl {
         chevron.alpha = hasDetails ? 1 : 0
         chevron.transform = expanded ? CGAffineTransform(rotationAngle: .pi / 2) : .identity
         isEnabled = hasDetails
-        accessibilityLabel = "Tool: \(tool.displayTitle)" + (tool.statusText.isEmpty ? "" : ", \(tool.statusText)")
+        let label = "Tool: \(tool.displayTitle)" + (tool.statusText.isEmpty ? "" : ", \(tool.statusText)")
+        accessibilityLabel = label
+        // A command is read symbol by symbol: `rm -rf ~/` and `rm -rf .` differ by one.
+        if tool.isCommand {
+            let spoken = NSMutableAttributedString(string: "Tool: ")
+            spoken.append(NSAttributedString(string: tool.displayTitle, attributes: [.accessibilitySpeechPunctuation: true]))
+            if !tool.statusText.isEmpty { spoken.append(NSAttributedString(string: ", \(tool.statusText)")) }
+            accessibilityAttributedLabel = spoken
+        } else {
+            accessibilityAttributedLabel = nil
+            accessibilityLabel = label
+        }
+        // Only a call with details is a control; one without is a line of text.
+        accessibilityTraits = hasDetails ? .button : .staticText
         accessibilityHint = hasDetails ? (expanded ? "Hides the details." : "Shows the details.") : nil
-        accessibilityValue = hasDetails ? (expanded ? "Expanded" : "Collapsed") : nil
+        accessibilityExpandedStatus = hasDetails ? (expanded ? .expanded : .collapsed) : .unsupported
+        accessibilityValue = nil
     }
 
     override var isHighlighted: Bool {
@@ -416,9 +590,15 @@ final class NoticeCell: TranscriptCell {
     }
 }
 
-/// While a turn runs: a quiet line under the conversation. It never announces itself, so
-/// VoiceOver is not interrupted as the reply streams.
+/// While a turn runs: a quiet line under the conversation, "Stopping…" once Stop is chosen
+/// and until the agent ends the turn. It never announces itself, so VoiceOver is not
+/// interrupted as the reply streams.
 final class WorkingCell: TranscriptCell {
+    func configure(stopping: Bool) {
+        label.text = stopping ? "Stopping…" : "Working…"
+        accessibilityLabel = stopping ? "Stopping" : "Working"
+    }
+
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     override func updateConfiguration(using state: UICellConfigurationState) {

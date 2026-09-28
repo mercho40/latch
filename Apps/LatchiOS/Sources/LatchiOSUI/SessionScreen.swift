@@ -10,6 +10,8 @@ extension SessionDetailViewController {
         var context = SessionDetailContext(title: session.title, serverName: "", folderPath: session.path,
                                            agentTitle: session.agentTitle, draft: session.draft)
         context.serverName = root.servers.server(id: session.serverID)?.name ?? ""
+        context.displayPath = root.memory.displayPath(session.path, on: root.servers.server(id: session.serverID))
+        context.onRename = { [weak session] name in session?.rename(to: name) }
         // A session still adopting its runtime connects by adopting it again.
         context.onRetry = { [weak session] in session?.connect() }
         context.onStopAgent = { [weak session, weak root] in
@@ -42,16 +44,19 @@ extension SessionDetailViewController {
     }
 
     /// Takes up what changed about the session outside its model: the title its first prompt
-    /// gave it, the agent and folder an adopted runtime's record named, and the server's name
-    /// as Servers has it now. The rest of the context stays as it was made.
+    /// gave it or the user's rename, the agent and folder an adopted runtime's record named, and
+    /// the server's name and home folder as Servers and its handshakes have them now. The rest of the context stays as it was made.
     func follow(_ session: PhoneSession, in root: RootViewController) {
-        let serverName = root.servers.server(id: session.serverID)?.name ?? context.serverName
-        guard context.title != session.title || context.serverName != serverName
-            || context.folderPath != session.path || context.agentTitle != session.agentTitle else { return }
+        let server = root.servers.server(id: session.serverID)
+        let serverName = server?.name ?? context.serverName
+        let displayPath = root.memory.displayPath(session.path, on: server)
+        guard context.title != session.title || context.serverName != serverName || context.folderPath != session.path
+            || context.displayPath != displayPath || context.agentTitle != session.agentTitle else { return }
         var updated = context
         updated.title = session.title
         updated.serverName = serverName
         updated.folderPath = session.path
+        updated.displayPath = displayPath
         updated.agentTitle = session.agentTitle
         context = updated
     }

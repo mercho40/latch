@@ -123,15 +123,15 @@ struct MarkdownRenderer {
 
     /// Monospaced, scaled with Dynamic Type from the size it has at the default text size.
     func monospaced(_ size: CGFloat, for style: UIFont.TextStyle = .body, weight: UIFont.Weight = .regular) -> UIFont {
-        UIFontMetrics(forTextStyle: style).scaledFont(for: .monospacedSystemFont(ofSize: size, weight: weight),
-                                                      compatibleWith: traits)
+        UIFontMetrics(forTextStyle: style).scaledFont(
+            for: .monospacedSystemFont(ofSize: size, weight: weight.adjusted(for: traits)), compatibleWith: traits)
     }
 
     /// The code font for text set in `font`: a touch smaller, because monospace runs large.
     func codeFont(matching font: UIFont) -> UIFont {
         let size = font.pointSize * 0.88
         let bold = font.fontDescriptor.symbolicTraits.contains(.traitBold)
-        return .monospacedSystemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        return .monospacedSystemFont(ofSize: size, weight: (bold ? UIFont.Weight.semibold : .regular).adjusted(for: traits))
     }
 
     var codeBlockFont: UIFont { monospaced(14, for: .body) }
@@ -177,6 +177,7 @@ private struct Builder {
         case rule(id: Int)
     }
     private var open: Open?
+    static let inlineCodeKern: CGFloat = 3
     /// List items whose marker is already written: a second paragraph in an item has none.
     private var markedItems: Set<Int> = []
 
@@ -259,6 +260,16 @@ private struct Builder {
         }
         let styledText = styled(text, role: role, inline: inline, link: link)
         let whole = NSRange(location: 0, length: styledText.length)
+        // Inline code's panel reaches 3 points past its text: the character before it and its
+        // own last one are kerned by that much, so the panel never touches the words beside
+        // it. Only spacing: the text copied is unchanged.
+        if inline.contains(.code), styledText.length > 0 {
+            styledText.addAttribute(.kern, value: Builder.inlineCodeKern, range: NSRange(location: styledText.length - 1, length: 1))
+            if target.length > 0, let last = target.string.unicodeScalars.last, !CharacterSet.newlines.contains(last),
+               last != "\t", last != "\u{2028}" {
+                target.addAttribute(.kern, value: Builder.inlineCodeKern, range: NSRange(location: target.length - 1, length: 1))
+            }
+        }
         styledText.addAttribute(.paragraphStyle, value: style, range: whole)
         if isQuote { styledText.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: whole) }
         if let level { styledText.addAttribute(.markdownHeading, value: level, range: whole) }

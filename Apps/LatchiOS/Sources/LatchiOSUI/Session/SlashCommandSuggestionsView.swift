@@ -2,10 +2,13 @@ import LatchACP
 import UIKit
 
 /// The agent's slash commands, over the composer while the draft is a bare `/query`. Tapping
-/// one puts `/name ` in the draft; the keyboard stays with the composer throughout.
+/// one puts `/name ` in the draft; the keyboard stays with the composer throughout. On a
+/// hardware keyboard the arrows move a highlight through them, as on the Mac.
 final class SlashCommandSuggestionsView: UIView {
     var onChoose: ((ACPAvailableCommand) -> Void)?
     private(set) var matches: [ACPAvailableCommand] = []
+    /// The row the arrows have reached, if they have moved.
+    private(set) var highlightedIndex: Int?
     private var commands: [ACPAvailableCommand] = []
     private var query = ""
     private let background: UIVisualEffectView
@@ -54,11 +57,12 @@ final class SlashCommandSuggestionsView: UIView {
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            // Inset, so a highlighted row sits inside the rounded panel.
+            stack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -6),
             stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 6),
             stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -6),
-            stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+            stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor, constant: -12),
             height,
         ])
         accessibilityLabel = "Commands"
@@ -100,6 +104,7 @@ final class SlashCommandSuggestionsView: UIView {
         let next = Self.filter(commands, query: query)
         if next != matches {
             matches = next
+            highlightedIndex = nil
             stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
             for command in matches { stack.addArrangedSubview(row(for: command)) }
         }
@@ -110,6 +115,26 @@ final class SlashCommandSuggestionsView: UIView {
             withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel).height }
         height.constant = matches.isEmpty ? 0 : fitting + 12
         return !matches.isEmpty
+    }
+
+    /// The command Return or Tab takes: the highlighted one, or else the first.
+    var highlighted: ACPAvailableCommand? {
+        highlightedIndex.flatMap { matches.indices.contains($0) ? matches[$0] : nil } ?? matches.first
+    }
+
+    /// Moves the highlight, from none to the first or last row, and keeps it in view.
+    func moveHighlight(by offset: Int) {
+        guard !matches.isEmpty else { return }
+        let next = highlightedIndex.map { min(max(0, $0 + offset), matches.count - 1) } ?? (offset > 0 ? 0 : matches.count - 1)
+        highlightedIndex = next
+        for (index, row) in stack.arrangedSubviews.enumerated() {
+            let on = index == next
+            (row as? UIButton)?.configuration?.background.backgroundColor = on ? LatchPalette.tint.withAlphaComponent(0.15) : .clear
+            row.accessibilityTraits = on ? [.button, .selected] : .button
+        }
+        layoutIfNeeded()
+        let row = stack.arrangedSubviews[next]
+        scrollView.scrollRectToVisible(row.convert(row.bounds, to: scrollView), animated: false)
     }
 
     private func row(for command: ACPAvailableCommand) -> UIButton {
@@ -129,8 +154,10 @@ final class SlashCommandSuggestionsView: UIView {
         configuration.titleLineBreakMode = .byTruncatingTail
         configuration.subtitleLineBreakMode = .byTruncatingTail
         configuration.titlePadding = 2
-        configuration.contentInsets = .init(top: 8, leading: 18, bottom: 8, trailing: 18)
+        configuration.contentInsets = .init(top: 8, leading: 12, bottom: 8, trailing: 12)
+        configuration.background.cornerRadius = 14
         let button = UIButton(configuration: configuration)
+        button.hoverStyle = UIHoverStyle(effect: .highlight, shape: .rect(cornerRadius: 14))
         button.contentHorizontalAlignment = .leading
         button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         button.accessibilityLabel = "/" + command.name

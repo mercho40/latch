@@ -71,14 +71,14 @@ final class SessionLibraryTests: XCTestCase {
         let library = SessionLibrary(servers: InMemoryServerStore([server]), connector: connector, store: nil,
                                      listRuntimes: { _ in [] })
         let session = library.create(serverID: server.id, path: "~", agent: .custom)
-        XCTAssertEqual(session.subtitle, "mock-agent · ~", "Named after its command until it names itself")
+        XCTAssertEqual(session.subtitle, "mock-agent\u{00A0}· ~", "Named after its command until it names itself")
         await session.settled()
         XCTAssertEqual(session.customCommand, "mock-agent --acp")
-        XCTAssertEqual(session.subtitle, "Fake Agent · ~", "The name the agent gave itself once it connected")
+        XCTAssertEqual(session.subtitle, "Fake Agent\u{00A0}· ~", "The name the agent gave itself once it connected")
         XCTAssertEqual(connector.clients[0].snapshot.launches, [.remote(agent: .custom("mock-agent --acp"), path: "~")])
         // Kept, so a relaunch names it before connecting again.
         let restored = PhoneSession(saved: session.savedSession, connector: FakeConnector())
-        XCTAssertEqual(restored.subtitle, "Fake Agent · ~")
+        XCTAssertEqual(restored.subtitle, "Fake Agent\u{00A0}· ~")
     }
 
     // MARK: Saving and restoring

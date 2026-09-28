@@ -22,7 +22,9 @@ final class SessionsListTests: XCTestCase {
         XCTAssertEqual(slot { $0.phase = .ready; $0.hasUnseenReply = true }.mark, .unread)
         XCTAssertEqual(slot { $0.hasUnseenReply = true }.mark, .none, "Unread only means something for a live session")
         XCTAssertEqual(slot { $0.phase = .prompting; $0.status = "Working…"; $0.promptStartedAt = now.addingTimeInterval(-72) },
-                       SessionRowStatus(mark: .working, text: "1m 12s", spoken: "Working, 1m 12s"))
+                       SessionRowStatus(mark: .working, text: "1m 12s", spoken: "Working, 1 minute, 12 seconds"))
+        XCTAssertEqual(slot { $0.phase = .prompting; $0.status = "Working…"; $0.stopping = true },
+                       SessionRowStatus(mark: .working, text: "Stopping…", spoken: "Stopping"))
         XCTAssertEqual(slot { $0.phase = .prompting; $0.status = "Cancelling…" }.text, "Cancelling…")
         XCTAssertEqual(slot { $0.phase = .connecting; $0.status = "Resuming…" },
                        SessionRowStatus(mark: .working, text: "Resuming…", spoken: "Resuming…"))
@@ -95,7 +97,7 @@ final class SessionsListTests: XCTestCase {
         let mini = Fake.server("mini")
         let (list, library, _) = makeList(servers: [vps, mini]) { options in
             guard options.host == vps.host else { throw LatchRemoteClientError.timedOut }
-            return [Fake.summary("a", workspace: "/srv/a"), Fake.summary("b", workspace: "/srv/b", approvals: 1)]
+            return [Fake.summary("a", workspace: "/srv/a"), Fake.summary("b", workspace: "/srv/b", working: true)]
         }
         list.loadViewIfNeeded()
         await library.refreshRuntimes()
@@ -165,15 +167,18 @@ final class SessionsListTests: XCTestCase {
         let (empty, _, _) = makeList(servers: [])
         empty.loadViewIfNeeded()
         let pairing = empty.contentUnavailableConfiguration as? UIContentUnavailableConfiguration
-        XCTAssertEqual(pairing?.text, "No servers yet")
+        XCTAssertEqual(pairing?.text, "No Servers")
         XCTAssertEqual(pairing?.button.title, "Add Server")
+        XCTAssertEqual(pairing?.secondaryButton.title, "Copy Command")
+        XCTAssertTrue(pairing?.secondaryAttributedText?.string.contains("Camera") == true)
+        XCTAssertEqual(SessionsViewController.pairingCommand, "latch-server pair --host <name> --qr")
 
         let (list, _, _) = makeList(servers: [Fake.server("vps")])
         var newSessions = 0
         list.onNewSession = { _ in newSessions += 1 }
         list.loadViewIfNeeded()
         let offer = list.contentUnavailableConfiguration as? UIContentUnavailableConfiguration
-        XCTAssertEqual(offer?.text, "No sessions yet")
+        XCTAssertEqual(offer?.text, "No Sessions")
         XCTAssertNil(offer?.button.title, "The server's section offers New Session; the page only explains")
     }
 

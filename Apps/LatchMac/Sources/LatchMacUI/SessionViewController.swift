@@ -850,7 +850,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Agent requests permission"
-        alert.informativeText = "Review the agent-provided tool details below. “Always” uses the agent’s scope, not a saved Latch preference. Cancelling this request does not sandbox the agent."
+        alert.informativeText = "Review the agent-provided tool details below. “Always” is remembered by the agent, not by Latch. Cancel Request declines only this request; it doesn’t restrict the agent."
         // Return and Escape both cancel. No approval receives a default key equivalent.
         alert.addButton(withTitle: "Cancel Request").keyEquivalent = "\r"
         for option in pending.options { alert.addButton(withTitle: option.permissionLabel!).keyEquivalent = "" }

@@ -32,6 +32,8 @@ final class SessionsViewController: UICollectionViewController {
     var onShownAlone: (() -> Void)?
     /// Asks whether to go ahead with Remove or Stop Agent; calls back only to go ahead.
     var confirm: (@MainActor (Confirmation, @escaping () -> Void) -> Void)?
+    /// Asks for a session's new name.
+    var rename: ((PhoneSession) -> Void)?
 
     enum Confirmation: Equatable {
         /// While the agent runs on, only the first time: after that the user knows it does.
@@ -43,6 +45,8 @@ final class SessionsViewController: UICollectionViewController {
     let library: SessionLibrary
     private(set) var dataSource: UICollectionViewDiffableDataSource<Section, Item>!
     private var expanded: Set<UUID> = []
+    /// Servers whose "On <server>" group opened by itself for a request, which it does once.
+    private var expandedForApproval: Set<UUID> = []
     private var ticker: Timer?
     private var clock: Timer?
     private let defaults: UserDefaults
@@ -90,9 +94,13 @@ final class SessionsViewController: UICollectionViewController {
         collectionView.refreshControl = refresh
         configureDataSource()
         reload(animated: false)
-        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
-            self.reconfigureSessions { _ in true }
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitLegibilityWeight.self]) { (self: Self, _) in
+            self.reload(animated: false)
         }
+        // Arrowing through the sidebar opens each session, as in Mail and Notes.
+        collectionView.selectionFollowsFocus = true
+        NotificationCenter.default.addObserver(self, selector: #selector(differentiateWithoutColorChanged),
+                                               name: UIAccessibility.differentiateWithoutColorDidChangeNotification, object: nil)
         clock = Self.repeating(every: 30) { [weak self] in self?.reconfigureSessions { _ in true } }
     }
 
@@ -102,6 +110,18 @@ final class SessionsViewController: UICollectionViewController {
         super.viewWillAppear(animated)
     }
 
+    /// Whether the split view was collapsed when the empty state was last chosen: it decides
+    /// whether the list or the column beside it explains pairing.
+    private var laidOutCollapsed: Bool?
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let collapsed = splitViewController?.isCollapsed
+        guard collapsed != laidOutCollapsed else { return }
+        laidOutCollapsed = collapsed
+        updateEmptyState()
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         if splitViewController?.isCollapsed == true { onShownAlone?() }
@@ -109,6 +129,8 @@ final class SessionsViewController: UICollectionViewController {
     }
 
     func addServer() { onAddServer?() }
+
+    @objc private func differentiateWithoutColorChanged() { reload(animated: false) }
 
     // MARK: Layout
 
@@ -121,6 +143,9 @@ final class SessionsViewController: UICollectionViewController {
             configuration.headerMode = section == .problem ? .none : .supplementary
             configuration.trailingSwipeActionsConfigurationProvider = { [weak self] indexPath in
                 self?.swipeActions(at: indexPath)
+            }
+            configuration.leadingSwipeActionsConfigurationProvider = { [weak self] indexPath in
+                self?.readSwipeAction(at: indexPath)
             }
             return .list(using: configuration, layoutEnvironment: environment)
         }
@@ -143,12 +168,7 @@ final class SessionsViewController: UICollectionViewController {
         }
         let runtimesCell = UICollectionView.CellRegistration<UICollectionViewListCell, UUID> { [weak self] cell, _, serverID in
             guard let self else { return }
-            var content = UIListContentConfiguration.valueCell()
-            content.text = "On \(self.serverName(serverID))"
-            content.secondaryText = String(self.library.adoptableRuntimes(on: serverID).count)
-            cell.contentConfiguration = content
-            cell.accessories = [.outlineDisclosure(options: .init(style: .cell))]
-            cell.accessibilityHint = "Agents running on \(self.serverName(serverID)) with no session on this device."
+            self.configure(runtimes: cell, on: serverID)
         }
         let runtimeCell = UICollectionView.CellRegistration<UICollectionViewListCell, Item> { [weak self] cell, _, item in
             guard let self, case let .runtime(serverID, runtimeID) = item,
@@ -210,6 +230,29 @@ final class SessionsViewController: UICollectionViewController {
         }
     }
 
+    /// "On <server>": how many agents there are, or, since a closed group would hide it, that
+    /// one of them waits for a decision, or that they are working.
+    private func configure(runtimes cell: UICollectionViewListCell, on serverID: UUID) {
+        let runtimes = library.adoptableRuntimes(on: serverID)
+        let waiting = runtimes.filter { $0.pendingPermissionCount > 0 }.count
+        var content = UIListContentConfiguration.valueCell()
+        content.text = "On \(serverName(serverID))"
+        let state: SessionRowStatus? = if waiting > 0 {
+            SessionRowStatus(mark: .waiting, text: "Needs approval", spoken: "Needs approval")
+        } else if runtimes.contains(where: { $0.activeTurnID != nil }) {
+            SessionRowStatus(mark: .working, text: "Working…", spoken: "Working")
+        } else { nil }
+        content.secondaryText = state == nil ? String(runtimes.count) : nil
+        cell.contentConfiguration = content
+        cell.accessories = (state.map { [.customView(configuration: .init(customView: SessionStatusView(status: $0),
+                                                                          placement: .trailing(), reservedLayoutWidth: .actual))] } ?? [])
+            + [.outlineDisclosure(options: .init(style: .cell))]
+        let count = runtimes.count == 1 ? "1 agent" : "\(runtimes.count) agents"
+        cell.accessibilityValue = waiting > 0 ? "\(count), \(waiting) \(waiting == 1 ? "needs" : "need") approval"
+            : state == nil ? count : "\(count), working"
+        cell.accessibilityHint = "Agents running on \(serverName(serverID)) with no session on this device."
+    }
+
     /// The sections and rows as the library has them now.
     func reload(animated: Bool = true) {
         guard let dataSource else { return }
@@ -228,6 +271,12 @@ final class SessionsViewController: UICollectionViewController {
                 let group = Item.runtimes(serverID: server.id)
                 snapshot.append([group])
                 snapshot.append(runtimes.map { .runtime(serverID: server.id, runtimeID: $0.runtimeID.rawValue) }, to: group)
+                // A decision waiting in a closed group opens it, once: closed again, it stays so.
+                if runtimes.contains(where: { $0.pendingPermissionCount > 0 }) {
+                    if expandedForApproval.insert(server.id).inserted { expanded.insert(server.id) }
+                } else {
+                    expandedForApproval.remove(server.id)
+                }
                 if expanded.contains(server.id) { snapshot.expand([group]) }
             }
             if library.runtimes[server.id]?.failure != nil { snapshot.append([.unreachable(serverID: server.id)]) }
@@ -289,10 +338,10 @@ final class SessionsViewController: UICollectionViewController {
 
     private func updateEmptyState() {
         if library.servers.servers.isEmpty, library.sessions.isEmpty, library.servers.problem == nil {
-            // A sidebar is narrow, and the column beside it explains pairing.
-            contentUnavailableConfiguration = isSidebar
-                ? Self.noServersInSidebar { [weak self] in self?.addServer() }
-                : Self.noServers { [weak self] in self?.addServer() }
+            // Beside the session column, which explains pairing with the one Add Server, the
+            // sidebar stays empty rather than say it twice. Alone, the list explains it.
+            contentUnavailableConfiguration = splitViewController?.isCollapsed == false
+                ? nil : Self.noServers { [weak self] in self?.addServer() }
         } else if library.sessions.isEmpty, library.servers.problem == nil,
                   library.servers.servers.allSatisfy({ library.adoptableRuntimes(on: $0.id).isEmpty }) {
             contentUnavailableConfiguration = Self.noSessions
@@ -301,28 +350,31 @@ final class SessionsViewController: UICollectionViewController {
         }
     }
 
-    static func noServers(addServer: @escaping () -> Void) -> UIContentUnavailableConfiguration {
+    static func noServers(addServer: @escaping () -> Void,
+                          copy: @escaping (String) -> Void = { UIPasteboard.general.string = $0 })
+        -> UIContentUnavailableConfiguration {
         var configuration = UIContentUnavailableConfiguration.empty()
         configuration.image = UIImage(systemName: "server.rack")
-        configuration.text = "No servers yet"
+        configuration.text = "No Servers"
         configuration.secondaryAttributedText = pairingInstructions
         var button = UIButton.Configuration.filled()
         button.title = "Add Server"
+        button.cornerStyle = .capsule
         configuration.button = button
         configuration.buttonProperties.primaryAction = UIAction { _ in addServer() }
+        // The command is typed on another machine: copying it saves reading it off the screen.
+        var secondary = UIButton.Configuration.plain()
+        secondary.title = "Copy Command"
+        configuration.secondaryButton = secondary
+        configuration.secondaryButtonProperties.primaryAction = UIAction { _ in copy(pairingCommand) }
         return configuration
     }
 
-    /// "No servers yet" without the instructions, which the column beside it has room for.
-    static func noServersInSidebar(addServer: @escaping () -> Void) -> UIContentUnavailableConfiguration {
-        var configuration = noServers(addServer: addServer)
-        configuration.secondaryAttributedText = nil
-        configuration.secondaryText = "Add the machine your agents run on."
-        return configuration
-    }
+    /// What to run on the server to pair with it. `<name>` is the name the phone reaches it by.
+    static let pairingCommand = "latch-server pair --host <name> --qr"
 
     /// The pairing command on a line of its own, monospaced, and joined so a narrow column
-    /// wraps it only between "pair" and "--host <name>": word joiners after its hyphens.
+    /// wraps it only between words: no-break spaces inside them, word joiners after hyphens.
     static var pairingInstructions: NSAttributedString {
         let body = UIFont.preferredFont(forTextStyle: .body)
         let paragraph = NSMutableParagraphStyle()
@@ -330,12 +382,14 @@ final class SessionsViewController: UICollectionViewController {
         paragraph.paragraphSpacing = 6
         let plain: [NSAttributedString.Key: Any] = [.font: body, .foregroundColor: UIColor.secondaryLabel,
                                                      .paragraphStyle: paragraph]
-        let command = "latch-server\u{00A0}pair --host\u{00A0}<name>".replacingOccurrences(of: "-", with: "-\u{2060}")
+        // One break, after "pair", so the options stay together on the second line.
+        let command = "latch-server\u{00A0}pair --host\u{00A0}<name>\u{00A0}--qr".replacingOccurrences(of: "-", with: "-\u{2060}")
         let text = NSMutableAttributedString(string: "On the machine your agents run on, run:\n", attributes: plain)
         text.append(NSAttributedString(string: command + "\n", attributes: [
             .font: ChromeFont.monospaced(.callout), .foregroundColor: UIColor.label, .paragraphStyle: paragraph,
             .accessibilitySpeechPunctuation: true]))
-        text.append(NSAttributedString(string: "Then add the server it prints.", attributes: plain))
+        text.append(NSAttributedString(string: "Scan the code it shows with the Camera app, or copy the link it prints and paste it in Add Server.",
+                                       attributes: plain))
         return text
     }
 
@@ -343,7 +397,7 @@ final class SessionsViewController: UICollectionViewController {
     static var noSessions: UIContentUnavailableConfiguration {
         var configuration = UIContentUnavailableConfiguration.empty()
         configuration.image = UIImage(systemName: "text.bubble")
-        configuration.text = "No sessions yet"
+        configuration.text = "No Sessions"
         configuration.secondaryText = "Start an agent in a folder on one of your servers. Agents started from another device show up here too."
         return configuration
     }
@@ -354,22 +408,35 @@ final class SessionsViewController: UICollectionViewController {
 
     private var isSidebar: Bool { traitCollection.userInterfaceIdiom == .pad }
 
+    /// Titles and subtitles break between words, never inside one with a hyphen.
+    private static let unhyphenated: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.hyphenationFactor = 0
+        style.usesDefaultHyphenation = false
+        return style
+    }()
+
     private func configure(_ cell: UICollectionViewListCell, for session: PhoneSession) {
         let status = session.rowStatus(now: library.now())
         // At accessibility sizes the slot goes under the subtitle, so the title keeps the width.
         let stacked = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
         var content = UIListContentConfiguration.subtitleCell()
-        content.text = session.title
         // An unread reply is the one row state worth reading from across the list.
-        content.textProperties.font = status.mark == .unread
-            ? ChromeFont.preferred(.body, weight: .semibold) : .preferredFont(forTextStyle: .body)
+        let titleFont = status.mark == .unread ? ChromeFont.preferred(.body, weight: .semibold) : .preferredFont(forTextStyle: .body)
+        content.textProperties.font = titleFont
+        let style = Self.unhyphenated.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+        style.lineBreakMode = stacked ? .byWordWrapping : .byTruncatingTail
+        content.attributedText = NSAttributedString(string: session.title, attributes: [
+            .font: titleFont, .foregroundColor: UIColor.label, .paragraphStyle: style,
+        ])
         content.textProperties.numberOfLines = stacked ? 0 : 1
         content.secondaryTextProperties.font = .preferredFont(forTextStyle: .subheadline)
         content.secondaryTextProperties.color = .secondaryLabel
         content.secondaryTextProperties.numberOfLines = stacked ? 0 : 1
-        // A sidebar is too narrow for words beside the title: they lead the subtitle, as the
-        // Mac's sidebar puts its status there, and only the mark stays at the end.
-        let wordsInSubtitle = isSidebar && !stacked && status.isWords
+        // Words beside the title would cut it short: they lead the subtitle, as the Mac's
+        // sidebar puts its status there, and only the mark stays at the end, as Mail keeps its
+        // trailing slot for a time or a mark. The same on iPhone and iPad.
+        let wordsInSubtitle = !stacked && status.isWords
         if stacked {
             content.secondaryAttributedText = Self.detail(session.subtitle, status, stacked: true)
         } else if wordsInSubtitle {
@@ -399,6 +466,11 @@ final class SessionsViewController: UICollectionViewController {
             let onTint = state.isSelected && text.getWhite(&white, alpha: &alpha) && white > 0.99
             slot?.isOnTint = onTint
             if onTint {
+                if let title = updated.attributedText {
+                    let white = NSMutableAttributedString(attributedString: title)
+                    white.addAttribute(.foregroundColor, value: UIColor.white, range: NSRange(location: 0, length: white.length))
+                    updated.attributedText = white
+                }
                 let subdued = UIColor.white.withAlphaComponent(0.8)
                 if let detail = updated.secondaryAttributedText {
                     let recoloured = NSMutableAttributedString(attributedString: detail)
@@ -425,7 +497,7 @@ final class SessionsViewController: UICollectionViewController {
         let text = NSMutableAttributedString()
         guard stacked else {
             text.append(wordsRun)
-            text.append(NSAttributedString(string: " · \(subtitle)", attributes: secondary))
+            text.append(NSAttributedString(string: "\u{00A0}· \(subtitle)", attributes: secondary))
             return text
         }
         text.append(NSAttributedString(string: subtitle, attributes: secondary))
@@ -459,7 +531,7 @@ final class SessionsViewController: UICollectionViewController {
         let state: SessionRowStatus? = if runtime.pendingPermissionCount > 0 {
             SessionRowStatus(mark: .waiting, text: "Needs approval", spoken: "Needs approval")
         } else if runtime.activeTurnID != nil {
-            SessionRowStatus(mark: .working, text: "Working", spoken: "Working")
+            SessionRowStatus(mark: .working, text: "Working…", spoken: "Working")
         } else { nil }
         if let state {
             accessories.append(.customView(configuration: .init(customView: SessionStatusView(status: state),
@@ -485,25 +557,35 @@ final class SessionsViewController: UICollectionViewController {
         case let .server(id):
             content.text = serverName(id)
             // Whether the server answered the last time it was asked for its runtimes.
-            let (color, spoken): (UIColor, String?) = switch library.runtimes[id] {
-            case let listing? where listing.failure != nil: (.systemRed, "Can’t connect")
-            case let listing? where listing.answered: (.systemGreen, "Connected")
-            default: (.tertiaryLabel, nil)
+            let state: ServerState = switch library.runtimes[id] {
+            case let listing? where listing.failure != nil: .failed
+            case let listing? where listing.answered: .connected
+            default: .unknown
             }
-            content.image = UIImage(systemName: "circle.fill")
-            content.imageProperties.tintColor = color
-            content.imageProperties.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 8)
-            content.imageProperties.reservedLayoutSize = CGSize(width: 8, height: 8)
+            content.image = state.image
+            content.imageProperties.tintColor = state.color
+            content.imageProperties.reservedLayoutSize = CGSize(width: 12, height: 12)
             content.imageToTextPadding = 6
             header.contentConfiguration = content
             header.accessibilityLabel = serverName(id)
-            header.accessibilityValue = spoken
+            header.accessibilityValue = state.spoken
+            header.accessibilityTraits.insert(.header)
+            // However VoiceOver takes the header, the menu's actions are on it.
+            header.accessibilityCustomActions = serverActions(id).map { action in
+                UIAccessibilityCustomAction(name: action.title, image: action.image) { _ in
+                    action.handler()
+                    return true
+                }
+            }
             let button = UIButton(configuration: .plain())
             button.configuration?.image = UIImage(systemName: "ellipsis.circle")
             button.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .body)
             button.configuration?.contentInsets = .zero
+            // A quiet control beside the name, the same in the sidebar and in the list.
+            button.configuration?.baseForegroundColor = .secondaryLabel
             button.menu = serverMenu(id)
             button.showsMenuAsPrimaryAction = true
+            button.isPointerInteractionEnabled = true
             button.accessibilityLabel = "\(serverName(id)) Actions"
             button.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
@@ -511,20 +593,33 @@ final class SessionsViewController: UICollectionViewController {
         }
     }
 
+    private func serverActions(_ id: UUID) -> [(title: String, image: UIImage?, handler: () -> Void)] {
+        [("New Session", UIImage(systemName: "plus"), { [weak self] in self?.onNewSession?(id) }),
+         ("Refresh", UIImage(systemName: "arrow.clockwise"), { [weak self] in
+             guard let self else { return }
+             Task { await self.library.refreshRuntimes(for: [id]) }
+         }),
+         ("Server Settings", UIImage(systemName: "gearshape"), { [weak self] in self?.onServerSettings?(id) })]
+    }
+
     private func serverMenu(_ id: UUID) -> UIMenu {
-        UIMenu(children: [
-            UIAction(title: "New Session", image: UIImage(systemName: "plus")) { [weak self] _ in self?.onNewSession?(id) },
-            UIAction(title: "Refresh", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                guard let self else { return }
-                Task { await self.library.refreshRuntimes(for: [id]) }
-            },
-            UIAction(title: "Server Settings", image: UIImage(systemName: "gearshape")) { [weak self] _ in
-                self?.onServerSettings?(id)
-            },
-        ])
+        UIMenu(children: serverActions(id).map { action in UIAction(title: action.title, image: action.image) { _ in action.handler() } })
+    }
+
+    /// Scrolls a server's section into view, as after adding it.
+    func scrollToServer(_ serverID: UUID) {
+        guard let section = dataSource.snapshot().indexOfSection(.server(serverID)),
+              collectionView.numberOfItems(inSection: section) > 0 else { return }
+        collectionView.scrollToItem(at: IndexPath(item: 0, section: section), at: .top, animated: view.window != nil)
     }
 
     // MARK: Actions
+
+    /// Only sessions open as the focus reaches them: a runtime would be adopted by arrowing past it.
+    override func collectionView(_ collectionView: UICollectionView, selectionFollowsFocusForItemAt indexPath: IndexPath) -> Bool {
+        if case .session? = dataSource.itemIdentifier(for: indexPath) { return true }
+        return false
+    }
 
     override func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
         switch dataSource.itemIdentifier(for: indexPath) {
@@ -606,6 +701,20 @@ final class SessionsViewController: UICollectionViewController {
         return configuration
     }
 
+    /// Read or Unread from the leading edge, as in Mail.
+    private func readSwipeAction(at indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+        guard case let .session(id)? = dataSource.itemIdentifier(for: indexPath), let session = library.session(id: id)
+        else { return nil }
+        let unread = session.hasUnseenReply
+        let action = UIContextualAction(style: .normal, title: unread ? "Read" : "Unread") { _, _, done in
+            session.hasUnseenReply = !unread
+            done(true)
+        }
+        action.image = UIImage(systemName: unread ? "envelope.open" : "envelope.badge")
+        action.backgroundColor = LatchPalette.tint
+        return UISwipeActionsConfiguration(actions: [action])
+    }
+
     /// "Remove from iPhone": what goes is this device's copy, not the agent.
     static var removeTitle: String { "Remove from \(UIDevice.current.model)" }
 
@@ -622,22 +731,34 @@ final class SessionsViewController: UICollectionViewController {
         }
         guard case let .session(id)? = dataSource.itemIdentifier(for: indexPaths[0]),
               let session = library.session(id: id) else { return nil }
-        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
-            guard let self else { return nil }
-            var actions: [UIMenuElement] = [
-                UIAction(title: "Copy Path", image: UIImage(systemName: "doc.on.doc")) { _ in
-                    UIPasteboard.general.string = session.path
-                },
-                UIAction(title: Self.removeTitle, image: UIImage(systemName: "minus.circle")) { [weak self] _ in
-                    self?.remove(session)
-                },
-            ]
-            if session.canStop {
-                actions.append(UIAction(title: "Stop Agent", image: UIImage(systemName: "stop.circle"),
-                                        attributes: .destructive) { [weak self] _ in self?.stop(session) })
-            }
-            return UIMenu(children: actions)
-        })
+        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in self?.menu(for: session) })
+    }
+
+    /// A session's menu: naming it, reading it, and letting it go, in that order.
+    func menu(for session: PhoneSession) -> UIMenu {
+        let naming: [UIMenuElement] = [
+            UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename?(session) },
+            UIAction(title: "Copy Path", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = session.path
+            },
+        ]
+        let unread = session.hasUnseenReply
+        let reading = UIAction(title: unread ? "Mark as Read" : "Mark as Unread",
+                               image: UIImage(systemName: unread ? "envelope.open" : "envelope.badge")) { _ in
+            session.hasUnseenReply = !unread
+        }
+        var leaving: [UIMenuElement] = [
+            UIAction(title: Self.removeTitle, image: UIImage(systemName: "minus.circle")) { [weak self] _ in
+                self?.remove(session)
+            },
+        ]
+        if session.canStop {
+            leaving.append(UIAction(title: "Stop Agent", image: UIImage(systemName: "stop.circle"),
+                                    attributes: .destructive) { [weak self] _ in self?.stop(session) })
+        }
+        return UIMenu(children: [UIMenu(options: .displayInline, children: naming),
+                                 UIMenu(options: .displayInline, children: [reading]),
+                                 UIMenu(options: .displayInline, children: leaving)])
     }
 
     func customActions(for session: PhoneSession) -> [UIAccessibilityCustomAction] {
@@ -711,6 +832,45 @@ final class SessionsViewController: UICollectionViewController {
         timer.tolerance = interval / 10
         RunLoop.main.add(timer, forMode: .common)
         return timer
+    }
+}
+
+/// Whether a server answered, the same everywhere it is shown: an 8 point dot in its colour,
+/// or with Differentiate Without Color a symbol whose shape says it too. Words go with it for
+/// VoiceOver, and in Servers on the screen.
+enum ServerState: Equatable {
+    case unknown, checking, connected, failed
+
+    var color: UIColor {
+        switch self {
+        case .unknown, .checking: .tertiaryLabel
+        case .connected: .systemGreen
+        case .failed: .systemRed
+        }
+    }
+
+    var words: String {
+        switch self {
+        case .unknown: ""
+        case .checking: "Checking…"
+        case .connected: "Connected"
+        case .failed: "Can’t connect"
+        }
+    }
+
+    var spoken: String? { words.isEmpty ? nil : words.replacingOccurrences(of: "…", with: "") }
+
+    @MainActor
+    var image: UIImage? {
+        guard UIAccessibility.shouldDifferentiateWithoutColor else {
+            return UIImage(systemName: "circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 8))
+        }
+        let symbol = switch self {
+        case .unknown, .checking: "circle.dotted"
+        case .connected: "checkmark.circle.fill"
+        case .failed: "exclamationmark.circle.fill"
+        }
+        return UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(textStyle: .footnote, scale: .small))
     }
 }
 

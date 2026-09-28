@@ -1,7 +1,7 @@
 import UIKit
 import UserNotifications
 
-/// A small banner at the top of the window when a session that is not on screen finishes a
+/// A small banner near the top of the window when a session that is not on screen finishes a
 /// turn or wants a decision, while the app is active. Not a notification: nothing reaches the
 /// system, and it goes by itself. Tapping it opens the session.
 @MainActor
@@ -9,35 +9,69 @@ final class AttentionBannerPresenter {
     private weak var host: UIView?
     private(set) var current: AttentionBannerView?
     private var dismissal: Task<Void, Never>?
-    private let feedback = UIImpactFeedbackGenerator(style: .light)
-    /// How long a banner stays; VoiceOver users get longer to reach it.
-    var duration: Duration { fixedDuration ?? (UIAccessibility.isVoiceOverRunning ? .seconds(8) : .seconds(4)) }
+    private var urgent = false
+    /// How long a banner stays: longer for a decision, which holds the agent up, and for
+    /// VoiceOver users, who take longer to reach it.
+    var duration: Duration {
+        fixedDuration ?? (urgent || UIAccessibility.isVoiceOverRunning ? .seconds(8) : .seconds(4))
+    }
     /// Holds banners up for screenshots.
     var fixedDuration: Duration?
+    /// Where the banner goes, in the host's coordinates: under the navigation bar's buttons,
+    /// and across the column it belongs to, which on iPad is the session's rather than the
+    /// sidebar's, so the sidebar's buttons stay in reach. Nil puts it under the safe area's top.
+    var placement: () -> (top: CGFloat, column: CGRect)? = { nil }
 
     init(host: UIView) { self.host = host }
 
-    func show(title: String, message: String, symbol: String, tint: UIColor, onTap: @escaping () -> Void) {
+    /// `urgent` is a decision waiting: it stays longer and taps a warning. Anything else is
+    /// quiet, since a finished turn needs nothing done.
+    func show(title: String, message: String, symbol: String, tint: UIColor, urgent: Bool = false,
+              onTap: @escaping () -> Void) {
         guard let host else { return }
         dismiss(animated: false)
+        self.urgent = urgent
         let banner = AttentionBannerView(title: title, message: message, symbol: symbol, tint: tint)
         banner.onTap = { [weak self] in
             self?.dismiss(animated: true)
             onTap()
         }
         banner.onSwipeAway = { [weak self] in self?.dismiss(animated: true) }
+        // It stays while VoiceOver reads it, and gets its whole time again once left.
+        banner.onFocusChange = { [weak self] focused in
+            if focused { self?.dismissal?.cancel() } else { self?.scheduleDismissal() }
+        }
         banner.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(banner)
-        // Over the navigation bar, a little wider than its buttons, so none shows at a corner.
         let guide = host.safeAreaLayoutGuide
+        let place = placement()
+        let column = UILayoutGuide()
+        host.addLayoutGuide(column)
+        banner.layoutGuide = column
+        if let place {
+            NSLayoutConstraint.activate([
+                column.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: place.column.minX),
+                column.widthAnchor.constraint(equalToConstant: place.column.width),
+                banner.topAnchor.constraint(equalTo: host.topAnchor, constant: place.top),
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                column.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+                column.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+                banner.topAnchor.constraint(equalTo: guide.topAnchor, constant: 8),
+            ])
+        }
         NSLayoutConstraint.activate([
-            banner.topAnchor.constraint(equalTo: guide.topAnchor, constant: -2),
-            banner.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+            column.topAnchor.constraint(equalTo: host.topAnchor),
+            column.heightAnchor.constraint(equalToConstant: 1),
+            banner.centerXAnchor.constraint(equalTo: column.centerXAnchor),
+            banner.leadingAnchor.constraint(greaterThanOrEqualTo: column.leadingAnchor, constant: 8),
+            banner.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor, constant: -8),
             banner.leadingAnchor.constraint(greaterThanOrEqualTo: guide.leadingAnchor, constant: 8),
             banner.trailingAnchor.constraint(lessThanOrEqualTo: guide.trailingAnchor, constant: -8),
             banner.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
         ])
-        let fill = banner.widthAnchor.constraint(equalTo: guide.widthAnchor, constant: -16)
+        let fill = banner.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -16)
         fill.priority = .defaultHigh
         fill.isActive = true
         current = banner
@@ -50,8 +84,14 @@ final class AttentionBannerPresenter {
             banner.alpha = 1
             banner.transform = .identity
         }
-        feedback.impactOccurred()
-        UIAccessibility.post(notification: .announcement, argument: "\(title). \(message)")
+        if urgent { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+        UIAccessibility.post(notification: .announcement, argument: NSAttributedString(
+            string: "\(title). \(message)", attributes: [.accessibilitySpeechQueueAnnouncement: true]))
+        scheduleDismissal()
+    }
+
+    private func scheduleDismissal() {
+        dismissal?.cancel()
         let duration = duration
         dismissal = Task { [weak self] in
             try? await Task.sleep(for: duration)
@@ -65,6 +105,7 @@ final class AttentionBannerPresenter {
         dismissal = nil
         guard let banner = current else { return }
         current = nil
+        if let guide = banner.layoutGuide { banner.superview?.removeLayoutGuide(guide) }
         guard animated else { return banner.removeFromSuperview() }
         let reduceMotion = UIAccessibility.isReduceMotionEnabled
         UIView.animate(withDuration: 0.25, animations: {
@@ -74,26 +115,40 @@ final class AttentionBannerPresenter {
     }
 }
 
-/// A rounded material card: a symbol, the session's title, and one line on what happened.
+/// A rounded card: a symbol, the session's title, and a line on what happened. Glass from
+/// iOS 26, as the other floating surfaces are; a material with a shadow before it.
 final class AttentionBannerView: UIControl {
     var onTap: (() -> Void)?
     var onSwipeAway: (() -> Void)?
+    var onFocusChange: ((Bool) -> Void)?
     let titleLabel = UILabel()
     let messageLabel = UILabel()
+    /// The column the presenter placed it in.
+    fileprivate var layoutGuide: UILayoutGuide?
+    static let radius: CGFloat = 22
 
     init(title: String, message: String, symbol: String, tint: UIColor) {
         super.init(frame: .zero)
-        let background = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
+        let background: UIVisualEffectView
+        if #available(iOS 26.0, *) {
+            // Tinted with the page's colour, so a large title under it does not read through.
+            let glass = UIGlassEffect()
+            glass.tintColor = UIColor.systemBackground.withAlphaComponent(0.6)
+            background = UIVisualEffectView(effect: glass)
+            background.cornerConfiguration = .corners(radius: .fixed(Self.radius))
+        } else {
+            background = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
+            background.layer.cornerRadius = Self.radius
+            background.layer.cornerCurve = .continuous
+            background.clipsToBounds = true
+            layer.shadowColor = UIColor.black.cgColor
+            layer.shadowOpacity = 0.12
+            layer.shadowRadius = 12
+            layer.shadowOffset = CGSize(width: 0, height: 4)
+        }
         background.isUserInteractionEnabled = false
-        background.layer.cornerRadius = 24
-        background.layer.cornerCurve = .continuous
-        background.clipsToBounds = true
         background.translatesAutoresizingMaskIntoConstraints = false
         addSubview(background)
-        layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.12
-        layer.shadowRadius = 12
-        layer.shadowOffset = CGSize(width: 0, height: 4)
 
         let icon = UIImageView(image: UIImage(systemName: symbol))
         icon.tintColor = tint
@@ -141,6 +196,17 @@ final class AttentionBannerView: UIControl {
             self?.onSwipeAway?()
             return true
         }]
+        hoverStyle = UIHoverStyle(effect: .lift, shape: .rect(cornerRadius: Self.radius))
+    }
+
+    override func accessibilityElementDidBecomeFocused() {
+        super.accessibilityElementDidBecomeFocused()
+        onFocusChange?(true)
+    }
+
+    override func accessibilityElementDidLoseFocus() {
+        super.accessibilityElementDidLoseFocus()
+        onFocusChange?(false)
     }
 
     @available(*, unavailable)
@@ -241,15 +307,17 @@ enum ChromeFont {
         return UIFont(descriptor: descriptor, size: 0)
     }
 
-    /// Monospaced, for paths, commands and addresses, scaled like `style`.
+    /// Monospaced, for paths, commands and addresses, scaled like `style`, heavier with Bold Text.
     static func monospaced(_ style: UIFont.TextStyle) -> UIFont {
         let size = UIFont.preferredFont(forTextStyle: style, compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)).pointSize
-        return UIFontMetrics(forTextStyle: style).scaledFont(for: .monospacedSystemFont(ofSize: size, weight: .regular))
+        let weight = UIFont.Weight.regular.adjusted(for: UITraitCollection.current)
+        return UIFontMetrics(forTextStyle: style).scaledFont(for: .monospacedSystemFont(ofSize: size, weight: weight))
     }
 
     /// Tabular digits, so a ticking time does not shuffle as it counts.
     static func digits(_ style: UIFont.TextStyle) -> UIFont {
         let size = UIFont.preferredFont(forTextStyle: style, compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)).pointSize
-        return UIFontMetrics(forTextStyle: style).scaledFont(for: .monospacedDigitSystemFont(ofSize: size, weight: .regular))
+        let weight = UIFont.Weight.regular.adjusted(for: UITraitCollection.current)
+        return UIFontMetrics(forTextStyle: style).scaledFont(for: .monospacedDigitSystemFont(ofSize: size, weight: weight))
     }
 }

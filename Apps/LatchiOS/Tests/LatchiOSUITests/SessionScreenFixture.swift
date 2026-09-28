@@ -23,7 +23,11 @@ final class SessionScreenFixture {
         self.client = client
         model = SessionModel(makeClient: { client })
         screen = SessionDetailViewController(model: model, context: SessionDetailContext(
-            title: title, serverName: "vps", folderPath: "~/latch", agentTitle: "Claude Code", draft: draft))
+            title: title, serverName: "vps", folderPath: "/home/simon/latch", displayPath: "~/latch",
+            agentTitle: "Claude Code", draft: draft))
+        // Pictures of sent photos go to a folder of this fixture's own.
+        screen.sentImages = SentImageCache(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true))
         screen.context.onRetry = { [weak self] in self?.retries += 1 }
         screen.context.onStopAgent = { [weak self] in self?.stops += 1 }
         screen.context.onServerSettings = { [weak self] in self?.serverSettings += 1 }

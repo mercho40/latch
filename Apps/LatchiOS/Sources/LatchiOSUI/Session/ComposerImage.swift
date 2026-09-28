@@ -27,7 +27,7 @@ struct ComposerImage: Identifiable, Sendable {
         let height = properties?[kCGImagePropertyPixelHeight] as? Int ?? maximumPixelSize
         guard let image = thumbnail(source, maximum: min(maximumPixelSize, max(width, height, 1))),
               let jpeg = encodeJPEG(image) else { return nil }
-        let preview = thumbnail(source, maximum: 180).map { UIImage(cgImage: $0) }
+        let preview = thumbnail(source, maximum: Int(SentImageCache.maximumPixelSize)).map { UIImage(cgImage: $0) }
         let base = (name as NSString).deletingPathExtension
         let prompt = PromptAttachment(name: (base.isEmpty ? "Photo" : base) + ".jpg",
                                       content: .image(data: jpeg, mimeType: "image/jpeg", source: nil))

@@ -30,6 +30,8 @@ final class SessionLibrary {
     var onAttention: ((PhoneSession, Attention) -> Void)?
     /// The number of sessions waiting for a decision, whenever it changes.
     var onApprovalCountChange: ((Int) -> Void)?
+    /// A server went from Servers, as it was just before.
+    var onServerRemoved: ((ServerProfile) -> Void)?
     /// Whether the user can see this session now. The root answers.
     var isSessionVisible: (UUID) -> Bool = { _ in false }
     /// The scene is in the foreground; attention is only raised then.
@@ -49,6 +51,8 @@ final class SessionLibrary {
     /// whose token was entered again, gets its sessions made anew, since a session's client
     /// is made once and one made for an unknown server never connects.
     private var knownServerIDs: Set<UUID>
+    /// The servers as they were at the last change, so a removed one's address is known.
+    private var knownServers: [UUID: ServerProfile]
     /// The runtimes sessions here follow or are adopting, as the list last showed them.
     private var followed: Set<String> = []
 
@@ -67,6 +71,7 @@ final class SessionLibrary {
         self.listRuntimes = listRuntimes
         persistenceReady = store == nil
         knownServerIDs = Set(servers.servers.map(\.id))
+        knownServers = Dictionary(servers.servers.map { ($0.id, $0) }) { first, _ in first }
         NotificationCenter.default.addObserver(self, selector: #selector(serversChanged),
                                                name: .serverStoreDidChange, object: servers)
     }
@@ -90,6 +95,14 @@ final class SessionLibrary {
     }
 
     func session(id: UUID) -> PhoneSession? { sessions.first { $0.id == id } }
+
+    /// Folders in use on a server, most recent first, for New Session to offer: this device's
+    /// sessions there, then the folders of the runtimes the server listed.
+    func recentFolders(on serverID: UUID, limit: Int = 8) -> [String] {
+        var seen = Set<String>()
+        let paths = sessions(on: serverID).map(\.path) + (runtimes[serverID]?.runtimes ?? []).map(\.workspace)
+        return Array(paths.filter { !$0.isEmpty && seen.insert($0).inserted }.prefix(limit))
+    }
 
     /// Runtimes on the server that no session here follows or is adopting, and that are up: a
     /// runtime still starting is most likely one this device is launching. None until the
@@ -174,6 +187,7 @@ final class SessionLibrary {
         guard sessions.contains(where: { $0 === session }) else { return }
         sessions.removeAll { $0 === session }
         watched[session.id] = nil
+        onForget?(session)
         session.stopObserving(self)
         if selectedSessionID == session.id { selectedSessionID = nil }
         onChange?()
@@ -182,6 +196,30 @@ final class SessionLibrary {
         await session.detach()
         await refreshRuntimes(for: [session.serverID])
     }
+
+    /// Puts sessions left by a removed server on `serverID`, as when that server is added back:
+    /// each is made anew from what it saved, and one that left a runtime there attaches to it.
+    func move(_ moving: [PhoneSession], to serverID: UUID) {
+        for old in moving {
+            guard let index = sessions.firstIndex(where: { $0 === old }) else { continue }
+            var saved = old.savedSession
+            saved.serverID = serverID
+            let session = PhoneSession(saved: saved, connector: connector)
+            session.hasUnseenReply = old.hasUnseenReply
+            old.stopObserving(self)
+            old.model.onChange = nil
+            old.model.onTranscriptChange = nil
+            sessions[index] = session
+            watch(session)
+            if session.model.remoteBinding != nil { session.startIfNeeded() }
+        }
+        followed = followedRuntimeIDs
+        onChange?()
+        scheduleSave()
+    }
+
+    /// Forgets the images kept for a session's prompts. The library calls this as it goes.
+    var onForget: ((PhoneSession) -> Void)?
 
     /// Stops the session's agent on its server. The session and its transcript stay.
     func stop(_ session: PhoneSession) async {
@@ -242,6 +280,8 @@ final class SessionLibrary {
     /// from what they saved, and those that left a runtime there attach to it.
     @objc private func serversChanged() {
         let known = Set(servers.servers.map(\.id))
+        for (id, server) in knownServers where !known.contains(id) { onServerRemoved?(server) }
+        knownServers = Dictionary(servers.servers.map { ($0.id, $0) }) { first, _ in first }
         for session in sessions where !known.contains(session.serverID) && session.model.phase != .disconnected {
             Task { await session.detach() }
         }

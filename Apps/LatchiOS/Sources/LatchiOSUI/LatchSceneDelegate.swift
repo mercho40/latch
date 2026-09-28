@@ -46,9 +46,15 @@ final class LatchSceneDelegate: UIResponder, UIWindowSceneDelegate {
         let connector = ChannelRemoteSessionConnector(servers: servers)
         let badge: ApprovalBadge? = ApprovalBadge()
         #endif
-        let library = SessionLibrary(servers: servers, connector: connector, store: SessionStore(directory: directory))
+        let memory = ServerMemory()
+        // Each listing's handshake keeps the server's home, which paths on it are shown against.
+        let listing = RemoteRuntimeList.live(welcomed: { options, welcome in
+            await memory.recordHome(welcome.server.home, options: options)
+        })
+        let library = SessionLibrary(servers: servers, connector: connector, store: SessionStore(directory: directory),
+                                     listRuntimes: listing)
         let root = RootViewController(library: library, servers: servers, check: ServerCheckText.live, badge: badge,
-                                      makeSessionViewController: SessionDetailViewController.make)
+                                      memory: memory, makeSessionViewController: SessionDetailViewController.make)
         root.serverDelegate = serverSheets
         let window = show(root, in: windowScene)
         self.root = root

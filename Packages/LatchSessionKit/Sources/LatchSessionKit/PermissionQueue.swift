@@ -64,12 +64,13 @@ public final class PermissionQueue {
 
 extension ACPPermissionOption {
     /// Trusted labels prevent an agent-provided name from disguising an allow option as a rejection.
+    /// Who keeps an "Always" is said beside the buttons, not in them.
     public var permissionLabel: String? {
         switch kind {
         case "allow_once": "Allow Once"
-        case "allow_always": "Always Allow (Agent Scope)"
+        case "allow_always": "Always Allow"
         case "reject_once": "Reject Once"
-        case "reject_always": "Always Reject (Agent Scope)"
+        case "reject_always": "Always Reject"
         default: nil
         }
     }

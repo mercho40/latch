@@ -72,7 +72,7 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertEqual(user.accessibilityCustomActions?.map(\.name), ["Copy"])
         let reply = try XCTUnwrap(fixture.cell(for: SampleConversation.answer.id, as: AssistantMessageCell.self))
         XCTAssertTrue(reply.accessibilityLabel?.hasPrefix("Claude Code: What I found") ?? false, reply.accessibilityLabel ?? "")
-        XCTAssertEqual(reply.accessibilityCustomActions?.map(\.name), ["Copy", "Copy Code", "Open SO_REUSEADDR"])
+        XCTAssertEqual(reply.accessibilityCustomActions?.map(\.name), ["Copy", "Copy as Markdown", "Copy Code", "Open SO_REUSEADDR"])
         let tool = try XCTUnwrap(fixture.cell(for: SampleConversation.read.id, as: ToolCallCell.self))
         XCTAssertEqual(tool.header.accessibilityLabel, "Tool: Read Tests/RemoteSessionLiveTests.swift, Done")
         let withImage = try XCTUnwrap(fixture.cell(for: SampleConversation.followUp.id, as: UserMessageCell.self))
@@ -87,7 +87,7 @@ final class SessionDetailViewControllerTests: XCTestCase {
         let id = SampleConversation.read.id
         var cell = try XCTUnwrap(fixture.cell(for: id, as: ToolCallCell.self))
         XCTAssertFalse(cell.isExpanded)
-        XCTAssertEqual(cell.header.accessibilityValue, "Collapsed")
+        XCTAssertEqual(cell.header.accessibilityExpandedStatus, .collapsed)
         cell.header.sendActions(for: .primaryActionTriggered)
         await waitUntil("the row to expand") { fixture.cell(for: id, as: ToolCallCell.self)?.isExpanded == true }
         cell = try XCTUnwrap(fixture.cell(for: id, as: ToolCallCell.self))
@@ -95,7 +95,7 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertTrue((cell.detailsView.attributedText.attribute(.font, at: 12, effectiveRange: nil) as? UIFont)?
             .fontDescriptor.symbolicTraits.contains(.traitMonoSpace) ?? false)
         XCTAssertFalse(cell.detailsView.superview?.isHidden ?? true)
-        XCTAssertEqual(cell.header.accessibilityValue, "Expanded")
+        XCTAssertEqual(cell.header.accessibilityExpandedStatus, .expanded)
     }
 
     func testTheTranscriptFollowsTheEndUntilTheReaderScrollsAway() async throws {
@@ -218,8 +218,8 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertEqual(fixture.screen.composer.text, "")
         XCTAssertEqual(fixture.drafts.last, "")
         XCTAssertEqual(fixture.screen.composer.action, .stop(enabled: true))
-        XCTAssertTrue(fixture.screen.canPerformAction(NSSelectorFromString("stopFromKeyboard"), withSender: nil))
-        XCTAssertFalse(fixture.screen.canPerformAction(NSSelectorFromString("sendFromKeyboard"), withSender: nil))
+        XCTAssertTrue(fixture.screen.canPerformAction(#selector(SessionDetailViewController.stopCommand), withSender: nil))
+        XCTAssertFalse(fixture.screen.canPerformAction(#selector(SessionDetailViewController.sendCommand), withSender: nil))
 
         fixture.screen.composer.actionButton.sendActions(for: .primaryActionTriggered)
         await waitUntil("the turn to be cancelled") { fixture.model.phase == .ready }
@@ -228,20 +228,37 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertEqual(fixture.model.status, "Cancelled")
     }
 
-    func testTheKeyboardShortcutsSendAndStop() async throws {
+    func testTheMenuBarsCommandsSendAndStop() async throws {
         let fixture = SessionScreenFixture()
         show(fixture)
         await fixture.connect()
-        let commands = fixture.screen.keyCommands ?? []
-        XCTAssertTrue(commands.contains { $0.input == "\r" && $0.modifierFlags == .command })
-        XCTAssertTrue(commands.contains { $0.input == "." && $0.modifierFlags == .command })
+        XCTAssertNil(fixture.screen.keyCommands, "The menu bar defines the shortcuts")
         fixture.type("Via the keyboard")
-        XCTAssertTrue(fixture.screen.canPerformAction(NSSelectorFromString("sendFromKeyboard"), withSender: nil))
-        fixture.screen.perform(NSSelectorFromString("sendFromKeyboard"))
+        XCTAssertTrue(fixture.screen.canPerformAction(#selector(SessionDetailViewController.sendCommand), withSender: nil))
+        fixture.screen.sendCommand()
         await waitUntil("the prompt") { fixture.client.hasOpenTurn }
         XCTAssertEqual(fixture.client.prompts, [[.text("Via the keyboard")]])
-        fixture.screen.perform(NSSelectorFromString("stopFromKeyboard"))
+        await waitUntil("Stop") { fixture.screen.canStop }
+        fixture.screen.stopCommand()
+        // Until the agent ends the turn, the transcript says the stop was heard.
         await waitUntil("the stop") { fixture.model.phase == .ready }
+    }
+
+    /// Return on a hardware keyboard sends, as in Messages; with nothing to send it types.
+    func testReturnSendsFromAHardwareKeyboard() async throws {
+        let fixture = SessionScreenFixture()
+        show(fixture)
+        await fixture.connect()
+        let text = fixture.screen.composer.textView
+        let returnKey = try XCTUnwrap(text.keyCommands?.first { $0.input == "\r" && $0.modifierFlags.isEmpty })
+        XCTAssertTrue(returnKey.wantsPriorityOverSystemBehavior)
+        XCTAssertFalse(text.canPerformAction(returnKey.action!, withSender: nil), "Nothing to send: Return types a new line")
+        fixture.type("Sent with Return")
+        XCTAssertTrue(text.canPerformAction(returnKey.action!, withSender: nil))
+        text.perform(returnKey.action!)
+        await waitUntil("the prompt") { fixture.client.hasOpenTurn }
+        XCTAssertEqual(fixture.client.prompts, [[.text("Sent with Return")]])
+        fixture.client.endTurn()
     }
 
     func testAPhotoGoesAsAnImageBlockBeforeTheText() async throws {
@@ -340,7 +357,8 @@ final class SessionDetailViewControllerTests: XCTestCase {
                        [PermissionRequestViewController.fitDetent, .large], "As tall as the request needs, or the whole height")
         XCTAssertTrue(sheet.sheetPresentationController?.prefersGrabberVisible ?? false)
         sheet.loadViewIfNeeded()
-        XCTAssertEqual(sheet.optionButtons.map { $0.configuration?.title }, ["Allow Once", "Always Allow (Agent Scope)", "Reject Once"])
+        XCTAssertEqual(sheet.optionButtons.map { $0.configuration?.title }, ["Allow Once", "Always Allow", "Reject Once"])
+        XCTAssertTrue(sheet.optionButtons.allSatisfy { $0.configuration?.cornerStyle == .capsule })
         XCTAssertEqual(Set(sheet.optionButtons.map { $0.configuration?.background.backgroundColor }).count, 1,
                        "Every option has the same look: none is the default")
         XCTAssertEqual(Set(sheet.optionButtons.map { $0.configuration?.baseForegroundColor }).count, 1)
@@ -429,7 +447,13 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertGreaterThan(scroll.bounds.height, window.bounds.height * 0.5)
         let first = try XCTUnwrap(sheet.optionButtons.first)
         XCTAssertTrue(first.isDescendant(of: scroll))
-        XCTAssertTrue(sheet.cancelButton.window != nil && !sheet.cancelButton.isDescendant(of: scroll), "Cancel stays in reach")
+        XCTAssertTrue(sheet.cancelButton.isDescendant(of: scroll), "Cancel goes with the options, never alone in sight")
+        // Every line of the note is shown, above the options rather than under them.
+        func labels(_ view: UIView) -> [UILabel] { view.subviews.compactMap { $0 as? UILabel } + view.subviews.flatMap(labels) }
+        let note = try XCTUnwrap(labels(scroll).first { $0.text?.hasPrefix("“Always”") == true })
+        let noteFrame = note.convert(note.bounds, to: scroll)
+        XCTAssertGreaterThanOrEqual(note.bounds.height + 1, note.sizeThatFits(CGSize(width: note.bounds.width, height: .greatestFiniteMagnitude)).height)
+        XCTAssertLessThanOrEqual(noteFrame.maxY, first.convert(first.bounds, to: scroll).minY)
         sheet.view.removeFromSuperview()
         sheet.finish(nil)
         fixture.client.endTurn()
@@ -505,7 +529,7 @@ final class SessionDetailViewControllerTests: XCTestCase {
         let pasteboard = UIPasteboard.withUniqueName()
         fixture.screen.pasteboard = pasteboard
         ((menu.children[1] as? UIMenu)?.children.first as? UIAction)?.performWithSender(nil, target: nil)
-        XCTAssertEqual(pasteboard.string, "~/latch")
+        XCTAssertEqual(pasteboard.string, "/home/simon/latch", "The whole path, though the title shows ~")
         UIPasteboard.remove(withName: pasteboard.name)
     }
 
@@ -517,7 +541,8 @@ final class SessionDetailViewControllerTests: XCTestCase {
         if #available(iOS 26.0, *) {
             XCTAssertEqual(fixture.screen.navigationItem.subtitle, "vps · ~/latch")
         } else {
-            XCTAssertEqual(fixture.screen.navigationItem.titleView?.accessibilityLabel, "Fix the flaky reconnect test, vps · ~/latch")
+            XCTAssertEqual(fixture.screen.navigationItem.titleView?.accessibilityLabel, "Fix the flaky reconnect test")
+            XCTAssertEqual(fixture.screen.navigationItem.titleView?.accessibilityValue, "vps, /home/simon/latch")
         }
         fixture.screen.context.title = "Renamed"
         XCTAssertEqual(fixture.screen.title, "Renamed")
@@ -675,14 +700,15 @@ final class SessionDetailViewControllerTests: XCTestCase {
         let fixture = SessionScreenFixture(client: ScriptedSessionClient(holdLaunch: true))
         show(fixture)
         let empty = try XCTUnwrap(fixture.transcript.collectionView.backgroundView as? UIContentUnavailableView)
-        XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.text, "Not connected")
+        XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.text, "Not Connected")
+        XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.button.title, "Retry")
         let connecting = Task { await fixture.connect() }
         await waitUntil("connecting") { fixture.model.phase == .connecting }
         XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.text, "Connecting to vps…")
         fixture.client.releaseLaunch()
         await connecting.value
-        XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.text, "Ask Claude Code anything.")
-        XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.secondaryText, "Runs in ~/latch on vps.")
+        XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.text, "Ask Claude Code")
+        XCTAssertEqual((empty.configuration as? UIContentUnavailableConfiguration)?.secondaryText, "Works in ~/latch on vps.")
         XCTAssertFalse(empty.isHidden)
         await sendPrompt(fixture, "Hello")
         await waitUntil("the prompt to show") { empty.isHidden }

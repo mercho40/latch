@@ -17,8 +17,8 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     /// The server being edited, whose ID carries over; nil when adding.
     let originalID: UUID?
     private let originalToken: LatchRemoteToken?
-    /// Said above the form when it was opened for a reason, such as a link to a known server.
-    private let note: String?
+    /// Said in the form when it was opened for a reason, such as a link to a known server.
+    private var note: String?
     /// Filled in from a `latch://` link rather than typed or pasted.
     private(set) var fromLink = false
 
@@ -39,6 +39,8 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     private var testTask: Task<Void, Never>?
     /// The name follows the host until the user types one of their own.
     private var nameEdited = false
+    /// A link's server is checked once, as the sheet appears.
+    private var checkedLink = false
     static let filledMessage = "Filled in from the pairing string."
 
     /// Adding, optionally filled in from a pairing link.
@@ -96,6 +98,14 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         // A name of the user's own stays when the host changes; one that was only ever the
         // host follows it, as while adding.
         nameEdited = stored.name != stored.host
+    }
+
+    /// A link fills in everything; what is left is to see that it reaches the server.
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard fromLink, !checkedLink else { return }
+        checkedLink = true
+        testConnection()
     }
 
     override func viewDidLoad() {
@@ -267,13 +277,37 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         let options = profile.connectionOptions
         testTask = Task { [weak self] in
             let result: (String, Bool)
-            do { result = (ServerCheckText.summary(try await check(options)), true) }
-            catch { result = (ServerCheckText.failure(error), false) }
+            var info: LatchRemoteServerInfo?
+            do {
+                let answer = try await check(options)
+                info = answer
+                result = (ServerCheckText.summary(answer), true)
+            } catch {
+                result = (ServerCheckText.failure(error), false)
+            }
             guard let self, !Task.isCancelled else { return }
             self.isTesting = false
             self.testResult = result
             self.testTask = nil
+            // The result's row first: the note's refresh reloads the table's heights.
             self.refreshTestRow()
+            if let info { self.found(info) }
+            // Heard without hunting for the row the result appears in.
+            UIAccessibility.post(notification: .announcement, argument: NSAttributedString(
+                string: result.1 ? "Connected. \(result.0)" : "Can’t connect. \(result.0)",
+                attributes: [.accessibilitySpeechQueueAnnouncement: true]))
+        }
+    }
+
+    /// A server that answered goes by the name it gives itself, rather than its full host,
+    /// unless one was typed; from a link, the form says what was found.
+    private func found(_ info: LatchRemoteServerInfo) {
+        if !nameEdited, !info.hostname.isEmpty {
+            nameField.text = info.hostname
+        }
+        if fromLink, originalID == nil {
+            note = "Found \(ServerCheckText.summary(info)). Tap Add to use it."
+            refresh()
         }
     }
 
@@ -388,8 +422,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch layout[section].first {
-        case .paste?: note
-        case .name?: fromLink ? note : "Server"
+        case .name?: "Server"
         case .command?: "Custom Agent"
         default: nil
         }
@@ -417,11 +450,11 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     private func footer(for row: Row) -> String? {
         switch row {
         case .paste:
-            pasteMessage ?? (originalID == nil
+            pasteMessage ?? note ?? (originalID == nil
                 ? "Copy what “latch-server pair” prints on the server, then paste it here. It fills in the rest."
                 : "Paste a new pairing string to replace the host, port and token.")
         case .name:
-            if case let .failure(problem) = entry, let text = problem.text { text } else { nil }
+            if case let .failure(problem) = entry, let text = problem.text { text } else { fromLink ? note : nil }
         case .unencrypted:
             "The token and everything the agent sends would cross that network in the clear. Use it only on a network you trust."
         case .command:

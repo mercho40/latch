@@ -61,9 +61,12 @@ enum UIFixture {
         let store = InMemoryServerStore(screen == "onboarding" ? [] : [vps, mini, pi])
         let library = SessionLibrary(servers: store, connector: ScriptedConnector(), store: nil, listRuntimes: runtimes)
         if screen != "onboarding" { populate(library, now: Date(), scripted: sessionScreens.contains(screen)) }
-        return RootViewController(library: library, servers: store, check: check, badge: nil,
-                                  defaults: UserDefaults(suiteName: "dev.latchapp.ios.fixture") ?? .standard,
-                                  makeSessionViewController: SessionDetailViewController.make)
+        let defaults = UserDefaults(suiteName: "dev.latchapp.ios.fixture") ?? .standard
+        let memory = ServerMemory(defaults: defaults)
+        // vps's home is known, as after any handshake with it; Studio Mac never answered.
+        memory.recordHome(info.home, address: vps.address)
+        return RootViewController(library: library, servers: store, check: check, badge: nil, defaults: defaults,
+                                  memory: memory, makeSessionViewController: SessionDetailViewController.make)
     }
 
     /// Sessions in every state a row can show, their statuses stated rather than driven. With
@@ -166,6 +169,11 @@ enum UIFixture {
                                  lastActiveAt: Date().addingTimeInterval(-10), serverID: vps.id)
         let session = PhoneSession(saved: saved, connector: library.connector)
         library.add(session)
+        // The photo with the last prompt was sent from this device, so its picture is kept.
+        if messages.contains(SampleConversation.followUp) {
+            SentImageCache.shared.store([UIImage(data: photo(hues: (0.58, 0.62), width: 900, height: 1200))],
+                                        for: SampleConversation.followUp.id)
+        }
         let client = (library.connector as? ScriptedConnector)?.latest
         if screen == "error" {
             client?.failNextLaunch(with: UnreachableServer(

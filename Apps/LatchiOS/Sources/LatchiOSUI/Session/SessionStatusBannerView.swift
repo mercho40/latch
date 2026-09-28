@@ -21,6 +21,15 @@ struct SessionBanner: Equatable {
             case .error: "exclamationmark.octagon.fill"
             }
         }
+
+        /// Said before the title, since VoiceOver does not describe the symbol.
+        var spokenPrefix: String {
+            switch self {
+            case .info: ""
+            case .warning: "Warning: "
+            case .error: "Error: "
+            }
+        }
     }
 
     struct Action: Equatable {
@@ -40,12 +49,21 @@ struct SessionBanner: Equatable {
     /// A spinner in place of the symbol, while something is being waited for.
     var isWaiting = false
     var actions: [Action] = []
+    /// Whether VoiceOver's cursor moves to the banner when it appears, rather than hearing it
+    /// read out: by default only for a failure, or a warning with something to do about it.
+    /// Reconnecting, which comes and goes on its own, never takes the cursor.
+    var takesFocus: Bool?
+
+    var movesFocus: Bool {
+        takesFocus ?? (!isWaiting && (severity == .error || (severity == .warning && !actions.isEmpty)))
+    }
 }
 
 /// A slim card under the navigation bar for the session's state: reconnecting, a failure
-/// with what resolves it, an agent stopped on its server. It carries its own colour and
-/// symbol, so nothing depends on seeing it arrive.
-final class SessionStatusBannerView: UIView {
+/// with what resolves it, an agent stopped on its server. One neutral card whatever the
+/// severity, glass from iOS 26 like the composer and the slash suggestions; only the symbol
+/// carries the colour, so nothing depends on seeing it arrive.
+final class SessionStatusBannerView: UIView, UIContextMenuInteractionDelegate {
     var onAction: ((String) -> Void)?
     /// After the banner appears, changes or goes, so the transcript can make room for it.
     var onLayoutChange: (() -> Void)?
@@ -53,8 +71,12 @@ final class SessionStatusBannerView: UIView {
     private(set) var banner: SessionBanner?
     private var dismissedKey: String?
     private let card = UIView()
-    /// The severity's colour over an opaque card, so the transcript never shows through it.
-    private let wash = UIView()
+    /// The card's surface: glass, or before iOS 26 the grouped background's second step.
+    private let surface: UIView
+    /// Before iOS 26, the page's own colour behind the gap over the card, so nothing scrolled
+    /// under the navigation bar shows between the two. From iOS 26 the scroll edge does that.
+    private let backdrop = UIView()
+    private let text = UIStackView()
     private let symbol = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
     private let titleLabel = UILabel()
@@ -68,15 +90,29 @@ final class SessionStatusBannerView: UIView {
     private lazy var leadingWidth = leading.widthAnchor.constraint(equalToConstant: 22)
     private let dismissButton = UIButton(type: .system)
 
+    static let radius: CGFloat = 22
+
     override init(frame: CGRect) {
+        if #available(iOS 26.0, *) {
+            let glass = UIVisualEffectView(effect: UIGlassEffect())
+            glass.cornerConfiguration = .corners(radius: .fixed(Self.radius))
+            surface = glass
+        } else {
+            surface = UIView()
+            surface.backgroundColor = .secondarySystemBackground
+            surface.layer.cornerRadius = Self.radius
+            surface.layer.cornerCurve = .continuous
+        }
         super.init(frame: frame)
-        card.layer.cornerRadius = 16
+        card.layer.cornerRadius = Self.radius
         card.layer.cornerCurve = .continuous
-        card.backgroundColor = .systemBackground
-        card.clipsToBounds = true
-        wash.frame = card.bounds
-        wash.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        card.addSubview(wash)
+        surface.isUserInteractionEnabled = false
+        surface.frame = card.bounds
+        surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        card.addSubview(surface)
+        backdrop.backgroundColor = .systemBackground
+        backdrop.isUserInteractionEnabled = false
+        if #available(iOS 26.0, *) { backdrop.isHidden = true }
         symbol.preferredSymbolConfiguration = .init(textStyle: .subheadline, scale: .medium)
         symbol.setContentHuggingPriority(.required, for: .horizontal)
         spinner.hidesWhenStopped = true
@@ -93,7 +129,7 @@ final class SessionStatusBannerView: UIView {
         messageLabel.textColor = .secondaryLabel
         messageLabel.numberOfLines = 0
         actionRow.axis = .horizontal
-        actionRow.spacing = 8
+        actionRow.spacing = 12
         actionRow.alignment = .center
         var dismiss = UIButton.Configuration.plain()
         dismiss.image = UIImage(systemName: "xmark")
@@ -111,7 +147,7 @@ final class SessionStatusBannerView: UIView {
             actionRow.topAnchor.constraint(equalTo: actionContainer.topAnchor, constant: 7),
             actionRow.bottomAnchor.constraint(equalTo: actionContainer.bottomAnchor, constant: 2),
         ])
-        let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel, messageLabel, actionContainer])
+        [titleLabel, detailLabel, messageLabel, actionContainer].forEach(text.addArrangedSubview)
         text.axis = .vertical
         text.alignment = .fill
         text.spacing = 3
@@ -119,14 +155,19 @@ final class SessionStatusBannerView: UIView {
             view.translatesAutoresizingMaskIntoConstraints = false
             leading.addSubview(view)
         }
-        for view in [card, leading, text, dismissButton] {
+        for view in [backdrop, card, leading, text, dismissButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
+        addSubview(backdrop)
         addSubview(card)
         card.addSubview(leading)
         card.addSubview(text)
         card.addSubview(dismissButton)
         NSLayoutConstraint.activate([
+            backdrop.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            backdrop.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            backdrop.topAnchor.constraint(equalTo: topAnchor),
+            backdrop.bottomAnchor.constraint(equalTo: card.centerYAnchor),
             card.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
             card.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
             card.topAnchor.constraint(equalTo: topAnchor, constant: 6),
@@ -154,6 +195,9 @@ final class SessionStatusBannerView: UIView {
         card.isAccessibilityElement = false
         accessibilityElements = [text, dismissButton]
         text.isAccessibilityElement = false
+        // A long press on the words copies them: at four lines the agent's may be cut short.
+        text.addInteraction(UIContextMenuInteraction(delegate: self))
+        dismissButton.isPointerInteractionEnabled = true
         updateColors()
         registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitAccessibilityContrast.self]) { (view: SessionStatusBannerView, _) in
             view.updateColors()
@@ -195,16 +239,39 @@ final class SessionStatusBannerView: UIView {
         arrangeActions()
         actionContainer.isHidden = banner.actions.isEmpty
         updateColors()
-        titleLabel.accessibilityLabel = [banner.title, banner.detail, banner.message].filter { !$0.isEmpty }.joined(separator: ". ")
+        titleLabel.accessibilityLabel = banner.severity.spokenPrefix + fullText
         titleLabel.accessibilityTraits = .staticText
         detailLabel.isAccessibilityElement = false
         messageLabel.isAccessibilityElement = false
         let wasHidden = isHidden
         setVisible(true)
         if wasHidden || !sameProblem {
-            UIAccessibility.post(notification: .layoutChanged, argument: titleLabel)
+            // A failure to act on takes VoiceOver's cursor; anything else is read out after
+            // what is being read, and the cursor stays in the composer or the conversation.
+            if banner.movesFocus {
+                UIAccessibility.post(notification: .layoutChanged, argument: titleLabel)
+            } else {
+                UIAccessibility.post(notification: .announcement, argument: NSAttributedString(
+                    string: banner.severity.spokenPrefix + banner.title, attributes: [.accessibilitySpeechQueueAnnouncement: true]))
+            }
         }
         onLayoutChange?()
+    }
+
+    /// Everything the banner says, in reading order.
+    private var fullText: String {
+        guard let banner else { return "" }
+        return [banner.title, banner.detail, banner.message].filter { !$0.isEmpty }.joined(separator: ". ")
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        guard banner != nil else { return nil }
+        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
+            UIMenu(children: [UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = self?.fullText
+            }])
+        })
     }
 
     /// Side by side, or at accessibility sizes one above the other, so neither title is cut.
@@ -229,23 +296,22 @@ final class SessionStatusBannerView: UIView {
     }
 
     private func button(for action: SessionBanner.Action) -> UIButton {
-        var configuration = UIButton.Configuration.tinted()
+        var configuration = UIButton.Configuration.gray()
         configuration.title = action.title
         configuration.buttonSize = .small
         configuration.cornerStyle = .capsule
-        configuration.baseForegroundColor = LatchPalette.tint
-        configuration.baseBackgroundColor = LatchPalette.tint
+        configuration.baseForegroundColor = .label
         configuration.titleLineBreakMode = .byTruncatingTail
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var attributes = attributes
             attributes.font = UIFont.preferredFont(forTextStyle: .footnote).withWeight(.semibold)
             return attributes
         }
-        let button = UIButton(configuration: configuration)
+        let button = BannerActionButton(configuration: configuration)
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
         button.heightAnchor.constraint(greaterThanOrEqualToConstant: 32).isActive = true
-        // The row is short; the target still reaches 44 points around the capsule.
+        button.isPointerInteractionEnabled = true
         button.addAction(UIAction { [weak self] _ in self?.onAction?(action.id) }, for: .primaryActionTriggered)
         return button
     }
@@ -282,8 +348,7 @@ final class SessionStatusBannerView: UIView {
 
     private func updateColors() {
         let tint = (banner?.severity ?? .info).tint
-        wash.backgroundColor = tint.withAlphaComponent(0.1)
-        // An outline only with Increase Contrast; otherwise the wash is enough.
+        // An outline in the severity's colour only with Increase Contrast.
         card.layer.borderWidth = traitCollection.accessibilityContrast == .high ? 1 : 0
         card.layer.borderColor = tint.withAlphaComponent(0.5).resolvedColor(with: traitCollection).cgColor
         symbol.tintColor = tint
@@ -292,6 +357,14 @@ final class SessionStatusBannerView: UIView {
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         // Only the card takes touches; the margins around it pass them to the transcript.
         card.frame.contains(point)
+    }
+}
+
+/// A small capsule whose target still reaches 44 points: the row is short, and the spacing
+/// between buttons keeps the enlarged areas apart.
+private final class BannerActionButton: UIButton {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -4, dy: -max(0, 44 - bounds.height) / 2).contains(point)
     }
 }
 

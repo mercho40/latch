@@ -8,11 +8,22 @@ import LatchSessionKit
 typealias RuntimeListing = @Sendable (LatchRemoteConnectionOptions) async throws -> [LatchRemoteRuntimeSummary]
 
 enum RemoteRuntimeList {
-    static let live: RuntimeListing = { options in
+    static let live: RuntimeListing = live(welcomed: { _, _ in })
+
+    /// The listing, telling `welcomed` of each server's handshake on the way: it carries the
+    /// server's home folder, which paths on it are shown against.
+    static func live(welcomed: @escaping @Sendable (LatchRemoteConnectionOptions, LatchRemoteWelcome) async -> Void)
+        -> RuntimeListing {
+        { options in try await list(options, welcomed: welcomed) }
+    }
+
+    private static func list(_ options: LatchRemoteConnectionOptions,
+                             welcomed: @Sendable (LatchRemoteConnectionOptions, LatchRemoteWelcome) async -> Void)
+        async throws -> [LatchRemoteRuntimeSummary] {
         let connection = LatchRemoteConnection(options: options)
         defer { connection.close() }
         connection.start()
-        _ = try await connection.waitUntilReady()
+        await welcomed(options, try await connection.waitUntilReady())
         guard case let .runtimes(runtimes) = try await connection.request(.listRuntimes, timeout: .seconds(10)) else {
             throw LatchRemoteClientError.closed
         }

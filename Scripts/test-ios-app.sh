@@ -307,6 +307,9 @@ if [[ -n "$screenshots" && "$configuration" == Debug ]]; then
     session_screens='conversation markdown streaming photos slash permission reconnecting error empty'
     large_screens='sessions conversation streaming permission new-session'
     large_size=accessibility-extra-large
+    # The largest size, where a sheet's controls are likeliest to fall out of sight.
+    largest_screens='new-session permission'
+    largest_size=accessibility-extra-extra-extra-large
     # Shows fixture $2 on device $1 and saves the screen as $3.
     capture() {
         local line
@@ -351,6 +354,11 @@ if [[ -n "$screenshots" && "$configuration" == Debug ]]; then
         xcrun simctl ui "$udid" content_size "$large_size"
         for screen in $large_screens; do
             capture "$udid" "$screen" "$screenshots/$name-$screen-light-$large_size.png"
+            count=$((count + 1))
+        done
+        xcrun simctl ui "$udid" content_size "$largest_size"
+        for screen in $largest_screens; do
+            capture "$udid" "$screen" "$screenshots/$name-$screen-light-$largest_size.png"
             count=$((count + 1))
         done
         xcrun simctl ui "$udid" content_size large

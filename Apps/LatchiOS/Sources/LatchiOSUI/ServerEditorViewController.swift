@@ -19,6 +19,8 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     private let originalToken: LatchRemoteToken?
     /// Said above the form when it was opened for a reason, such as a link to a known server.
     private let note: String?
+    /// Filled in from a `latch://` link rather than typed or pasted.
+    private(set) var fromLink = false
 
     let nameField = UITextField()
     let hostField = UITextField()
@@ -41,8 +43,9 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     /// Adding, optionally filled in from a pairing link.
     convenience init(store: any PhoneServerStore, pairing: LatchRemotePairing? = nil, check: @escaping ServerCheck) {
-        self.init(store: store, id: nil, token: nil, check: check, note: nil)
-        if let pairing { fill(from: pairing) }
+        self.init(store: store, id: nil, token: nil, check: check,
+                  note: pairing == nil ? nil : "From a pairing link. Check the host, then tap Add.")
+        if let pairing { fillFromLink(pairing) }
     }
 
     /// Editing a server. A pairing fills in its new address and token, for a link to a server
@@ -52,7 +55,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         self.init(store: store, id: server.id, token: server.token, check: check,
                   note: pairing == nil ? nil : "Save to use the new token for \(server.name).")
         load(ServerProfile.Stored(server))
-        if let pairing { fill(from: pairing) }
+        if let pairing { fillFromLink(pairing) }
     }
 
     /// Entering the token again for a server whose token is not on this device. Its ID stays,
@@ -63,7 +66,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
             ? "The token for \(stored.name) is not on this device. Paste a pairing string or enter the token."
             : "The token for \(stored.name) is not on this device. Save to use the one from this link.")
         load(stored)
-        if let pairing { fill(from: pairing) }
+        if let pairing { fillFromLink(pairing) }
     }
 
     private init(store: any PhoneServerStore, id: UUID?, token: LatchRemoteToken?, check: @escaping ServerCheck, note: String?) {
@@ -200,6 +203,13 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         }
         clearTestResult()
         refresh()
+    }
+
+    /// A link has filled in everything a paste would, so the sheet asks for a check instead
+    /// of offering Paste.
+    private func fillFromLink(_ pairing: LatchRemotePairing) {
+        fromLink = true
+        fill(from: pairing)
     }
 
     private func fill(from pairing: LatchRemotePairing) {
@@ -363,9 +373,10 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     private enum Row { case paste, name, host, port, token, test, testResult, unencrypted, command, remove }
 
-    /// Test Connection sits under the fields it tests.
+    /// Test Connection sits under the fields it tests. A link leaves nothing to paste.
     private var layout: [[Row]] {
-        [[.paste], [.name, .host, .port, .token], testResult == nil ? [.test] : [.test, .testResult], [.unencrypted], [.command]]
+        (fromLink ? [] : [[.paste]])
+            + [[.name, .host, .port, .token], testResult == nil ? [.test] : [.test, .testResult], [.unencrypted], [.command]]
             + (originalID == nil || !store.servers.contains { $0.id == originalID } ? [] : [[.remove]])
     }
 
@@ -378,7 +389,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch layout[section].first {
         case .paste?: note
-        case .name?: "Server"
+        case .name?: fromLink ? note : "Server"
         case .command?: "Custom Agent"
         default: nil
         }

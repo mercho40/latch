@@ -122,7 +122,12 @@ enum RemoteSmoke {
             let adopted = try await adoptRuntimeStartedElsewhere(on: server)
             try await backgroundAndForeground([session, adopted])
             try servers.remove(id: server.id)
-            try await until("the server gone from the Keychain") { (try? KeychainTokenVault().token(for: server.id)) == nil }
+            // Gone, not unreadable: a Keychain that fails every read would pass a `try?`.
+            do {
+                if try KeychainTokenVault().token(for: server.id) != nil { throw Failure("the server's token is still in the Keychain") }
+            } catch let failure as TokenVaultFailure {
+                throw Failure("could not read the Keychain to check the token was removed (status \(failure.status))")
+            }
             pass("\(device): removed the server and its Keychain token")
         }
 

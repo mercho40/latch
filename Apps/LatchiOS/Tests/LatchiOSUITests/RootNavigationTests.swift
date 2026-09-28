@@ -135,6 +135,24 @@ final class RootNavigationTests: XCTestCase {
         XCTAssertEqual(applied, [2, 0])
     }
 
+    /// The system's question never covers a request on screen: it waits for one the user
+    /// cannot see.
+    func testTheBadgeWaitsToAskUntilARequestIsOffScreen() async {
+        var asked = 0
+        var applied: [Int] = []
+        let badge = ApprovalBadge(authorize: { asked += 1; return true }, apply: { applied.append($0) })
+        badge.update(1, mayAsk: false)
+        await badge.settled()
+        XCTAssertEqual(asked, 0)
+        XCTAssertEqual(applied, [])
+        badge.update(2, mayAsk: true)
+        await badge.settled()
+        badge.update(1, mayAsk: false)
+        await badge.settled()
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(applied, [2, 1], "Once allowed, the badge follows whatever is on screen")
+    }
+
     /// A badge left by a run that ended while a session waited is cleared at the next launch
     /// where badges are allowed, and nothing is asked for.
     func testALaunchSetsTheBadgeRightWithoutAsking() async {

@@ -38,6 +38,8 @@ struct SessionRowStatus: Equatable {
         var needsApproval = false
         var linkState = SessionLinkState.connected
         var hasError = false
+        /// The error is about reaching the server, not about the agent on it.
+        var connectionFailure = false
         var stoppedOnServer = false
         /// Stop Agent was chosen here, and the session has not connected since.
         var stoppedHere = false
@@ -63,7 +65,10 @@ struct SessionRowStatus: Equatable {
                 return SessionRowStatus(mark: .none, text: "Stopped", spoken: "Stopped")
             }
             if input.status == "Not connected" || input.status == "Saved · Resume failed" {
-                return SessionRowStatus(mark: .failed, text: "Can’t connect", spoken: "Can’t connect")
+                // The server answered and the agent did not start: not a connection problem,
+                // which the server's own dot would contradict.
+                let text = input.connectionFailure ? "Can’t connect" : "Couldn’t start"
+                return SessionRowStatus(mark: .failed, text: text, spoken: text)
             }
             return SessionRowStatus(mark: .failed, text: input.status, spoken: input.status)
         }

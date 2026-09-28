@@ -30,6 +30,9 @@ final class PhoneSession {
     }
     /// Stop Agent was chosen, and nothing has connected since.
     private(set) var stoppedHere = false
+    /// The name the agent gave itself when it last connected, saved so a relaunch shows it
+    /// before connecting again.
+    private var agentName: String?
     /// The agent's name from the server's list, for an adopted runtime whose record has not
     /// arrived yet.
     private var listedAgentTitle: String?
@@ -59,6 +62,7 @@ final class PhoneSession {
         self.customCommand = customCommand
         title = saved?.title ?? Self.untitled
         draft = saved?.draft ?? ""
+        agentName = saved?.agentName
         model = SessionModel(makeClient: { connector.makeClient(serverID: serverID) })
         model.sendsAttachmentsRemotely = true
         if let saved {
@@ -83,14 +87,16 @@ final class PhoneSession {
         SavedSession(id: id, workspacePath: path, title: title, agentID: agent.rawValue,
                      customCommand: customCommand, draft: draft, messages: model.messages,
                      agentSessionID: model.savedAgentSessionID, lastActiveAt: model.lastActiveAt,
-                     serverID: serverID, remote: model.remoteBinding)
+                     serverID: serverID, remote: model.remoteBinding, agentName: agentName)
     }
 
     var location: WorkspaceLocation { .remote(serverID: serverID, path: path) }
 
-    /// "Claude Code", or a custom agent's command name.
+    /// "Claude Code"; for a custom agent, the name it gave itself once it has connected, and
+    /// until then its command's name.
     var agentTitle: String {
         if agent != .custom { return agent.title }
+        if let agentName, !agentName.isEmpty { return agentName }
         if let listedAgentTitle, customCommand.isEmpty { return listedAgentTitle }
         let command = customCommand.split(separator: " ").first.map { ($0 as NSString).lastPathComponent }
         return command.flatMap { $0.isEmpty ? nil : $0 } ?? "Custom"
@@ -108,7 +114,8 @@ final class PhoneSession {
         if let stubbedStatus { return stubbedStatus }
         return SessionRowStatus.Input(
             phase: model.phase, status: model.status, needsApproval: model.permissions.current != nil,
-            linkState: model.linkState, hasError: model.errorMessage != nil, stoppedOnServer: model.stoppedOnServer,
+            linkState: model.linkState, hasError: model.errorMessage != nil,
+            connectionFailure: model.errorIsConnectionFailure, stoppedOnServer: model.stoppedOnServer,
             stoppedHere: stoppedHere, promptStartedAt: model.promptStartedAt, lastActiveAt: model.lastActiveAt,
             hasUnseenReply: hasUnseenReply)
     }
@@ -133,6 +140,10 @@ final class PhoneSession {
 
     private func modelChanged() {
         if model.phase != .disconnected { stoppedHere = false }
+        if let name = model.agentName, name != agentName {
+            agentName = name
+            notify(transcript: false, persistOnly: true)
+        }
         notify(transcript: false)
     }
 

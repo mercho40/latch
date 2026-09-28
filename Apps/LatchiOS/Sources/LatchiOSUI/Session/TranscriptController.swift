@@ -4,6 +4,15 @@ import UIKit
 /// Tells its owner after each layout pass, which is when a pinned transcript keeps its end in view.
 final class TranscriptCollectionView: UICollectionView {
     var onLayout: (() -> Void)?
+    /// The column's edges from the content's, set by the screen from its composer's, so the
+    /// conversation lines up with it whatever the readable width and the sidebar do. Until
+    /// then the column is worked out from the readable width.
+    var column: (leading: CGFloat, trailing: CGFloat)? {
+        didSet {
+            guard column?.leading != oldValue?.leading || column?.trailing != oldValue?.trailing else { return }
+            collectionViewLayout.invalidateLayout()
+        }
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -45,7 +54,7 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
     private var lastContentHeight: CGFloat = 0
 
     override init() {
-        weak var host: UICollectionView?
+        weak var host: TranscriptCollectionView?
         let layout = UICollectionViewCompositionalLayout { _, environment in
             var configuration = UICollectionLayoutListConfiguration(appearance: .plain)
             configuration.showsSeparators = false
@@ -55,7 +64,10 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
             // iPad, lined up with the banner and the composer.
             var leading: CGFloat = 16
             var trailing: CGFloat = 16
-            if let host, host.bounds.width > 0 {
+            if let column = host?.column {
+                leading = column.leading
+                trailing = column.trailing
+            } else if let host, host.bounds.width > 0 {
                 // Centred in the readable width rather than the view's, which on iPad runs
                 // under the sidebar: the composer's constraints do the same.
                 let readable = host.readableContentGuide.layoutFrame

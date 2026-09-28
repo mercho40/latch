@@ -128,6 +128,9 @@ ipad_types="$(device_types iPad)"
 ipad="$(ensure_device 'Latch iPad' "$(grep 11-inch <<< "$ipad_types" || true)"$'\n'"$ipad_types")"
 
 booted=()
+# Devices whose appearance or text size the screenshots changed: put back on every exit, even
+# on a device that was booted before this run and stays booted after it.
+restyled=()
 console=
 console_pid=
 server_dir=
@@ -147,9 +150,12 @@ cleanup() {
     if [[ -n "$console" ]]; then rm -f "$console"; fi
     if [[ -n "$server_pid" ]]; then stop_server || true; fi
     if [[ -n "$server_dir" ]]; then rm -rf "$server_dir"; fi
-    for udid in ${booted[@]+"${booted[@]}"}; do
+    for udid in ${restyled[@]+"${restyled[@]}"}; do
+        xcrun simctl terminate "$udid" "$bundle_id" 2>/dev/null || true
         xcrun simctl ui "$udid" appearance light 2>/dev/null || true
         xcrun simctl ui "$udid" content_size large 2>/dev/null || true
+    done
+    for udid in ${booted[@]+"${booted[@]}"}; do
         xcrun simctl shutdown "$udid" 2>/dev/null || true
     done
 }
@@ -332,6 +338,7 @@ if [[ -n "$screenshots" && "$configuration" == Debug ]]; then
         udid="${device#*:}"
         screens="$shell_screens $session_screens"
         if [[ "$name" == ipad ]]; then screens="$screens split"; fi
+        restyled+=("$udid")
         xcrun simctl ui "$udid" content_size large
         for appearance in light dark; do
             xcrun simctl ui "$udid" appearance "$appearance"

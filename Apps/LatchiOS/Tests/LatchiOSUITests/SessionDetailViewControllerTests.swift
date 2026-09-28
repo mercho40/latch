@@ -472,6 +472,7 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertEqual(models.map(\.subtitle), ["Fast and capable", "Most capable"])
         XCTAssertTrue(models.allSatisfy { !$0.attributes.contains(.disabled) })
         XCTAssertEqual(sections[1].children.compactMap { ($0 as? UIAction)?.title }, ["Copy Path"])
+        XCTAssertEqual(sections[2].children.count, 1, "Nothing to start while the agent runs")
         let stop = try XCTUnwrap(sections[2].children.first as? UIAction)
         XCTAssertEqual(stop.title, "Stop Agent")
         XCTAssertTrue(stop.attributes.contains(.destructive))
@@ -548,7 +549,8 @@ final class SessionDetailViewControllerTests: XCTestCase {
         await waitUntil("the banner") { fixture.screen.banner.isShowing }
         let banner = try XCTUnwrap(fixture.screen.currentBanner)
         XCTAssertEqual(banner.title, "Can’t connect to vps")
-        XCTAssertEqual(banner.detail, "vps did not answer at vps.example:7800.")
+        XCTAssertEqual(banner.message, "vps did not answer at vps.example:7800.")
+        XCTAssertEqual(banner.detail, "", "Latch's own words are not set as the agent's")
         XCTAssertEqual(banner.severity, .error)
         XCTAssertEqual(fixture.screen.banner.displayedActions, ["Retry", "Server Settings"])
         fixture.screen.banner.onAction?("retry")
@@ -580,10 +582,65 @@ final class SessionDetailViewControllerTests: XCTestCase {
         await waitUntil("the stop") { fixture.model.stoppedOnServer }
         let banner = try XCTUnwrap(fixture.screen.currentBanner)
         XCTAssertEqual(banner.title, "Claude Code stopped on vps")
-        XCTAssertEqual(banner.detail, "The agent was stopped on vps.")
-        XCTAssertEqual(banner.message, "Retry to start it again.")
+        XCTAssertEqual(banner.detail, "")
+        XCTAssertEqual(banner.message, "Another device or the server stopped it. Retry starts it again.")
         XCTAssertEqual(banner.severity, .warning)
         XCTAssertEqual(banner.actions.map(\.title), ["Retry"])
+    }
+
+    /// An agent that ends by itself mid-conversation quit; it did not fail to start.
+    func testAnAgentThatExitsQuitUnexpectedly() async throws {
+        let fixture = SessionScreenFixture()
+        show(fixture)
+        await fixture.connect()
+        let id = try XCTUnwrap(fixture.client.runtimeID)
+        fixture.client.emit(.agent(.processTerminated(runtimeID: id, status: 3), sequence: nil))
+        await waitUntil("the exit") { fixture.model.phase == .disconnected }
+        let banner = try XCTUnwrap(fixture.screen.currentBanner)
+        XCTAssertEqual(banner.title, "Claude Code quit unexpectedly on vps")
+        XCTAssertEqual(banner.message, "It exited with status 3. Retry starts it again.")
+        XCTAssertEqual(banner.detail, "")
+        XCTAssertEqual(banner.actions.map(\.title), ["Retry"])
+    }
+
+    /// Stopped from this device, the conversation says so and offers to start the agent
+    /// again, in the banner and in the menu.
+    func testAnAgentStoppedHereOffersToStartAgain() async throws {
+        let fixture = SessionScreenFixture()
+        show(fixture)
+        await fixture.connect()
+        await sendPrompt(fixture, "Hello")
+        fixture.client.endTurn()
+        await waitUntil("the turn's end") { fixture.model.phase == .ready }
+        var stopped = false
+        fixture.screen.context.isStopped = { stopped }
+        await fixture.model.disconnect()
+        stopped = true
+        fixture.screen.modelDidChange()
+        let banner = try XCTUnwrap(fixture.screen.currentBanner)
+        XCTAssertEqual(banner.title, "Claude Code is stopped")
+        XCTAssertEqual(banner.severity, .info)
+        XCTAssertEqual(banner.actions.map(\.title), ["Start Agent"])
+        fixture.screen.banner.onAction?(banner.actions[0].id)
+        XCTAssertEqual(fixture.retries, 1)
+        let menu = try XCTUnwrap(fixture.screen.menuButton.menu)
+        let last = try XCTUnwrap(menu.children.compactMap { $0 as? UIMenu }.last)
+        XCTAssertEqual(last.children.compactMap { ($0 as? UIAction)?.title }, ["Start Agent", "Stop Agent"])
+    }
+
+    /// With its server gone from Servers, nothing on the screen offers settings that would
+    /// only add a new server.
+    func testASessionWhoseServerIsGoneOffersNoSettings() async throws {
+        let client = ScriptedSessionClient()
+        client.failNextLaunch(with: RemoteSessionNotConnected.serverRemoved)
+        let fixture = SessionScreenFixture(client: client)
+        fixture.screen.context.hasServer = { false }
+        show(fixture)
+        await fixture.connect()
+        await waitUntil("the failure") { fixture.model.errorMessage != nil }
+        let banner = try XCTUnwrap(fixture.screen.currentBanner)
+        XCTAssertEqual(banner.actions, [])
+        XCTAssertEqual(banner.message, "vps is no longer in Servers.")
     }
 
     func testADismissedBannerStaysDismissedUntilRetry() async throws {

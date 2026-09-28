@@ -16,10 +16,17 @@ extension SessionDetailViewController {
             guard let session, let root else { return }
             Task { await root.library.stop(session) }
         }
+        // Only for a server Servers still has, or one waiting for its token: any other editor
+        // would add a new server, which this session would never use.
         context.onServerSettings = { [weak session, weak root] in
-            guard let session, let root else { return }
+            guard let session, let root, root.hasServer(session.serverID) else { return }
             root.presentServerEditor(serverID: session.serverID)
         }
+        context.hasServer = { [weak session, weak root] in
+            guard let session, let root else { return false }
+            return root.hasServer(session.serverID)
+        }
+        context.isStopped = { [weak session] in session?.stoppedHere ?? false }
         // Setting the draft schedules the library's save.
         context.onDraftChange = { [weak session] draft in session?.draft = draft }
         context.canStopAgent = { [weak session] in session?.canStop ?? false }

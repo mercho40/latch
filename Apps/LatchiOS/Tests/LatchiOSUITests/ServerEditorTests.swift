@@ -45,6 +45,19 @@ final class ServerEditorTests: XCTestCase {
         XCTAssertEqual(editor.hostField.text, "vps.example", "A bad paste changes nothing")
     }
 
+    /// A link has filled the form already: the sheet asks for a check and offers no Paste.
+    func testAPairingLinkAsksForACheckRatherThanAPaste() throws {
+        let manual = editor()
+        XCTAssertFalse(manual.fromLink)
+        let sections = manual.tableView.numberOfSections
+        let linked = editor(pairing: try LatchRemotePairing(host: "vps.example", token: token))
+        XCTAssertTrue(linked.fromLink)
+        XCTAssertEqual(linked.tableView.numberOfSections, sections - 1)
+        XCTAssertEqual(linked.tableView(linked.tableView, titleForHeaderInSection: 0),
+                       "From a pairing link. Check the host, then tap Add.")
+        XCTAssertEqual(linked.hostField.text, "vps.example")
+    }
+
     func testTheNameFollowsTheHostUntilTyped() {
         let editor = editor()
         type("vps", into: editor.hostField)

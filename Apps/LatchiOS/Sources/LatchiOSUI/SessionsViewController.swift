@@ -28,13 +28,16 @@ final class SessionsViewController: UICollectionViewController {
     var onShowServers: (() -> Void)?
     var onServerSettings: ((UUID) -> Void)?
     var onOpen: ((PhoneSession) -> Void)?
+    /// The list is on screen with no session beside it or over it: back from one on iPhone.
+    var onShownAlone: (() -> Void)?
     /// Asks whether to go ahead with Remove or Stop Agent; calls back only to go ahead.
     var confirm: (@MainActor (Confirmation, @escaping () -> Void) -> Void)?
 
     enum Confirmation: Equatable {
-        /// Only the first time: after that the user knows the agent runs on.
-        case remove(sessionTitle: String, serverName: String)
-        case stop(sessionTitle: String, serverName: String)
+        /// While the agent runs on, only the first time: after that the user knows it does.
+        /// With the agent stopped, every time, since the conversation goes with the session.
+        case remove(sessionTitle: String, serverName: String, agentRuns: Bool)
+        case stop(agentTitle: String, serverName: String)
     }
 
     let library: SessionLibrary
@@ -101,6 +104,7 @@ final class SessionsViewController: UICollectionViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        if splitViewController?.isCollapsed == true { onShownAlone?() }
         Task { await library.refreshRuntimes() }
     }
 
@@ -285,10 +289,13 @@ final class SessionsViewController: UICollectionViewController {
 
     private func updateEmptyState() {
         if library.servers.servers.isEmpty, library.sessions.isEmpty, library.servers.problem == nil {
-            contentUnavailableConfiguration = Self.noServers { [weak self] in self?.addServer() }
+            // A sidebar is narrow, and the column beside it explains pairing.
+            contentUnavailableConfiguration = isSidebar
+                ? Self.noServersInSidebar { [weak self] in self?.addServer() }
+                : Self.noServers { [weak self] in self?.addServer() }
         } else if library.sessions.isEmpty, library.servers.problem == nil,
                   library.servers.servers.allSatisfy({ library.adoptableRuntimes(on: $0.id).isEmpty }) {
-            contentUnavailableConfiguration = Self.noSessions { [weak self] in self?.onNewSession?(nil) }
+            contentUnavailableConfiguration = Self.noSessions
         } else {
             contentUnavailableConfiguration = nil
         }
@@ -303,6 +310,14 @@ final class SessionsViewController: UICollectionViewController {
         button.title = "Add Server"
         configuration.button = button
         configuration.buttonProperties.primaryAction = UIAction { _ in addServer() }
+        return configuration
+    }
+
+    /// "No servers yet" without the instructions, which the column beside it has room for.
+    static func noServersInSidebar(addServer: @escaping () -> Void) -> UIContentUnavailableConfiguration {
+        var configuration = noServers(addServer: addServer)
+        configuration.secondaryAttributedText = nil
+        configuration.secondaryText = "Add the machine your agents run on."
         return configuration
     }
 
@@ -324,15 +339,12 @@ final class SessionsViewController: UICollectionViewController {
         return text
     }
 
-    static func noSessions(newSession: @escaping () -> Void) -> UIContentUnavailableConfiguration {
+    /// No button of its own: each server's section already starts with New Session.
+    static var noSessions: UIContentUnavailableConfiguration {
         var configuration = UIContentUnavailableConfiguration.empty()
         configuration.image = UIImage(systemName: "text.bubble")
         configuration.text = "No sessions yet"
         configuration.secondaryText = "Start an agent in a folder on one of your servers. Agents started from another device show up here too."
-        var button = UIButton.Configuration.filled()
-        button.title = "New Session"
-        configuration.button = button
-        configuration.buttonProperties.primaryAction = UIAction { _ in newSession() }
         return configuration
     }
 
@@ -428,13 +440,16 @@ final class SessionsViewController: UICollectionViewController {
         return text
     }
 
-    /// A runtime another device started: its folder, its agent, and what it is doing. The
-    /// whole path is in its VoiceOver value and its context menu.
+    /// A runtime another device started: its first prompt, its agent and folder as a session's
+    /// row has them, and what it is doing. One not prompted yet goes by its folder. The whole
+    /// path is in its VoiceOver value and its context menu.
     private func configure(_ cell: UICollectionViewListCell, for runtime: LatchRemoteRuntimeSummary) {
         var content = UIListContentConfiguration.subtitleCell()
         let folder = WorkspaceLocation.remote(serverID: UUID(), path: runtime.workspace).folderName
-        content.text = folder
-        content.secondaryText = runtime.agentTitle
+        let title = runtime.title.flatMap { $0.isEmpty ? nil : $0 }
+        content.text = title ?? folder
+        content.secondaryText = title == nil ? runtime.agentTitle : "\(runtime.agentTitle) · \(folder)"
+        content.textProperties.numberOfLines = 1
         content.textProperties.font = .preferredFont(forTextStyle: .body)
         content.secondaryTextProperties.font = .preferredFont(forTextStyle: .subheadline)
         content.secondaryTextProperties.color = .secondaryLabel
@@ -452,7 +467,7 @@ final class SessionsViewController: UICollectionViewController {
         }
         accessories.append(.disclosureIndicator())
         cell.accessories = accessories
-        cell.accessibilityLabel = "\(folder), \(runtime.agentTitle)"
+        cell.accessibilityLabel = [title, runtime.agentTitle, folder].compactMap { $0 }.joined(separator: ", ")
         cell.accessibilityValue = [state?.spoken, runtime.workspace].compactMap { $0 }.joined(separator: ", ")
         cell.accessibilityHint = "Opens this agent’s session on this device."
     }
@@ -651,16 +666,18 @@ final class SessionsViewController: UICollectionViewController {
     /// Returns whether it asked rather than removing.
     @discardableResult
     func remove(_ session: PhoneSession) -> Bool {
+        // A runtime still on the server keeps the conversation, and "On <server>" offers it.
+        let agentRuns = session.pendingAdoption != nil || session.canStop
         let go = { [weak self] in
             guard let self else { return }
-            self.defaults.set(true, forKey: Self.removalExplainedKey)
+            if agentRuns { self.defaults.set(true, forKey: Self.removalExplainedKey) }
             Task { await self.library.remove(session) }
         }
-        guard !defaults.bool(forKey: Self.removalExplainedKey), let confirm else {
+        guard !agentRuns || !defaults.bool(forKey: Self.removalExplainedKey), let confirm else {
             go()
             return false
         }
-        confirm(.remove(sessionTitle: session.title, serverName: serverName(session.serverID)), go)
+        confirm(.remove(sessionTitle: session.title, serverName: serverName(session.serverID), agentRuns: agentRuns), go)
         return true
     }
 
@@ -670,7 +687,7 @@ final class SessionsViewController: UICollectionViewController {
             Task { await self.library.stop(session) }
         }
         guard let confirm else { return go() }
-        confirm(.stop(sessionTitle: session.title, serverName: serverName(session.serverID)), go)
+        confirm(.stop(agentTitle: session.agentTitle, serverName: serverName(session.serverID)), go)
     }
 
     // MARK: Time

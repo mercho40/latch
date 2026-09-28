@@ -34,9 +34,12 @@ final class SessionsListTests: XCTestCase {
                        "Connecting…")
         XCTAssertEqual(slot { $0.linkState = .reconnecting(server: "vps", since: now) }.text, "5m",
                        "A disconnected session is not waiting for its link")
-        XCTAssertEqual(slot { $0.hasError = true; $0.status = "Not connected" },
+        XCTAssertEqual(slot { $0.hasError = true; $0.status = "Not connected"; $0.connectionFailure = true },
                        SessionRowStatus(mark: .failed, text: "Can’t connect", spoken: "Can’t connect"))
-        XCTAssertEqual(slot { $0.hasError = true; $0.status = "Saved · Resume failed" }.text, "Can’t connect")
+        XCTAssertEqual(slot { $0.hasError = true; $0.status = "Saved · Resume failed"; $0.connectionFailure = true }.text,
+                       "Can’t connect")
+        XCTAssertEqual(slot { $0.hasError = true; $0.status = "Not connected" }.text, "Couldn’t start",
+                       "The server answered; the agent did not start")
         XCTAssertEqual(slot { $0.hasError = true; $0.status = "Stopped on vps"; $0.stoppedOnServer = true }.text, "Stopped")
         XCTAssertEqual(slot { $0.hasError = true; $0.status = "Agent exited (1)" }.text, "Stopped")
         XCTAssertEqual(slot { $0.hasError = true; $0.status = "Sign-in required" },
@@ -60,10 +63,10 @@ final class SessionsListTests: XCTestCase {
     }
 
     private func session(_ library: SessionLibrary, _ connector: FakeConnector, on server: ServerProfile, title: String,
-                         minutesAgo: Double) -> PhoneSession {
+                         minutesAgo: Double, runtime: String? = nil) -> PhoneSession {
         let saved = SavedSession(id: UUID(), workspacePath: "/srv/\(title.lowercased())", title: title, agentID: "codex",
                                  customCommand: "", draft: "", messages: [], lastActiveAt: now.addingTimeInterval(-60 * minutesAgo),
-                                 serverID: server.id)
+                                 serverID: server.id, remote: runtime.map { SavedSession.RemoteBinding(runtimeID: $0, cursor: 0) })
         let session = PhoneSession(saved: saved, connector: connector)
         library.add(session)
         return session
@@ -171,15 +174,14 @@ final class SessionsListTests: XCTestCase {
         list.loadViewIfNeeded()
         let offer = list.contentUnavailableConfiguration as? UIContentUnavailableConfiguration
         XCTAssertEqual(offer?.text, "No sessions yet")
-        XCTAssertEqual(offer?.button.title, "New Session")
-        XCTAssertNotNil(offer?.buttonProperties.primaryAction)
+        XCTAssertNil(offer?.button.title, "The server's section offers New Session; the page only explains")
     }
 
     func testRemoveExplainsOnceThatTheAgentKeepsRunning() async throws {
         let vps = Fake.server("vps")
         let (list, library, connector) = makeList(servers: [vps])
-        let first = session(library, connector, on: vps, title: "First", minutesAgo: 1)
-        let second = session(library, connector, on: vps, title: "Second", minutesAgo: 2)
+        let first = session(library, connector, on: vps, title: "First", minutesAgo: 1, runtime: "r1")
+        let second = session(library, connector, on: vps, title: "Second", minutesAgo: 2, runtime: "r2")
         var asked: [SessionsViewController.Confirmation] = []
         list.confirm = { confirmation, go in
             asked.append(confirmation)
@@ -190,7 +192,28 @@ final class SessionsListTests: XCTestCase {
         try await eventually("the first removal") { library.sessions.count == 1 }
         list.remove(second)
         try await eventually("the second removal") { library.sessions.isEmpty }
-        XCTAssertEqual(asked, [.remove(sessionTitle: "First", serverName: "vps")])
+        XCTAssertEqual(asked, [.remove(sessionTitle: "First", serverName: "vps", agentRuns: true)])
+    }
+
+    /// With its agent stopped, nothing on the server keeps the conversation, so removing it
+    /// always asks, and says so.
+    func testRemovingAStoppedSessionAlwaysAsks() async throws {
+        let vps = Fake.server("vps")
+        let (list, library, connector) = makeList(servers: [vps])
+        let running = session(library, connector, on: vps, title: "Running", minutesAgo: 1, runtime: "r1")
+        let stopped = session(library, connector, on: vps, title: "Stopped", minutesAgo: 2)
+        var asked: [SessionsViewController.Confirmation] = []
+        list.confirm = { confirmation, go in
+            asked.append(confirmation)
+            go()
+        }
+        list.loadViewIfNeeded()
+        list.remove(running)
+        try await eventually("the first removal") { library.sessions.count == 1 }
+        XCTAssertTrue(list.remove(stopped), "Asked, though removal was explained already")
+        try await eventually("the second removal") { library.sessions.isEmpty }
+        XCTAssertEqual(asked, [.remove(sessionTitle: "Running", serverName: "vps", agentRuns: true),
+                               .remove(sessionTitle: "Stopped", serverName: "vps", agentRuns: false)])
     }
 
     func testStopAlwaysAsks() async throws {
@@ -201,7 +224,7 @@ final class SessionsListTests: XCTestCase {
         var asked: [SessionsViewController.Confirmation] = []
         list.confirm = { confirmation, _ in asked.append(confirmation) }
         list.stop(session)
-        XCTAssertEqual(asked, [.stop(sessionTitle: "New Session", serverName: "vps")])
+        XCTAssertEqual(asked, [.stop(agentTitle: "fx", serverName: "vps")])
         XCTAssertEqual(session.model.phase, .ready, "Nothing stops until confirmed")
     }
 }

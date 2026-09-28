@@ -69,6 +69,7 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         // UIKit wraps each column in its own navigation controller.
         setViewController(sessions, for: .primary)
         placeholder.isEmpty = servers.servers.isEmpty
+        placeholder.onAddServer = { [weak self] in self?.sessions.addServer() }
         setViewController(placeholder, for: .secondary)
         wire()
     }
@@ -85,12 +86,19 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         sessions.onShowServers = { [weak self] in self?.presentServers() }
         sessions.onServerSettings = { [weak self] id in self?.presentServerEditor(serverID: id) }
         sessions.onOpen = { [weak self] session in self?.show(session) }
+        sessions.onShownAlone = { [weak self] in self?.listShownAlone() }
         sessions.confirm = { [weak self] confirmation, go in self?.confirm(confirmation, go) }
         library.isSessionVisible = { [weak self] id in self?.isShowing(id) ?? false }
         library.onChange = { [weak self] in self?.libraryChanged() }
         library.onSessionChange = { [weak self] session in self?.sessions.sessionChanged(session) }
         library.onAttention = { [weak self] session, attention in self?.announce(session, attention) }
-        library.onApprovalCountChange = { [weak self] count in self?.badge?.update(count) }
+        library.onApprovalCountChange = { [weak self] count in
+            guard let self else { return }
+            // Only for a request the user cannot see: over one on screen, the system's question
+            // about badges would come with no context, in front of the decision itself.
+            let unseen = library.sessions.contains { $0.needsApproval && !isShowing($0.id) }
+            badge?.update(count, mayAsk: unseen)
+        }
     }
 
     // MARK: Links
@@ -117,9 +125,16 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         shown == nil ? .primary : .secondary
     }
 
-    /// Expanding again, the open session is selected beside it.
+    /// Expanding again, the open session is beside the list, so it is the one selected.
     public func splitViewControllerDidExpand(_ svc: UISplitViewController) {
+        if let shown { library.open(shown.session) }
         sessions.selectShownSession()
+    }
+
+    /// Back at the list on iPhone: no session is open, so a relaunch starts at the list too.
+    private func listShownAlone() {
+        guard isCollapsed, shown != nil else { return }
+        library.deselect()
     }
 
     // MARK: Sessions
@@ -140,9 +155,10 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         sessions.selectShownSession()
     }
 
-    /// Shows what was on screen when the app last closed, where there is room beside the list.
+    /// Shows what was on screen when the app last closed: beside the list, or pushed over it
+    /// on iPhone.
     func restoreSelection() {
-        guard traitCollection.horizontalSizeClass == .regular, shown == nil,
+        guard shown == nil, presentedViewController == nil,
               let id = library.selectedSessionID, let session = library.session(id: id) else { return }
         show(session)
     }
@@ -157,8 +173,11 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     private func libraryChanged() {
         sessions.reload()
         placeholder.isEmpty = servers.servers.isEmpty
-        // A renamed server's name, in the open session's title.
-        if let shown, let screen = shown.controller as? SessionDetailViewController { screen.follow(shown.session, in: self) }
+        // A renamed server's name, in the open session's title, and a removed one's notice.
+        if let shown, let screen = shown.controller as? SessionDetailViewController {
+            screen.follow(shown.session, in: self)
+            screen.modelDidChange()
+        }
         // A removed session's screen goes with it, once any push or pop has finished: the split
         // view asserts when its columns change in the middle of one.
         guard let shown, library.session(id: shown.session.id) !== shown.session else { return }
@@ -167,14 +186,26 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
             return
         }
         self.shown = nil
-        // Made anew, as when its server's token was entered again: the new one takes its place
-        // if it was on screen, and otherwise the next opening shows it.
+        // Made anew, as when its server's token was entered again: the new one's screen takes
+        // the old one's place in the column, on screen or not, so expanding never shows the
+        // old one. Not through `show`, which opens a session the user chose and would take down
+        // the sheet they entered the token in.
         if let replacement = library.session(id: shown.session.id) {
-            if shown.controller.viewIfLoaded?.window != nil { show(replacement) }
+            let onScreen = shown.controller.viewIfLoaded?.window != nil
+            let controller = makeSessionViewController(replacement, self)
+            self.shown = (replacement, controller)
+            setViewController(controller, for: .secondary)
+            if onScreen {
+                library.open(replacement)
+            } else if isCollapsed {
+                // The list the user went back to stays on top, should setting the column push it.
+                show(.primary)
+            }
             return
         }
         placeholder = SessionPlaceholderViewController()
         placeholder.isEmpty = servers.servers.isEmpty
+        placeholder.onAddServer = { [weak self] in self?.sessions.addServer() }
         setViewController(placeholder, for: .secondary)
         if isCollapsed { show(.primary) }
     }
@@ -209,7 +240,11 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     /// New Session in its sheet, or nil with no server to start one on.
     func newSessionSheet(serverID: UUID? = nil) -> UINavigationController? {
         guard !servers.servers.isEmpty else { return nil }
-        let controller = NewSessionViewController(servers: servers.servers, serverID: serverID, check: check)
+        let controller = NewSessionViewController(servers: servers.servers, serverID: serverID, check: check) {
+            [weak library] id in
+            // Adopted sessions count too: they name the agent and folder that are in use there.
+            library?.sessions(on: id).first.map { .init(serverID: id, path: $0.path, agent: $0.agent) }
+        }
         controller.onCreate = { [weak self] choice in
             guard let self else { return }
             show(library.create(serverID: choice.serverID, path: choice.path, agent: choice.agent))
@@ -241,6 +276,11 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         return navigation
     }
 
+    /// Whether Servers has the server, or keeps it while its token is entered again.
+    func hasServer(_ id: UUID) -> Bool {
+        servers.server(id: id) != nil || servers.missingTokens.contains { $0.id == id }
+    }
+
     func presentServerEditor(serverID: UUID? = nil, pairing: LatchRemotePairing? = nil) {
         presentOnTop(serverEditorSheet(serverID: serverID, pairing: pairing))
     }
@@ -266,20 +306,23 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         let device = UIDevice.current.model
         let alert: UIAlertController
         switch confirmation {
-        case let .remove(title, server):
+        case let .remove(title, server, agentRuns: true):
             alert = UIAlertController(
                 title: "Remove “\(title)” from this \(device)?",
                 message: "The agent keeps running on \(server). To open it again, find it under “On \(server)”.",
                 preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
             alert.addAction(UIAlertAction(title: "Remove", style: .default) { _ in go() })
-        case let .stop(title, server):
+        case let .remove(title, _, agentRuns: false):
             alert = UIAlertController(
-                title: "Stop the agent?",
-                message: "The agent in “\(title)” stops on \(server), and a turn in progress ends. The conversation stays on this \(device).",
+                title: "Remove “\(title)” from this \(device)?",
+                message: "The agent is stopped, so nothing on the server keeps this conversation. It will be gone from this \(device).",
                 preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-            alert.addAction(UIAlertAction(title: "Stop Agent", style: .destructive) { _ in go() })
+            alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { _ in go() })
+        case let .stop(agent, server):
+            alert = SessionDetailViewController.stopConfirmation(agentTitle: agent, serverName: server, device: device,
+                                                                 style: .alert, go: go)
         }
         presentOnTop(alert)
     }
@@ -328,12 +371,13 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
 }
 
 /// The secondary column before a session is chosen. Never seen on iPhone, where the
-/// collapsed stack starts at the sessions list. Blank while there is no server: the list
-/// beside it explains pairing, and there is nothing to select.
+/// collapsed stack starts at the sessions list. While there is no server it explains
+/// pairing, which has more room here than in the sidebar.
 final class SessionPlaceholderViewController: UIViewController {
     var isEmpty = false {
         didSet { if isEmpty != oldValue, isViewLoaded { refresh() } }
     }
+    var onAddServer: () -> Void = {}
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -342,7 +386,9 @@ final class SessionPlaceholderViewController: UIViewController {
     }
 
     private func refresh() {
-        guard !isEmpty else { return contentUnavailableConfiguration = nil }
+        guard !isEmpty else {
+            return contentUnavailableConfiguration = SessionsViewController.noServers { [weak self] in self?.onAddServer() }
+        }
         var configuration = UIContentUnavailableConfiguration.empty()
         configuration.text = "No Session Selected"
         contentUnavailableConfiguration = configuration

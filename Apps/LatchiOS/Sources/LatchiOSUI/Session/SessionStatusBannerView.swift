@@ -35,6 +35,8 @@ struct SessionBanner: Equatable {
     /// What the agent or server said, set off in monospace so it reads as their report.
     var detail = ""
     var severity = Severity.error
+    /// In place of the severity's symbol, for a state rather than a fault.
+    var symbol: String?
     /// A spinner in place of the symbol, while something is being waited for.
     var isWaiting = false
     var actions: [Action] = []
@@ -185,7 +187,7 @@ final class SessionStatusBannerView: UIView {
         detailLabel.isHidden = banner.detail.isEmpty
         messageLabel.text = banner.message
         messageLabel.isHidden = banner.message.isEmpty
-        symbol.image = UIImage(systemName: banner.severity.symbol)
+        symbol.image = UIImage(systemName: banner.symbol ?? banner.severity.symbol)
         symbol.isHidden = banner.isWaiting
         if banner.isWaiting { spinner.startAnimating() } else { spinner.stopAnimating() }
         actionRow.arrangedSubviews.forEach { $0.removeFromSuperview() }

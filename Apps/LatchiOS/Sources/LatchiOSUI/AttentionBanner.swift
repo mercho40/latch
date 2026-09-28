@@ -192,7 +192,10 @@ final class ApprovalBadge {
         }
     }
 
-    func update(_ count: Int) {
+    /// Sets the badge, asking first whether badges are allowed the first time there is one to
+    /// show and `mayAsk` says the moment suits: not while the request is on screen, where the
+    /// system's question would cover it.
+    func update(_ count: Int, mayAsk: Bool = true) {
         self.count = count
         let previous = pending
         pending = Task { [weak self] in
@@ -200,7 +203,7 @@ final class ApprovalBadge {
             guard let self, self.count == count else { return }
             if self.authorized == nil {
                 // Zero needs no badge, so it asks for nothing.
-                guard count > 0 else { return }
+                guard count > 0, mayAsk else { return }
                 self.authorized = await self.authorize()
             }
             guard self.authorized == true else { return }

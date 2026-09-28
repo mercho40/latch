@@ -109,6 +109,68 @@ final class SessionScreenTests: XCTestCase {
         XCTAssertEqual(root.splitViewController(root, topColumnForCollapsingToProposedTopColumn: .primary), .secondary)
     }
 
+    private func onScreen(_ root: RootViewController) async throws {
+        try await eventually("the session on screen") {
+            root.shown.map { root.isShowing($0.session.id) } == true && root.shown?.controller.transitionCoordinator == nil
+        }
+    }
+
+    /// A session made anew while its screen is off screen, as when its server's token is
+    /// entered again, gets a new screen in the column at once: expanding shows the new one,
+    /// which follows the new session, and the list the user went back to stays on top.
+    func testASessionMadeAnewOffScreenReplacesItsScreenInTheColumn() async throws {
+        let (root, library, store, _) = hosted()
+        let session = library.create(serverID: vps.id, path: "/srv", agent: .fx)
+        root.show(session)
+        try await onScreen(root)
+        let old = try screen(root)
+        root.show(.primary)
+        try await eventually("the list") { old.viewIfLoaded?.window == nil && root.sessions.transitionCoordinator == nil }
+        try store.remove(id: vps.id)
+        try store.save(vps)
+        let replacement = try XCTUnwrap(library.session(id: session.id))
+        XCTAssertFalse(replacement === session)
+        let new = try screen(root)
+        XCTAssertFalse(new === old)
+        XCTAssertTrue(new.model === replacement.model)
+        XCTAssertTrue(root.viewController(for: .secondary) === new)
+        try await eventually("the list still on top") { root.sessions.view.window != nil && new.viewIfLoaded?.window == nil }
+        type("typed after the token came back", in: new)
+        XCTAssertEqual(replacement.draft, "typed after the token came back")
+        // Expanding, as a Pro Max turned sideways or a wider iPad window does.
+        root.view.window?.traitOverrides.horizontalSizeClass = .regular
+        try await eventually("the split view expanded") { !root.isCollapsed }
+        try await eventually("the new screen beside the list") { new.viewIfLoaded?.window != nil }
+        XCTAssertNil(old.viewIfLoaded?.window)
+    }
+
+    /// Server Settings for a server no longer in Servers would open Add Server, which makes a
+    /// server this session never uses; it opens nothing.
+    func testServerSettingsForARemovedServerOpensNothing() async throws {
+        let (root, library, store, _) = hosted()
+        let session = library.create(serverID: vps.id, path: "/srv", agent: .fx)
+        root.show(session)
+        try await onScreen(root)
+        try store.remove(id: vps.id)
+        let screen = try screen(root)
+        XCTAssertFalse(screen.context.hasServer())
+        screen.context.onServerSettings()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertNil(root.presentedViewController)
+    }
+
+    /// Back at the list on iPhone, nothing is open, so a relaunch starts at the list.
+    func testGoingBackToTheListLeavesNothingToRestore() async throws {
+        let (root, library, _, _) = hosted()
+        guard root.isCollapsed else { throw XCTSkip("Only a collapsed split view goes back to the list") }
+        let session = library.create(serverID: vps.id, path: "/srv", agent: .fx)
+        root.show(session)
+        try await onScreen(root)
+        XCTAssertEqual(library.selectedSessionID, session.id)
+        root.show(.primary)
+        try await eventually("nothing selected") { library.selectedSessionID == nil }
+    }
+
     /// Stop Agent's confirmation is answered first; on iPad it can go by a tap outside its
     /// popover, which runs no action, and the request still shows once it has gone.
     func testAPermissionRequestWaitsForAnAlertAndShowsOnceItHasGone() async throws {

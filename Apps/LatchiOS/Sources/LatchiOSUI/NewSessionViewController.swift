@@ -17,6 +17,9 @@ final class NewSessionViewController: UITableViewController, UITextFieldDelegate
 
     private let servers: [ServerProfile]
     private let check: ServerCheck
+    /// The folder and agent last used on a server, which it starts from rather than the
+    /// server's home and the first agent.
+    private let recent: (UUID) -> Choice?
     private(set) var selectedServerID: UUID?
     private(set) var selectedAgent: AgentPreset?
     let pathField = UITextField()
@@ -32,10 +35,13 @@ final class NewSessionViewController: UITableViewController, UITextFieldDelegate
     private var fetchGeneration = UUID()
     private(set) var isFetchingHome = false
 
-    init(servers: [ServerProfile], serverID: UUID? = nil, check: @escaping ServerCheck) {
+    init(servers: [ServerProfile], serverID: UUID? = nil, check: @escaping ServerCheck,
+         recent: @escaping (UUID) -> Choice? = { _ in nil }) {
         self.servers = servers
         self.check = check
+        self.recent = recent
         selectedServerID = serverID.flatMap { id in servers.contains { $0.id == id } ? id : nil } ?? servers.first?.id
+        selectedAgent = selectedServerID.flatMap(recent)?.agent
         super.init(style: .insetGrouped)
         title = "New Session"
     }
@@ -213,6 +219,7 @@ final class NewSessionViewController: UITableViewController, UITextFieldDelegate
     func selectServer(_ id: UUID) {
         guard id != selectedServerID, servers.contains(where: { $0.id == id }) else { return }
         selectedServerID = id
+        if let agent = recent(id)?.agent { selectedAgent = agent }
         rebuildServerMenu()
         rebuildAgentMenu()
         fetchHome()
@@ -225,11 +232,20 @@ final class NewSessionViewController: UITableViewController, UITextFieldDelegate
 
     // MARK: Folder
 
-    /// Asks the server for its home folder, the default workspace. A server that cannot be
-    /// reached leaves `~`, which the server resolves when the agent launches.
+    /// The folder last used on the server, or else its home folder, which one handshake
+    /// reports. A server that cannot be reached leaves `~`, which the server resolves when the
+    /// agent launches.
     private func fetchHome() {
         homeFetch?.cancel()
         guard let server = selectedServer else { return }
+        if let last = recent(server.id)?.path, !last.isEmpty {
+            fetchGeneration = UUID()
+            isFetchingHome = false
+            spinner.stopAnimating()
+            pathField.placeholder = "Path on the server"
+            if !pathEdited { pathField.text = last }
+            return refreshCreate()
+        }
         let generation = UUID()
         fetchGeneration = generation
         isFetchingHome = true

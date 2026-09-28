@@ -30,6 +30,11 @@ struct SessionDetailContext {
     /// Whether Stop Agent has a runtime to stop, when the host knows better than the model,
     /// such as while an adoption is still attaching.
     var canStopAgent: (() -> Bool)?
+    /// Stop Agent was chosen for this session, and nothing has connected since.
+    var isStopped: () -> Bool = { false }
+    /// Whether the session's server is still in Servers, so its settings can be opened and
+    /// its agent started again.
+    var hasServer: () -> Bool = { true }
 }
 
 /// One session: its conversation, a composer pinned above the keyboard, a banner for the
@@ -219,6 +224,12 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             collection.contentInset = insets
             collection.verticalScrollIndicatorInsets = insets
         }
+        // The conversation runs the composer's column, in the content's coordinates.
+        if composer.frame.width > 0 {
+            let column = collection.convert(composer.frame, from: view)
+            let width = collection.bounds.width - collection.adjustedContentInset.left - collection.adjustedContentInset.right
+            transcript.collectionView.column = (column.minX.rounded(), (width - column.maxX).rounded())
+        }
         if abs(composerOverlap - bottom) > 0.5 {
             composerOverlap = bottom
             refreshEmptyState()
@@ -351,8 +362,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             configuration = .empty()
             configuration.image = UIImage(systemName: "bolt.horizontal.circle")
             configuration.text = "Not connected"
-            configuration.secondaryText = "\(context.agentTitle) runs on \(serverName)."
-            if model.phase == .disconnected {
+            configuration.secondaryText = context.hasServer()
+                ? "\(context.agentTitle) runs on \(serverName)." : "\(serverName) is no longer in Servers."
+            if model.phase == .disconnected, context.hasServer() {
                 var button = UIButton.Configuration.filled()
                 button.title = "Connect"
                 configuration.button = button
@@ -411,21 +423,65 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
                 message: "It was saved without the agent’s context, so it can’t be picked up where it left off. Its history stays here.",
                 severity: .info)
         }
-        guard let error = model.errorMessage else { return nil }
-        let detail = model.stoppedOnServer ? "The agent was stopped on \(serverName)." : Self.agentWords(error)
-        let advice = model.errorAdvice ?? ""
+        guard let error = model.errorMessage else { return disconnected ? idleBanner : nil }
+        // Monospace is for what the agent said; Latch's own sentences read as its advice.
+        var detail = ""
+        var message: String
+        let advice = model.errorAdvice.map { " " + $0 } ?? ""
+        if model.stoppedOnServer {
+            message = "Another device or the server stopped it. Retry starts it again."
+        } else if let status = exitStatus {
+            message = "It exited with status \(status). Retry starts it again."
+        } else if model.errorIsConnectionFailure {
+            message = Self.iOSWords(error) + advice
+        } else {
+            detail = Self.agentWords(Self.iOSWords(error))
+            message = model.errorAdvice ?? ""
+        }
+        if !context.hasServer() { message = "\(serverName) is no longer in Servers." }
         var actions: [SessionBanner.Action] = []
-        if disconnected { actions.append(Self.retryAction) }
-        if model.errorIsConnectionFailure { actions.append(Self.serverSettingsAction) }
+        if disconnected, context.hasServer() { actions.append(Self.retryAction) }
+        if model.errorIsConnectionFailure, context.hasServer() { actions.append(Self.serverSettingsAction) }
         return SessionBanner(
-            key: "\(model.phase)\u{0}\(model.connectionAttempts)\u{0}\(detail)\u{0}\(advice)",
-            title: failureTitle(disconnected: disconnected), message: advice, detail: detail,
+            key: "\(model.phase)\u{0}\(model.connectionAttempts)\u{0}\(detail)\u{0}\(message)",
+            title: failureTitle(disconnected: disconnected), message: message, detail: detail,
             // An agent stopped on purpose, by another device or the server, is not a fault.
             severity: disconnected && !model.stoppedOnServer ? .error : .warning,
             actions: actions)
     }
 
+    /// A session with no agent and nothing wrong: stopped from here, or left without a server.
+    /// An empty one shows the empty page instead, which says the same.
+    private var idleBanner: SessionBanner? {
+        guard !model.messages.isEmpty, !isReadOnly else { return nil }
+        if !context.hasServer() {
+            return SessionBanner(key: "serverRemoved", title: "\(serverName) is no longer in Servers",
+                                 message: "The conversation stays on this \(device), but it can’t reach its agent again.",
+                                 severity: .info, symbol: "xmark.circle")
+        }
+        guard context.isStopped() else { return nil }
+        return SessionBanner(key: "stopped\u{0}\(model.connectionAttempts)", title: "\(context.agentTitle) is stopped",
+                             message: "Start it again to carry on the conversation where it left off.",
+                             severity: .info, symbol: "stop.circle", actions: [Self.startAction])
+    }
+
+    private var device: String { traitCollection.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
+
+    /// The status of an agent process that ended by itself, such as "3".
+    private var exitStatus: String? {
+        let prefix = "Agent exited ("
+        guard model.phase == .disconnected, model.status.hasPrefix(prefix), model.status.hasSuffix(")") else { return nil }
+        return String(model.status.dropFirst(prefix.count).dropLast())
+    }
+
+    /// The shared model's advice is written for the Mac, where an agent is picked again from
+    /// a menu; here Retry does that.
+    static func iOSWords(_ message: String) -> String {
+        message.replacingOccurrences(of: " Select the agent again to reconnect.", with: " Retry starts it again.")
+    }
+
     private static let retryAction = SessionBanner.Action(title: "Retry", id: "retry")
+    private static let startAction = SessionBanner.Action(title: "Start Agent", id: "retry")
     private static let serverSettingsAction = SessionBanner.Action(title: "Server Settings", id: "serverSettings")
 
     /// Whose failure it is: an unreachable server is not the agent's fault.
@@ -435,6 +491,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         if model.errorIsConnectionFailure { return "Can’t connect to \(serverName)" }
         if disconnected, model.stoppedOnServer { return "\(agent) stopped on \(serverName)" }
         if disconnected, case .failed(_, _, runtimeGone: true) = model.linkState { return "\(agent) stopped on \(serverName)" }
+        if exitStatus != nil { return "\(agent) quit unexpectedly on \(serverName)" }
         return disconnected ? "\(agent) can’t start on \(serverName)" : "\(agent) reported a problem"
     }
 
@@ -462,6 +519,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     private struct MenuState: Equatable {
         let configuration: SessionConfiguration
         let editable: Bool
+        let canStartAgent: Bool
         let canStopAgent: Bool
         let folderPath: String
     }
@@ -470,6 +528,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         let state = MenuState(
             configuration: model.configuration,
             editable: model.phase == .ready && !model.isChangingConfiguration,
+            canStartAgent: model.phase == .disconnected && !isReadOnly && context.hasServer(),
             canStopAgent: context.canStopAgent?() ?? (model.phase != .disconnected || model.remoteBinding != nil),
             folderPath: context.folderPath)
         guard state != renderedMenu else { return }
@@ -495,10 +554,15 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
                             attributes: state.canStopAgent ? .destructive : [.destructive, .disabled]) { [weak self] _ in
             self?.confirmStopAgent()
         }
+        let start = UIAction(title: "Start Agent", image: UIImage(systemName: "play.circle")) { [weak self] _ in
+            self?.banner.resetDismissal()
+            self?.context.onRetry()
+            self?.refresh()
+        }
         return UIMenu(children: [
             UIMenu(options: .displayInline, children: settings),
             UIMenu(options: .displayInline, children: [copyPath]),
-            UIMenu(options: .displayInline, children: [stop]),
+            UIMenu(options: .displayInline, children: state.canStartAgent ? [start, stop] : [stop]),
         ])
     }
 
@@ -537,18 +601,26 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     }
 
     private func confirmStopAgent() {
-        let device = traitCollection.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
-        let alert = UIAlertController(
-            title: "Stop \(context.agentTitle) on \(serverName)?",
-            message: "Anything it is doing stops. The conversation stays on this \(device).",
-            preferredStyle: .actionSheet)
-        alert.addAction(UIAlertAction(title: "Stop Agent", style: .destructive) { [weak self] _ in
+        let alert = Self.stopConfirmation(agentTitle: context.agentTitle, serverName: serverName, device: device,
+                                          style: .actionSheet, go: { [weak self] in
             self?.context.onStopAgent()
             self?.refresh()
-        })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in self?.refresh() })
+        }, cancel: { [weak self] in self?.refresh() })
         alert.popoverPresentationController?.sourceItem = menuButton
         present(alert, animated: true)
+    }
+
+    /// Stop Agent's question, the same from the session's menu and from the list.
+    static func stopConfirmation(agentTitle: String, serverName: String, device: String,
+                                 style: UIAlertController.Style, go: @escaping () -> Void,
+                                 cancel: @escaping () -> Void = {}) -> UIAlertController {
+        let alert = UIAlertController(
+            title: "Stop \(agentTitle) on \(serverName)?",
+            message: "Anything it is doing stops. The conversation stays on this \(device).",
+            preferredStyle: style)
+        alert.addAction(UIAlertAction(title: "Stop Agent", style: .destructive) { _ in go() })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in cancel() })
+        return alert
     }
 
     // MARK: Sending

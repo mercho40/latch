@@ -161,6 +161,13 @@ final class SessionLibrary {
         scheduleSave()
     }
 
+    /// No session is on screen, as when an iPhone goes back to the list.
+    func deselect() {
+        guard selectedSessionID != nil else { return }
+        selectedSessionID = nil
+        scheduleSave()
+    }
+
     /// Removes the session from this device and leaves its agent running on the server, where
     /// the runtimes list offers it again.
     func remove(_ session: PhoneSession) async {

@@ -32,6 +32,22 @@ final class NewSessionTests: XCTestCase {
         XCTAssertEqual(sheet.pathField.text, "/Users/simon")
     }
 
+    /// The folder and agent last used on a server come back, rather than its home and the
+    /// first agent; a server with no session yet still starts from its home.
+    func testTheLastFolderAndAgentOnAServerComeBack() async {
+        let recent = NewSessionViewController.Choice(serverID: box.id, path: "/Users/simon/latch", agent: .custom)
+        let sheet = NewSessionViewController(servers: [vps, box], serverID: box.id, check: { _ in Self.info("/Users/simon") },
+                                             recent: { $0 == recent.serverID ? recent : nil })
+        sheet.loadViewIfNeeded()
+        XCTAssertFalse(sheet.isFetchingHome)
+        XCTAssertEqual(sheet.pathField.text, "/Users/simon/latch")
+        XCTAssertEqual(sheet.selectedAgent, .custom)
+        sheet.selectServer(vps.id)
+        await sheet.homeFetched()
+        XCTAssertEqual(sheet.pathField.text, "/Users/simon")
+        XCTAssertEqual(sheet.selectedAgent, .fx, "vps has no Custom command, so its first agent")
+    }
+
     func testAnUnreachableServerLeavesTheHomeShorthand() async {
         let sheet = NewSessionViewController(servers: [vps], check: { _ in throw LatchRemoteClientError.timedOut })
         sheet.loadViewIfNeeded()

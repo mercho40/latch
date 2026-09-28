@@ -51,19 +51,21 @@ On the server, run:
 latch-server pair --host vps.example.ts.net --qr
 ```
 
-`--host` is the name or address the phone connects to. The command prints the `latch://…?token=…` pairing string and, below it, a QR code of the same string. Scan the code with the Camera app and tap the link: Latch opens with Add Server filled in and the note "From a pairing link. Check the host, then tap Add." Nothing is saved until you tap Add. The code holds the token; see [Running latch-server](server.md#the-token) for how to handle it.
+`--host` is the name or address the phone connects to. The command prints the `latch://…?token=…` pairing string and, below it, a QR code of the same string. Scan the code with the Camera app and tap the link: Latch opens with Add Server filled in and the note "From a pairing link. Check the host, then tap Add.", and tests the connection at once. When the server answers, the sheet names the server after the host name it reports and says "Tap Add to use this server."; when it does not, it says why. Nothing is saved until you tap Add. The code holds the token; see [Running latch-server](server.md#the-token) for how to handle it. With no server added yet, the sessions list, or on iPad the column beside it, shows the pairing command with a Copy Command button, to paste into the server's terminal.
 
-Without the Camera, copy the pairing string to the phone some other trusted way, open Servers (the server icon above the sessions list), tap Add Server, and use the Paste button, which fills in the host, port, token and name. Or type the name, host, port and token. Test Connection reports the server's host name, system and version, or why it could not connect. The Add Server sheet also has the Allow unencrypted network switch and the server's own Custom Agent command, which runs on the server.
+Without the Camera, copy the pairing string to the phone some other trusted way, open Servers (the server icon above the sessions list), tap Add Server, and use the Paste button, which fills in the host, port, token and name. Or type the name, host, port and token. Test Connection reports the server's host name, system and version, or why it could not connect; a server that answers is named after its host name unless you typed a name. The Add Server sheet also has the Allow unencrypted network switch and the server's own Custom Agent command, which runs on the server.
+
+After Add, the app shows what to do next: if the server already runs agents that no session on this device follows, the list opens its "On <server>" group; if it runs none and has no sessions here, New Session opens.
 
 A link to a server that is already added, at the same host and port, does not add it twice. The app asks "“vps” is already added" and offers Update Token, Add as New Server and Cancel. Update Token opens that server's editor with the new token; it is used once you tap Save.
 
 To rotate a token, run `latch-server token --rotate` on the server, then `pair --host … --qr` again, scan the code and choose Update Token, or paste the new string into the server's editor. The server keeps its identity, so its sessions attach again to agents that kept running. In the editor a token field left empty keeps the current token.
 
-Removing a server, from the editor or by swiping in Servers, asks first. Its sessions stay on the device but cannot connect again, even if you add the server back, and their agents keep running on the server. Stop Agent in its sessions first if you want them stopped. To take the agents up again later, add the server back, remove its old sessions from Removed Server, and take the agents up from "On <server>": while an old session is on the device, its agent is not listed there.
+Removing a server, from the editor or by swiping in Servers, asks first. Its sessions stay on the device, under Removed Server, and their agents keep running on the server. Stop Agent in its sessions first if you want them stopped. Adding a server at the same address, host and port, again offers them back: "Reconnect 2 sessions on “vps”?". Reconnect puts them on the new server, and each whose agent still runs there attaches to it again. Not Now leaves them under Removed Server, and while an old session is on the device its agent is not listed under "On <server>"; remove the old session to take its agent up from there instead.
 
 ## If a server does not connect
 
-Test Connection, and a session's banner, say why. The usual causes:
+Test Connection, and a session's banner, say why. Servers checks every server as it opens: one that did not answer shows "Can’t connect" under its address with a few words on why, such as "Needs “Allow unencrypted network”", "Token not accepted" or "Didn’t answer", and Test Connection in its editor gives the whole sentence. The usual causes:
 
 - **"Latch did not send the token … is neither this iPhone nor on a Tailscale network."** Tailscale is off on the phone, or the host is not the server's tailnet name or address. Connect Tailscale and check the host. The message offers Allow unencrypted network; do not turn it on to get past this over a network you do not control, since the token would then cross it in the clear.
 - **"<server> refused the token."** The token was rotated, or mistyped. Run `latch-server pair --host NAME --qr` again, scan it and choose Update Token. The server's log shows `wrong token`.
@@ -72,26 +74,31 @@ Test Connection, and a session's banner, say why. The usual causes:
 
 ## Sessions
 
-The sessions list has a section per server, most recently active first, and a Removed Server section for sessions whose server is gone. The dot beside a server's name is green when it answered the last time it was asked for its agents, red when it did not, and grey before it has been asked. Each server's menu (the `…` button) offers New Session, Refresh and Server Settings. Pulling the list down checks every link and asks every server again.
+The sessions list has a section per server, most recently active first, and a Removed Server section for sessions whose server is gone. The dot beside a server's name is green when it answered the last time it was asked for its agents, red when it did not, and grey before it has been asked; Servers shows the same dot for its own checks. With Differentiate Without Color on, the dot is a symbol whose shape says the same. Each server's menu (the `…` button) offers New Session, Refresh and Server Settings. Pulling the list down checks every link and asks every server again.
 
-A session's row shows its title, from the first line of its first prompt, over the agent's name and folder. The slot at its end follows the Mac's sidebar: a spinner and how long the turn has run while it works; "Needs approval" with an orange mark while a permission decision waits; "Connecting…" or "Reconnecting…"; "Can’t connect" when the server cannot be reached; "Couldn’t start" when the server answered and the agent did not start; "Stopped"; a dot for a reply that finished while you were elsewhere; otherwise when it was last active.
+A session's row shows its title, from the first line of its first prompt until you rename it, over the agent's name and folder. Its state follows the Mac's sidebar. Words lead the second line, so the title keeps the row's width: "Needs approval" with an orange mark at the row's end while a permission decision waits; "Connecting…", "Reconnecting…" or "Stopping…", from Stop until the agent ends the turn; "Can’t connect" when the server cannot be reached; "Couldn’t start" when the server answered and the agent did not start; "Stopped". Otherwise the end of the row has a spinner and how long the turn has run while it works, a dot for a reply that finished while you were elsewhere, or when it was last active. At accessibility text sizes the state goes on a line of its own under the agent and folder.
 
-**Agents another device started.** Under each server, a row "On <server>" shows how many agents run there that no session on this device follows. Tap it to list them, each by its first prompt, or by its folder until it has one, with its agent and whether it is working or needs approval. Tapping an agent takes it up in a new session. The app replays the agent's events from the start, so the conversation so far appears, including history the agent replayed when a session was resumed. The session then follows the agent like any other.
+A session's context menu offers Rename…, Copy Path, Mark as Read or Mark as Unread, Remove from iPhone (or iPad) and Stop Agent. Swiping a row from its leading edge marks it read or unread, and from its trailing edge offers Remove and Stop Agent. A new name is kept on this device only; the server, and other devices, keep the first prompt as the agent's title.
 
-**New Session** (the `+` button, or a server's section) asks for a server, a folder on it and an agent. The folder is typed, because Latch cannot browse the server. It starts from the folder and agent last used on that server, or from the server's home folder. The agents offered are fx, Codex, Claude Code and OpenCode, and Custom when you have set a Custom Agent command for that server in its sheet; the command runs on the server. Whether an agent is installed is the server's to say; the session reports it when it starts. Create starts the agent at once.
+**Agents another device started.** Under each server, a row "On <server>" shows how many agents run there that no session on this device follows. Tap it to list them, each by its first prompt, or by its folder until it has one, with its agent and whether it is working or needs approval. The closed row says "Needs approval" when one of them waits for a decision, and opens by itself the first time one does; closed again, it stays closed. Tapping an agent takes it up in a new session. The app replays the agent's events from the start, so the conversation so far appears, including history the agent replayed when a session was resumed. The session then follows the agent like any other.
+
+**New Session** (the `+` button, or a server's section) asks for a server, a folder on it and an agent. The folder is typed, because Latch cannot browse the server. It starts from the folder and agent last used on that server, or from the server's home folder. The home folder reads as `~`, and a folder in it as `~/latch`; Create writes the path out in full, so the session keeps an absolute path. The clock button beside the folder lists up to eight folders in use on that server, by this device's sessions and by the agents the server runs. The agents offered are fx, Codex, Claude Code and OpenCode, and Custom when you have set a Custom Agent command for that server in its sheet; the command runs on the server. Whether an agent is installed is the server's to say; the session reports it when it starts. Create starts the agent at once and opens the session with the composer ready for the first prompt.
+
+**Paths.** The app keeps each server's home folder, as the server reports it whenever the app connects to it, by the server's address. With it, a folder in the home is shown as `~/…`: in a session's subtitle and empty page, and in New Session. Copy Path, VoiceOver and the saved session keep the whole path. Until the app has heard from a server, its paths are shown in full.
 
 ## A conversation
 
-A session opens pushed over the list on iPhone, or beside it on iPad. The title names the session, and the line under it the server and folder.
+A session opens pushed over the list on iPhone, or beside it on iPad. The title names the session, and the line under it the server and folder, such as "vps · ~/latch". Tapping the title offers Rename…, Copy Path and Server Settings.
 
-- **Replies** are Markdown, parsed by Foundation and drawn with UIKit: headings, emphasis, inline code, lists, quotes, rules, code blocks with their language and a Copy button, and tables as a grid. Wide code and tables scroll sideways. HTML is shown as text, images as their alt text, and nothing remote is loaded. Only `http` and `https` links without a user name or password, and `mailto` links, open. Reply text is selectable.
-- **Tool calls** are compact rows with their status; tap one to see its details.
-- **The composer** grows with the draft, which is saved with the session. Send becomes Stop while a turn runs. Typing `/` at the start of the draft lists the commands the agent offers.
-- **Photos.** The `+` button in the composer picks up to four photos from your library. Each is sent as a JPEG no larger than 2048 pixels on its longest side, and only to an agent that accepts images; for one that does not, the app says so and keeps the draft. There are no file or folder attachments. The transcript lists a sent photo by name; its image data is not saved.
-- **Model, effort and permission mode** are in the session's `…` menu, as the agent offers them, with their descriptions. Nothing is hard-coded, and a pick is checked once the agent confirms it. The same menu has Copy Path and Stop Agent.
+- **Replies** are Markdown, parsed by Foundation and drawn with UIKit: headings, emphasis, inline code, lists, quotes, rules, code blocks with their language and a Copy button, and tables as a grid. Wide code and tables scroll sideways, and fade out at the edge they continue past. HTML is shown as text, images as their alt text, and nothing remote is loaded. Only `http` and `https` links without a user name or password, and `mailto` links, open, with a tap.
+- **Message menus.** A long press, or a secondary click, on a message lifts it and offers a menu, as Messages does. A prompt offers Copy and Select Text. A reply offers Copy, which copies the text as shown, Copy as Markdown, which copies it as the agent wrote it, and Select Text; then Copy Code for its code, or Copy Code 1 to Copy Code 4, each with its block's language, when it has several; then Open for up to three of its links. A tool call offers Copy Command, or Copy Title, and Copy Details when it has any. Text is not selectable until you choose Select Text, so a long press never starts a selection mid-word.
+- **Tool calls** are compact rows with their status; tap one that has details to see them. A long title wraps at the parts of a path or name, never mid-word.
+- **The composer** grows with the draft, which is saved with the session, and asks the agent by name. Send becomes Stop while a turn runs, and the conversation shows "Stopping…" from Stop until the agent ends the turn. Typing `/` at the start of the draft lists the commands the agent offers.
+- **Photos.** The `+` button in the composer picks up to four photos from your library. A photo can also be pasted into the composer, or dropped anywhere on the session's page. Each is sent as a JPEG no larger than 2048 pixels on its longest side, and only to an agent that accepts images; for one that does not, the app says so and keeps the draft. There are no file or folder attachments. A photo sent from this device shows as a small picture above its message, from a copy of at most 256 pixels that the app keeps on this device only; see [Privacy and security](#privacy-and-security). A photo sent from another device, or whose copy is gone, is listed by name.
+- **The session's `…` menu** has the model, effort and permission mode, as the agent offers them, with their descriptions. Nothing is hard-coded, and a pick is checked once the agent confirms it. The same menu has Rename…, Copy Path, Start Agent when the agent is not running, and Stop Agent.
 - **Jump to Latest** appears when you scroll away from the end; while you are at the end, a streaming reply keeps it in view.
 
-**Approvals.** A permission request opens a sheet over whatever is on screen: what the agent wants to do, the tool call's details, one button per option the agent offers, in its order, and Cancel Request. No option is the default, and the sheet cannot be swiped away. It closes when you decide, or when the agent closes the request, such as when another device answered it first.
+**Approvals.** A permission request opens a sheet over whatever is on screen: what the agent wants to do, with a command set in monospace, the tool call's details, one button per option the agent offers, in its order, and Cancel Request. The sheet says that “Always” is remembered by the agent, not by Latch, and that Cancel Request declines only this request. No option is the default, and the sheet cannot be swiped away. When the options do not fit beside the details, as at large text sizes, they scroll with them. It closes when you decide, or when the agent closes the request, such as when another device answered it first.
 
 **Stop Agent and Remove** are different. Stop Agent, from the session's menu, a row's swipe actions or its context menu, asks "Stop <agent> on <server>?" and stops the agent on the server; the conversation stays on the device, and the session offers Start Agent, which resumes the agent's saved session if the agent can load one. Remove from iPhone (or iPad) forgets the session on this device and leaves its agent running, where "On <server>" offers it again. The first time, it says so and asks. Removing a session whose agent is stopped asks every time, because nothing on the server keeps that conversation.
 
@@ -99,26 +106,37 @@ A session opens pushed over the list on iPhone, or beside it on iPad. The title 
 
 ## Attention, and the badge
 
-While the app is open, a session that is not on screen shows a banner at the top of the window, with its title, when its agent finishes a turn, waits for a permission decision, or is stopped on its server by another device or the server itself. Tapping the banner opens the session. Nothing is posted to Notification Center. A finished turn also leaves the unread dot on the session's row; a turn that failed, or ended because its agent was stopped, leaves none.
+While the app is open, a session that is not on screen shows a banner under the navigation bar's buttons, on iPad across the session's column, when its agent finishes a turn, waits for a permission decision, or is stopped on its server by another device or the server itself. It gives the session's title and says what happened in the agent's name: "Codex on vps needs approval: …" with what the agent asks, "Codex finished.", or "Codex was stopped on vps." A decision's banner stays eight seconds, and comes with a warning haptic; the others stay four, or eight while VoiceOver runs. Tapping the banner opens the session. Nothing is posted to Notification Center. A finished turn also leaves the unread dot on the session's row; a turn that failed, or ended because its agent was stopped, leaves none.
 
 The app icon's badge counts the sessions waiting for a decision. The first time a request waits in a session you are not looking at, never at launch, iOS shows its standard prompt asking whether Latch may send notifications. Latch asks only for the badge, so allowing it never brings alerts or sounds. The badge changes only while the app runs, so it can be out of date after the app has been in the background.
 
 ## iPad
 
-On iPad the sessions list is a sidebar beside the open session. In a window narrow enough for compact width, the two collapse into one stack with the open session on top, and widening it again shows both. The app has one window.
+On iPad the sessions list is a sidebar beside the open session. Before a session is chosen, the column beside it says "No Session Selected" and offers New Session. In a window narrow enough for compact width, the two collapse into one stack with the open session on top, and widening it again shows both. The app has one window.
 
-## Keyboard
+## Menu bar and keyboard
 
-With a hardware keyboard, on iPad or iPhone:
+The app's commands are in the iPadOS menu bar, from iPadOS 26, and before it in the list that holding ⌘ on a hardware keyboard shows, much as the Mac app's menus have them. New Session is in File, Servers where the Settings item goes, and Jump to Latest in View. A Session menu has Send, Stop, Add Photos…, Rename…, Copy Path, Start Agent, Stop Agent…, and Previous and Next Session. An item that does not apply is dimmed. The Session menu's items act on the open session wherever the keyboard focus is, the sessions list included, unless a sheet or alert is over it.
 
 | Keys | Action |
 | --- | --- |
 | ⌘N | New Session |
 | ⌘, | Servers |
-| ⌘[ and ⌘] | Previous and next session, in the list's order |
+| ⌥⌘↑ and ⌥⌘↓ | Previous and next session, in the list's order, as on the Mac; ⌘[ and ⌘] do the same, unlisted |
 | ⌘↩ | Send |
 | ⌘. | Stop the turn |
+| ⇧⌘A | Add Photos |
+| ⌥⌘C | Copy Path, as Finder's Copy as Pathname |
+| ⌘↓ | Jump to Latest |
 | Escape | Cancel Request, in a permission sheet |
+
+In the composer, Return sends, as in Messages, and Shift-Return starts a new line. While the agent's `/` commands are listed, the up and down arrows move through them, Return or Tab takes one, and Escape puts the list away.
+
+## Accessibility
+
+- **VoiceOver.** The conversation has rotors for Your Messages, Replies, Tool Calls and Code, to move turn by turn through a long one. A reply's actions include what its menu offers: Copy, Copy as Markdown, each code block, and its links. Tables are read row by row with their column names, and a command in a permission request symbol by symbol. A server's header in the sessions list is a heading, with its menu's actions. A failure you can act on takes the VoiceOver cursor. Reconnecting, and the end of a turn in the session on screen, are read out without moving it, after what is being read; a turn elsewhere has its banner.
+- **Text size.** The app follows Dynamic Type through the accessibility sizes. At those sizes a session's state goes on a line of its own in the list, New Session opens at full height on iPhone, and a permission request's options scroll with it.
+- **Display settings.** With Differentiate Without Color, server state is a symbol as well as a colour. Panels are stronger with Increase Contrast, and monospaced text heavier with Bold Text.
 
 ## In the background
 
@@ -132,7 +150,9 @@ When you open the app again it checks every link at once, attaches each session 
 
 - **Tokens** are in the Keychain, one item per server, readable after the device's first unlock and only on this device. They are not synced through iCloud Keychain, and a backup restored onto another device does not bring them.
 - **Server profiles**, without tokens, are in `servers.json`, and **sessions**, with their transcripts and drafts, in `sessions.json`, both in the app's `Application Support/Latch` folder, written with mode 0600 and data protection until first unlock. They are not encrypted beyond that and are included in device backups. A server restored without its token stays in Servers as "Needs its token again"; entering its token, or opening a pairing link to it, and saving reconnects its sessions.
-- **Transcripts** keep the same limits as the Mac's: 400 messages and 200,000 characters of text per session. Photos sent are not saved.
+- **Transcripts** keep the same limits as the Mac's: 400 messages and 200,000 characters of text per session. The photos themselves are not saved with them.
+- **Pictures of sent photos.** For each photo sent from this device, the app keeps a JPEG of at most 256 pixels on its longest side, to show above the message. They are in the app's `Caches/SentImages` folder, with data protection until first unlock; iOS may delete them to free space, and they are not included in device backups. They go when their session is removed from the device.
+- **What the app remembers about servers,** in its preferences, which are included in device backups: each server's home folder, by address, as it last reported it; and the name and address of each server you removed, so that adding one at that address again can offer its sessions back.
 - **Pairing links** are never saved on their own: a link only fills in the Add Server or Edit Server sheet, and nothing is kept until you tap Add or Save.
 - **What the connection carries** is what the Mac's does: prompts, the agent's replies and reasoning, tool calls with their arguments and output, permission requests and answers, and photos; the server's host name, system, architecture and home folder; and for each agent on the server, its folder, the preset or custom command it runs, and a title: the first line of its first prompt, or of the history a resumed session replayed. Latch does not encrypt any of it; that is the network path's job.
 - **Holding a server's token is a shell on it,** from the phone as from the Mac. See [SECURITY.md](../.github/SECURITY.md).
@@ -143,9 +163,9 @@ When you open the app again it checks every link at once, attaches each session 
 - No push notifications, and nothing happens on the phone while the app is suspended.
 - No discovery of servers on the network: a server is paired by its string or QR code.
 - One token per server, shared by every device. There is no per-device revocation; rotating the token disconnects every device until it is updated.
-- Photos only: no files or folders, and no camera or clipboard images.
-- Folders on the server are typed, not browsed.
-- Sessions cannot be renamed or forked on the phone.
+- Photos only, picked, pasted or dropped: no files or folders, and no taking a photo with the camera.
+- Folders on the server are typed, or picked from those in use there, not browsed.
+- Sessions cannot be forked on the phone, and a rename stays on the device that made it.
 - The Mac app does not list or take up agents another device started; the phone can take up the Mac's remote sessions, not the other way round.
 - A session taken up from an agent whose command the app does not know, such as one an older server did not report, is never started again by guess: once that agent stops, the session shows its history but cannot start it again.
 - The Markdown renderer covers what Foundation's parser reads; HTML is shown as text.

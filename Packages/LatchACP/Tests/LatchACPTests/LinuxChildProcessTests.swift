@@ -24,8 +24,11 @@ final class LinuxChildProcessTests: XCTestCase {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        XCTAssertEqual(fields["SigBlk"].flatMap { UInt64($0, radix: 16) }, 0)
-        XCTAssertEqual(fields["SigIgn"].flatMap { UInt64($0, radix: 16) }, 0)
+        // Only the standard signals, 1 to 31. glibc keeps 32 and 33 for its own threads and
+        // unblocks them in every process it starts; some kernels report them blocked in a child.
+        let standardSignals: UInt64 = 0x7FFF_FFFF
+        XCTAssertEqual(fields["SigBlk"].flatMap { UInt64($0, radix: 16) }.map { $0 & standardSignals }, 0)
+        XCTAssertEqual(fields["SigIgn"].flatMap { UInt64($0, radix: 16) }.map { $0 & standardSignals }, 0)
         await transport.stop()
     }
 

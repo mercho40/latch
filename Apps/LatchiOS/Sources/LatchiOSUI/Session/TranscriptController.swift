@@ -348,11 +348,15 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
                 select,
             ]
             let code = content.codeBlocks
+            // The first four blocks, numbered, with the fence's language under the number as
+            // it was written; more would crowd out the rest. Select Text reaches the others.
             let codeItems = code.prefix(4).enumerated().map { index, block in
-                UIAction(title: code.count == 1 ? "Copy Code" : "Copy \(block.language.map { "\($0) " } ?? "")Code \(index + 1)",
-                         image: UIImage(systemName: "chevron.left.forwardslash.chevron.right")) { [weak self] _ in
+                let item = UIAction(title: code.count == 1 ? "Copy Code" : "Copy Code \(index + 1)",
+                                    image: UIImage(systemName: "chevron.left.forwardslash.chevron.right")) { [weak self] _ in
                     self?.pasteboard.string = block.code
                 }
+                if code.count > 1 { item.subtitle = block.language }
+                return item
             }
             let linkItems = content.links.prefix(3).map { link in
                 UIAction(title: "Open \(link.title)", image: UIImage(systemName: "safari")) { [weak self] _ in self?.openURL(link.url) }

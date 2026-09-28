@@ -300,13 +300,14 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     }
 
     /// A server that answered goes by the name it gives itself, rather than its full host,
-    /// unless one was typed; from a link, the form says what was found.
+    /// unless one was typed; from a link, the form says what to do next. The result row
+    /// already says what was found.
     private func found(_ info: LatchRemoteServerInfo) {
         if !nameEdited, !info.hostname.isEmpty {
             nameField.text = info.hostname
         }
         if fromLink, originalID == nil {
-            note = "Found \(ServerCheckText.summary(info)). Tap Add to use it."
+            note = "Tap Add to use this server."
             refresh()
         }
     }

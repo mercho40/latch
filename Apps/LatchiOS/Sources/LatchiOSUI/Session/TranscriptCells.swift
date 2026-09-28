@@ -415,11 +415,12 @@ final class ToolCallCell: TranscriptCell {
 
 /// The tappable row of a tool call. Its whole width is the target. At accessibility text
 /// sizes the status and chevron move under the symbol and title, which wraps, as a list
-/// cell's does. While the tool runs, a spinner takes the symbol's place.
+/// cell's does. While the tool runs its symbol is faint and its status says so: "Working…"
+/// under the conversation already spins, and one spinner on screen is enough.
 final class ToolCallHeader: UIControl {
     private let symbol = UIImageView()
-    private let spinner = UIActivityIndicatorView(style: .medium)
     private let symbolColumn = UIView()
+    private var symbolWidth: NSLayoutConstraint?
     private let titleLabel = UILabel()
     private let statusLabel = UILabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
@@ -431,19 +432,14 @@ final class ToolCallHeader: UIControl {
         super.init(frame: frame)
         symbol.tintColor = .secondaryLabel
         symbol.contentMode = .center
-        spinner.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
-        spinner.color = .secondaryLabel
-        spinner.hidesWhenStopped = true
-        for view in [symbol, spinner] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            symbolColumn.addSubview(view)
-            NSLayoutConstraint.activate([
-                view.centerXAnchor.constraint(equalTo: symbolColumn.centerXAnchor),
-                view.centerYAnchor.constraint(equalTo: symbolColumn.centerYAnchor),
-            ])
-        }
+        symbol.translatesAutoresizingMaskIntoConstraints = false
+        symbolColumn.addSubview(symbol)
+        let width = symbolColumn.widthAnchor.constraint(equalToConstant: 22)
+        symbolWidth = width
         NSLayoutConstraint.activate([
-            symbolColumn.widthAnchor.constraint(equalToConstant: 22),
+            symbol.centerXAnchor.constraint(equalTo: symbolColumn.centerXAnchor),
+            symbol.centerYAnchor.constraint(equalTo: symbolColumn.centerYAnchor),
+            width,
             symbolColumn.heightAnchor.constraint(greaterThanOrEqualTo: symbol.heightAnchor),
         ])
         symbolColumn.setContentHuggingPriority(.required, for: .horizontal)
@@ -476,6 +472,7 @@ final class ToolCallHeader: UIControl {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     private var stacked: Bool?
+    private weak var secondRow: UIStackView?
 
     /// One row, or at accessibility sizes the symbol and title, which wraps, over the status
     /// with the chevron at the end, so the row reads in the order it is spoken.
@@ -490,7 +487,9 @@ final class ToolCallHeader: UIControl {
             secondRow.spacing = 8
             secondRow.alignment = .center
             secondRow.isLayoutMarginsRelativeArrangement = true
-            secondRow.directionalLayoutMargins = .init(top: 0, leading: 30, bottom: 0, trailing: 0)
+            secondRow.directionalLayoutMargins = .init(top: 0, leading: (symbolWidth?.constant ?? 22) + 8,
+                                                       bottom: 0, trailing: 0)
+            self.secondRow = secondRow
             stack.axis = .vertical
             stack.alignment = .fill
             stack.spacing = 4
@@ -511,29 +510,28 @@ final class ToolCallHeader: UIControl {
         let font = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
         symbol.image = UIImage(systemName: tool.symbolName)
         symbol.preferredSymbolConfiguration = .init(font: font)
+        // The column grows with the symbol, so a large one never runs into the title.
+        let column = UIFontMetrics(forTextStyle: .subheadline).scaledValue(for: 22, compatibleWith: traits).rounded()
+        symbolWidth?.constant = column
+        secondRow?.directionalLayoutMargins.leading = column + 8
         // A command is set in monospace, as the Mac sets it, without the backticks around it.
         titleLabel.font = tool.isCommand
             ? UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .monospacedSystemFont(ofSize: 14, weight: .regular),
                                                                     compatibleWith: traits)
             : font
-        // Never hyphenated: a file name or a command broken at a hyphen reads as two words. A
-        // wrapped command or path breaks at any character instead.
+        // Never hyphenated: a file name or a command broken at a hyphen reads as two words.
+        // Wrapped, a path or command breaks between words or where a path or option would
+        // have one, never mid-name. VoiceOver reads the title as it is.
         let paragraph = NSMutableParagraphStyle()
         paragraph.hyphenationFactor = 0
         paragraph.usesDefaultHyphenation = false
-        let breaksAnywhere = stacked == true && (tool.isCommand || tool.displayTitle.contains("/"))
-        paragraph.lineBreakMode = stacked == true ? (breaksAnywhere ? .byCharWrapping : .byWordWrapping) : .byTruncatingMiddle
-        titleLabel.attributedText = NSAttributedString(string: tool.displayTitle, attributes: [
+        paragraph.lineBreakMode = stacked == true ? .byWordWrapping : .byTruncatingMiddle
+        let shown = stacked == true ? Self.breakable(tool.displayTitle, command: tool.isCommand) : tool.displayTitle
+        titleLabel.attributedText = NSAttributedString(string: shown, attributes: [
             .font: titleLabel.font as Any, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph,
         ])
         titleLabel.lineBreakMode = paragraph.lineBreakMode
-        if tool.state == .running {
-            spinner.startAnimating()
-            symbol.isHidden = true
-        } else {
-            spinner.stopAnimating()
-            symbol.isHidden = false
-        }
+        symbol.alpha = tool.state == .running ? 0.5 : 1
         statusLabel.font = UIFont.preferredFont(forTextStyle: .footnote, compatibleWith: traits)
         statusLabel.text = tool.statusText
         statusLabel.textColor = tool.statusColor
@@ -565,6 +563,37 @@ final class ToolCallHeader: UIControl {
 
     override var isHighlighted: Bool {
         didSet { alpha = isHighlighted ? 0.5 : 1 }
+    }
+
+    /// `text` with a zero-width space where a line may break inside a word: after a slash, an
+    /// underscore or a dot, before a run of hyphens, and in a command after an equals sign. A
+    /// name still too long for a line may break where a lower-case letter meets a capital. No
+    /// line breaks after a hyphen, which would leave `--` at the end of one line.
+    static func breakable(_ text: String, command: Bool) -> String {
+        let zeroWidthSpace: Character = "\u{200B}"
+        var result = ""
+        for word in text.split(separator: " ", omittingEmptySubsequences: false) {
+            if !result.isEmpty { result.append(" ") }
+            var previous: Character?
+            var run = 0
+            for character in word {
+                if character == "-", let previous, previous != "-" { result.append(zeroWidthSpace) }
+                if character.isUppercase, previous?.isLowercase == true, run >= 8 {
+                    result.append(zeroWidthSpace)
+                    run = 0
+                }
+                result.append(character)
+                run += 1
+                if character == "-" {
+                    result.append("\u{2060}")
+                } else if character == "/" || character == "_" || character == "." || (command && character == "=") {
+                    result.append(zeroWidthSpace)
+                    run = 0
+                }
+                previous = character
+            }
+        }
+        return result
     }
 }
 

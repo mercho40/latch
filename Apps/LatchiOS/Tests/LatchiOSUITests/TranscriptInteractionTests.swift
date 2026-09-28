@@ -234,6 +234,20 @@ final class TranscriptInteractionTests: XCTestCase {
         XCTAssertTrue(named.contentView.allSubviews.contains { $0 is AttachmentChip }, "Gone: listed by name again")
     }
 
+    // MARK: Tool calls
+
+    /// A wrapped tool title breaks where a path or an option would, never mid-name.
+    func testAToolTitleBreaksBetweenPartsOfAPath() {
+        let zw = "\u{200B}", joiner = "\u{2060}"
+        XCTAssertEqual(ToolCallHeader.breakable("Read Tests/Remote.swift", command: false), "Read Tests/\(zw)Remote.\(zw)swift")
+        XCTAssertEqual(ToolCallHeader.breakable("swift test --filter a_b", command: true),
+                       "swift test -\(joiner)-\(joiner)filter a_\(zw)b")
+        XCTAssertEqual(ToolCallHeader.breakable("x --a=b re-run", command: true),
+                       "x -\(joiner)-\(joiner)a=\(zw)b re\(zw)-\(joiner)run")
+        XCTAssertEqual(ToolCallHeader.breakable("RemoteSessionLiveTests", command: true),
+                       "RemoteSession\(zw)LiveTests", "A long name gives way between words, not every one")
+    }
+
     // MARK: Code and tables
 
     /// A code line or a table wider than the reply fades at the edge it continues past.

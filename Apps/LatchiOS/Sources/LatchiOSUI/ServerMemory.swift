@@ -64,9 +64,11 @@ final class ServerMemory {
     }
 
     /// The reverse, for a folder typed as `~/rest`: the absolute path when the home is known.
-    /// Unknown, the tilde stays, and the server resolves it when the agent launches.
+    /// Unknown, the tilde stays for the server to resolve when the agent launches; it takes
+    /// only `~/…`, so the home itself goes as `~/`.
     nonisolated static func expandedPath(_ path: String, home: String?) -> String {
-        guard let home, home.hasPrefix("/"), path == "~" || path.hasPrefix("~/") else { return path }
+        guard let home, home.hasPrefix("/") else { return path == "~" ? "~/" : path }
+        guard path == "~" || path.hasPrefix("~/") else { return path }
         let base = home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home
         return base + path.dropFirst()
     }

@@ -209,7 +209,9 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     var placeholder: String {
         get { placeholderLabel.text ?? "" }
         set {
+            guard newValue != placeholderLabel.text else { return }
             placeholderLabel.text = newValue
+            textChanged(notify: false)
             textView.accessibilityLabel = newValue.isEmpty ? "Message" : newValue
         }
     }
@@ -300,7 +302,10 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         let width = textView.bounds.width > 0 ? textView.bounds.width : 200
         let natural = ceil(textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height)
         let maximum = ceil(font.lineHeight * CGFloat(maximumLines) + inset * 2)
-        let height = max(44, min(natural, maximum))
+        // An empty field is as tall as its placeholder, which wraps at large text sizes.
+        let placeholderHeight = placeholderLabel.isHidden ? 0
+            : ceil(placeholderLabel.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height) + inset * 2
+        let height = max(44, min(max(natural, placeholderHeight), maximum))
         textView.isScrollEnabled = natural > maximum
         if abs(textHeight.constant - height) > 0.5 {
             textHeight.constant = height

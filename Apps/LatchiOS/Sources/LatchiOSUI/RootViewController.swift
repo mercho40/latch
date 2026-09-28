@@ -452,7 +452,14 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
             }
             return (bar.maxY + 8, column)
         }
-        return (view.safeAreaInsets.top + 52, view.bounds)
+        // Under the bar's row of buttons, over the large title if one shows. With the title
+        // inline, as in landscape, the bar is only its row, however tall that is.
+        let row: CGFloat = 44
+        if let navigation = viewController(for: .primary)?.navigationController, navigation.view.window != nil {
+            let bar = navigation.navigationBar.convert(navigation.navigationBar.bounds, to: view)
+            return (min(bar.maxY, bar.minY + row) + 8, view.bounds)
+        }
+        return (view.safeAreaInsets.top + row + 8, view.bounds)
     }
 
     // MARK: Keyboard

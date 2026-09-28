@@ -382,13 +382,14 @@ final class SessionsViewController: UICollectionViewController {
         paragraph.paragraphSpacing = 6
         let plain: [NSAttributedString.Key: Any] = [.font: body, .foregroundColor: UIColor.secondaryLabel,
                                                      .paragraphStyle: paragraph]
-        // One break, after "pair", so the options stay together on the second line.
+        // Small enough for one line on a phone; where it still wraps, the break comes after
+        // "pair", so the options stay together on the second line.
         let command = "latch-server\u{00A0}pair --host\u{00A0}<name>\u{00A0}--qr".replacingOccurrences(of: "-", with: "-\u{2060}")
         let text = NSMutableAttributedString(string: "On the machine your agents run on, run:\n", attributes: plain)
         text.append(NSAttributedString(string: command + "\n", attributes: [
-            .font: ChromeFont.monospaced(.callout), .foregroundColor: UIColor.label, .paragraphStyle: paragraph,
+            .font: ChromeFont.monospaced(.footnote), .foregroundColor: UIColor.label, .paragraphStyle: paragraph,
             .accessibilitySpeechPunctuation: true]))
-        text.append(NSAttributedString(string: "Scan the code it shows with the Camera app, or copy the link it prints and paste it in Add Server.",
+        text.append(NSAttributedString(string: "Scan the code it shows with the Camera, or paste the link it prints in Add Server.",
                                        attributes: plain))
         return text
     }
@@ -526,6 +527,9 @@ final class SessionsViewController: UICollectionViewController {
         content.secondaryTextProperties.font = .preferredFont(forTextStyle: .subheadline)
         content.secondaryTextProperties.color = .secondaryLabel
         content.textToSecondaryTextVerticalPadding = 2
+        // A session's row height, so the sidebar's rows keep one pitch.
+        content.directionalLayoutMargins.top = 10
+        content.directionalLayoutMargins.bottom = 10
         cell.contentConfiguration = content
         var accessories: [UICellAccessory] = []
         let state: SessionRowStatus? = if runtime.pendingPermissionCount > 0 {
@@ -562,10 +566,12 @@ final class SessionsViewController: UICollectionViewController {
             case let listing? where listing.answered: .connected
             default: .unknown
             }
-            content.image = state.image
+            let metrics = UIFontMetrics(forTextStyle: .headline)
+            content.image = state.image(compatibleWith: traitCollection)
             content.imageProperties.tintColor = state.color
-            content.imageProperties.reservedLayoutSize = CGSize(width: 12, height: 12)
-            content.imageToTextPadding = 6
+            let slot = metrics.scaledValue(for: 12, compatibleWith: traitCollection)
+            content.imageProperties.reservedLayoutSize = CGSize(width: slot, height: slot)
+            content.imageToTextPadding = metrics.scaledValue(for: 6, compatibleWith: traitCollection)
             header.contentConfiguration = content
             header.accessibilityLabel = serverName(id)
             header.accessibilityValue = state.spoken
@@ -835,9 +841,9 @@ final class SessionsViewController: UICollectionViewController {
     }
 }
 
-/// Whether a server answered, the same everywhere it is shown: an 8 point dot in its colour,
-/// or with Differentiate Without Color a symbol whose shape says it too. Words go with it for
-/// VoiceOver, and in Servers on the screen.
+/// Whether a server answered, the same everywhere it is shown: a dot in its colour, 8 points
+/// at the default text size and growing with it, or with Differentiate Without Color a symbol
+/// whose shape says it too. Words go with it for VoiceOver, and in Servers on the screen.
 enum ServerState: Equatable {
     case unknown, checking, connected, failed
 
@@ -861,9 +867,10 @@ enum ServerState: Equatable {
     var spoken: String? { words.isEmpty ? nil : words.replacingOccurrences(of: "…", with: "") }
 
     @MainActor
-    var image: UIImage? {
+    func image(compatibleWith traits: UITraitCollection) -> UIImage? {
         guard UIAccessibility.shouldDifferentiateWithoutColor else {
-            return UIImage(systemName: "circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 8))
+            let size = UIFontMetrics(forTextStyle: .headline).scaledValue(for: 8, compatibleWith: traits)
+            return UIImage(systemName: "circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: size))
         }
         let symbol = switch self {
         case .unknown, .checking: "circle.dotted"

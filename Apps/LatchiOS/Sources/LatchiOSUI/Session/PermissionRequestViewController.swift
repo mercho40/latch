@@ -32,6 +32,10 @@ final class PermissionRequestViewController: UIViewController {
     private let content = UIStackView()
     private let optionStack = UIStackView()
     private let pinned = UIStackView()
+    /// The scrolling area ends above the pinned options, or with them inside it, at the sheet's edge.
+    private var scrollAbovePinned: NSLayoutConstraint?
+    private var scrollToEdge: NSLayoutConstraint?
+    private var contentBottom: NSLayoutConstraint?
     /// Whether the options are pinned below the scrolling request, or follow it inside.
     private(set) var optionsArePinned = true
     /// Called when the sheet goes without a decision or a closed request taking it down.
@@ -115,6 +119,9 @@ final class PermissionRequestViewController: UIViewController {
         icon.preferredSymbolConfiguration = .init(textStyle: .title2)
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.isAccessibilityElement = false
+        // At accessibility sizes the heading grows less than the request, so the options come
+        // into view sooner.
+        icon.maximumContentSizeCategory = .accessibilityMedium
 
         let caption = UILabel()
         caption.text = "\(agentTitle) requests permission"
@@ -122,6 +129,7 @@ final class PermissionRequestViewController: UIViewController {
         caption.adjustsFontForContentSizeCategory = true
         caption.textColor = .secondaryLabel
         caption.numberOfLines = 0
+        caption.maximumContentSizeCategory = .accessibilityMedium
         // The title says it for VoiceOver, where focus lands.
         caption.isAccessibilityElement = false
 
@@ -226,13 +234,18 @@ final class PermissionRequestViewController: UIViewController {
         view.addSubview(scrollView)
         view.addSubview(pinned)
         let guide = view.readableContentGuide
+        let abovePinned = scrollView.bottomAnchor.constraint(equalTo: pinned.topAnchor, constant: -12)
+        let bottom = content.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -4)
+        scrollAbovePinned = abovePinned
+        scrollToEdge = scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        contentBottom = bottom
         var constraints = [
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: pinned.topAnchor, constant: -12),
+            abovePinned,
             content.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: Self.topInset),
-            content.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -4),
+            bottom,
             pinned.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ]
         // The readable width, and never closer than 20 points to the sheet's edge.
@@ -286,6 +299,11 @@ final class PermissionRequestViewController: UIViewController {
         optionsArePinned = pin
         optionStack.removeFromSuperview()
         cancelButton.removeFromSuperview()
+        // Unpinned, the empty footer goes and the scrolling area runs to the sheet's edge.
+        pinned.isHidden = !pin
+        scrollAbovePinned?.isActive = pin
+        scrollToEdge?.isActive = !pin
+        contentBottom?.constant = pin ? -4 : -Self.bottomInset
         if pin {
             pinned.addArrangedSubview(optionStack)
             pinned.addArrangedSubview(cancelButton)
@@ -297,11 +315,16 @@ final class PermissionRequestViewController: UIViewController {
             content.setCustomSpacing(10, after: optionStack)
         }
         view.setNeedsLayout()
+        // Said once it is there: the options are further down.
+        if !pin, view.window != nil { scrollView.flashScrollIndicators() }
     }
+
+    private static let bottomInset: CGFloat = 16
 
     /// The height that shows everything without scrolling, above the bottom safe area.
     var fittingHeight: CGFloat {
         loadViewIfNeeded()
+        guard optionsArePinned else { return ceil(Self.topInset + height(of: content) + Self.bottomInset) }
         return ceil(Self.topInset + height(of: content) + 4 + 12 + height(of: pinned) + 12)
     }
 

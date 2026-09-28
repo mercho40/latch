@@ -58,7 +58,8 @@ final class SentImageCache {
         }
     }
 
-    /// JPEG at quality 0.7, scaled down to `maximumPixelSize` on its longest side.
+    /// JPEG at quality 0.7, scaled down to `maximumPixelSize` on its longest side. Transparent
+    /// parts are white, as a photo app shows them, rather than the black an opaque JPEG leaves.
     private static func jpeg(_ image: UIImage) -> Data? {
         let pixels = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
         let scale = min(1, maximumPixelSize / max(pixels.width, pixels.height, 1))
@@ -66,7 +67,9 @@ final class SentImageCache {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
-        let scaled = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+        let scaled = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
             image.draw(in: CGRect(origin: .zero, size: size))
         }
         return scaled.jpegData(compressionQuality: 0.7)

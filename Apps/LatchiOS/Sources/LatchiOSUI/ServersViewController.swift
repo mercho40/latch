@@ -1,3 +1,4 @@
+import LatchRemoteClient
 import LatchRemoteProtocol
 import LatchSessionKit
 import UIKit
@@ -15,7 +16,8 @@ final class ServersViewController: UICollectionViewController {
     enum Check: Equatable {
         case checking
         case reachable(String)
-        case failed(String)
+        /// The reason in full, for VoiceOver and Edit Server, and in a few words for the row.
+        case failed(String, brief: String)
     }
 
     private let store: any PhoneServerStore
@@ -81,9 +83,10 @@ final class ServersViewController: UICollectionViewController {
             let large = self.traitCollection.preferredContentSizeCategory.isAccessibilityCategory
             let check = self.checks[id]
             let state = ServerCheckView.state(check)
-            content.image = state.image
+            content.image = state.image(compatibleWith: self.traitCollection)
             content.imageProperties.tintColor = state.color
-            content.imageProperties.reservedLayoutSize = CGSize(width: 12, height: 12)
+            let slot = UIFontMetrics(forTextStyle: .headline).scaledValue(for: 12, compatibleWith: self.traitCollection)
+            content.imageProperties.reservedLayoutSize = CGSize(width: slot, height: slot)
             content.secondaryAttributedText = ServerCheckView.detail(address: server.address, check, large: large)
             content.secondaryTextProperties.numberOfLines = large ? 0 : 3
             content.secondaryTextProperties.lineBreakMode = large ? .byCharWrapping : .byTruncatingTail
@@ -165,7 +168,7 @@ final class ServersViewController: UICollectionViewController {
             checkTasks[server.id] = Task { [weak self] in
                 let result: Check
                 do { result = .reachable(ServerCheckText.summary(try await check(options))) }
-                catch { result = .failed(ServerCheckText.failure(error)) }
+                catch { result = .failed(ServerCheckText.failure(error), brief: ServerCheckView.brief(error)) }
                 guard let self, !Task.isCancelled, self.checked[server.id] == server else { return }
                 self.checks[server.id] = result
                 self.checkTasks[server.id] = nil
@@ -288,29 +291,44 @@ enum ServerCheckView {
         switch check {
         case .checking?: "Checking"
         case let .reachable(summary)?: "Connected, \(summary)"
-        case let .failed(reason)?: "Can’t connect. \(reason)"
+        case let .failed(reason, _)?: "Can’t connect. \(reason)"
         case nil: nil
         }
     }
 
+    /// What went wrong in a few words, naming the setting when one would fix it. The whole
+    /// sentence is for VoiceOver and Edit Server's Test Connection.
+    static func brief(_ error: any Error) -> String {
+        switch error as? LatchRemoteClientError {
+        case .destinationNotAllowed?: "Needs “Allow unencrypted network”"
+        case .unauthorized?: "Token not accepted"
+        case .protocolMismatch?: "Different Latch version"
+        case .handshakeTimedOut?, .timedOut?, .silence?: "Didn’t answer"
+        case .connectionFailed?, .connectionLost?, .closed?: "Not reachable"
+        case .invalidEndpoint?: "Port not valid"
+        default: ServerCheckText.failure(error)
+        }
+    }
+
     /// The address, then after a failure what happened, under it: "Can’t connect" in red and
-    /// the reason after it. At accessibility sizes, where the dot is small, every state says so.
+    /// a few words on why. While a check runs, "Checking…" follows the address on its line,
+    /// so the row keeps its height as the check finishes. At accessibility sizes, where the
+    /// dot is small, every state says so on a line of its own.
     static func detail(address: String, _ check: ServersViewController.Check?, large: Bool) -> NSAttributedString {
         let font = ChromeFont.monospaced(.subheadline)
         let text = NSMutableAttributedString(string: address, attributes: [.font: font, .foregroundColor: UIColor.secondaryLabel])
         let body = UIFont.preferredFont(forTextStyle: .subheadline)
         let secondary: [NSAttributedString.Key: Any] = [.font: body, .foregroundColor: UIColor.secondaryLabel]
         switch check {
-        case let .failed(reason)?:
+        case let .failed(_, brief)?:
             text.append(NSAttributedString(string: "\n"))
             text.append(NSAttributedString(string: "Can’t connect", attributes: [.font: body, .foregroundColor: UIColor.systemRed]))
-            text.append(NSAttributedString(string: " · \(reason)", attributes: secondary))
-        // Elsewhere the dot says it, and the row keeps its height as the check finishes.
-        case .checking? where large:
-            text.append(NSAttributedString(string: "\nChecking…", attributes: secondary))
+            text.append(NSAttributedString(string: " · \(brief)", attributes: secondary))
+        case .checking?:
+            text.append(NSAttributedString(string: large ? "\nChecking…" : " · Checking…", attributes: secondary))
         case .reachable? where large:
             text.append(NSAttributedString(string: "\nConnected", attributes: secondary))
-        case .checking?, .reachable?, nil:
+        case .reachable?, nil:
             break
         }
         return text

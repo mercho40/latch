@@ -71,7 +71,7 @@ final class ServerEditorTests: XCTestCase {
         XCTAssertEqual(linked.nameField.text, "vps")
         let footer = linked.tableView(linked.tableView, viewForFooterInSection: 0) as? UITableViewHeaderFooterView
         XCTAssertEqual((footer?.contentConfiguration as? UIListContentConfiguration)?.text,
-                       "Found vps · Ubuntu 24.04 · Latch 0.1.0. Tap Add to use it.")
+                       "Tap Add to use this server.")
         linked.viewDidAppear(false)
         XCTAssertFalse(linked.isTesting, "Once")
     }
@@ -274,7 +274,19 @@ final class ServerEditorTests: XCTestCase {
         list.endAppearanceTransition()
         await list.checksFinished()
         XCTAssertEqual(list.checks[store.servers[0].id], .reachable("vps · Ubuntu 24.04 · Latch 0.1.0"))
-        guard case .failed? = list.checks[store.servers[1].id] else { return XCTFail("mini should have failed") }
+        guard case let .failed(_, brief)? = list.checks[store.servers[1].id] else { return XCTFail("mini should have failed") }
+        XCTAssertEqual(brief, "Didn’t answer")
+    }
+
+    /// The row says why in a few words, and names the setting when one would fix it.
+    func testAFailedCheckIsBriefInTheList() {
+        XCTAssertEqual(ServerCheckView.brief(LatchRemoteClientError.destinationNotAllowed(address: "192.168.1.20")),
+                       "Needs “Allow unencrypted network”")
+        let detail = ServerCheckView.detail(address: "vps:7800", .failed("The whole sentence.", brief: "Didn’t answer"), large: false)
+        XCTAssertEqual(detail.string, "vps:7800\nCan’t connect · Didn’t answer")
+        XCTAssertEqual(ServerCheckView.detail(address: "vps:7800", .checking, large: false).string, "vps:7800 · Checking…")
+        XCTAssertEqual(ServerCheckView.spoken(.failed("The whole sentence.", brief: "Didn’t answer")),
+                       "Can’t connect. The whole sentence.")
     }
 
     func testRemovingAServerSaysItsSessionsWillNotReconnect() {

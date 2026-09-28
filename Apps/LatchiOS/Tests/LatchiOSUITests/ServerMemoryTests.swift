@@ -24,6 +24,7 @@ final class ServerMemoryTests: XCTestCase {
         XCTAssertEqual(ServerMemory.expandedPath("~", home: "/home/simon"), "/home/simon")
         XCTAssertEqual(ServerMemory.expandedPath("~/latch", home: "/home/simon"), "/home/simon/latch")
         XCTAssertEqual(ServerMemory.expandedPath("~/latch", home: nil), "~/latch", "The server resolves it")
+        XCTAssertEqual(ServerMemory.expandedPath("~", home: nil), "~/", "The server takes only ~/…")
         XCTAssertEqual(ServerMemory.expandedPath("~other/x", home: "/home/simon"), "~other/x")
         XCTAssertEqual(ServerMemory.expandedPath("/srv", home: "/home/simon"), "/srv")
     }

@@ -313,7 +313,14 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             navigationItem.subtitle = subtitle
         } else {
             let spoken = [context.serverName, context.folderPath].filter { !$0.isEmpty }.joined(separator: ", ")
-            navigationItem.titleView = SessionTitleView(title: context.title, subtitle: subtitle, spoken: spoken)
+            // The system draws its title menu only for its own title, so this one carries it,
+            // with Rename… in place of renaming in the bar.
+            let rename = UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.beginRenaming() }
+            let menu = UIDeferredMenuElement.uncached { [weak self] completion in
+                completion(self?.titleMenu(self?.context.onRename == nil ? [] : [rename])?.children ?? [])
+            }
+            navigationItem.titleView = SessionTitleView(title: context.title, subtitle: subtitle, spoken: spoken,
+                                                        menu: UIMenu(children: [menu]))
         }
     }
 
@@ -419,9 +426,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     private func refreshComposer() {
         composer.isEditable = !isReadOnly
-        // The title already names the agent: at accessibility sizes the placeholder says less.
-        let large = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-        composer.placeholder = isReadOnly ? "This conversation is read-only" : large ? "Message" : "Ask \(context.agentTitle)…"
+        // Nothing else on the screen names the agent, so the placeholder does at every size.
+        composer.placeholder = isReadOnly ? "This conversation is read-only" : "Ask \(context.agentTitle)…"
         composer.canAttach = !isReadOnly && attachments.count < ComposerImage.maximumCount
         if model.phase == .prompting {
             composer.setAction(.stop(enabled: canStop))
@@ -1047,9 +1053,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 }
 
 /// The title and `server · folder` on two lines, for systems without a navigation subtitle.
-/// VoiceOver hears the whole path.
-private final class SessionTitleView: UIView {
-    init(title: String, subtitle: String, spoken: String) {
+/// Tapping it opens the title menu, as the system's title does. VoiceOver hears the whole path.
+private final class SessionTitleView: UIButton {
+    init(title: String, subtitle: String, spoken: String, menu: UIMenu) {
         super.init(frame: .zero)
         let titleLabel = UILabel()
         titleLabel.text = title
@@ -1063,11 +1069,23 @@ private final class SessionTitleView: UIView {
         subtitleLabel.textColor = .secondaryLabel
         subtitleLabel.lineBreakMode = .byTruncatingMiddle
         subtitleLabel.isHidden = subtitle.isEmpty
-        let stack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
+        let chevron = UIImageView(image: UIImage(systemName: "chevron.down.circle.fill"))
+        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .footnote)
+        chevron.tintColor = .tertiaryLabel
+        chevron.setContentHuggingPriority(.required, for: .horizontal)
+        chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let titleRow = UIStackView(arrangedSubviews: [titleLabel, chevron])
+        titleRow.spacing = 4
+        titleRow.alignment = .center
+        let stack = UIStackView(arrangedSubviews: [titleRow, subtitleLabel])
         stack.axis = .vertical
         stack.alignment = .center
+        stack.isUserInteractionEnabled = false
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        self.menu = menu
+        showsMenuAsPrimaryAction = true
+        isPointerInteractionEnabled = true
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -1077,7 +1095,7 @@ private final class SessionTitleView: UIView {
         isAccessibilityElement = true
         accessibilityLabel = title
         accessibilityValue = spoken
-        accessibilityTraits = .header
+        accessibilityTraits = [.header, .button]
     }
 
     @available(*, unavailable)

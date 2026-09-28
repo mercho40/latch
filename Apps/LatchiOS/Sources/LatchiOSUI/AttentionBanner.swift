@@ -132,10 +132,23 @@ final class AttentionBannerView: UIControl {
         let background: UIVisualEffectView
         if #available(iOS 26.0, *) {
             // Tinted with the page's colour, so a large title under it does not read through.
+            // Dark glass lets white text through its tint, so there it lies on a fill a shade
+            // above black, which the glass then lights as it would the page.
             let glass = UIGlassEffect()
             glass.tintColor = UIColor.systemBackground.withAlphaComponent(0.6)
             background = UIVisualEffectView(effect: glass)
             background.cornerConfiguration = .corners(radius: .fixed(Self.radius))
+            let fill = UIView()
+            fill.backgroundColor = UIColor { traits in
+                traits.userInterfaceStyle == .dark
+                    ? UIColor.secondarySystemBackground.resolvedColor(with: traits).withAlphaComponent(0.9) : .clear
+            }
+            fill.layer.cornerRadius = Self.radius
+            fill.layer.cornerCurve = .continuous
+            fill.isUserInteractionEnabled = false
+            fill.frame = bounds
+            fill.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            addSubview(fill)
         } else {
             background = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
             background.layer.cornerRadius = Self.radius

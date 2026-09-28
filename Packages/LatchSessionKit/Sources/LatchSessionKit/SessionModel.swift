@@ -131,6 +131,11 @@ public final class SessionModel {
     /// Turns whose prompts the transcript already shows, so their `turnStarted` is not shown
     /// again: sent from here, or the turn a saved binding was running.
     private var knownTurns: [UUID] = []
+    /// Another client's turn that started while this session was sending its own, and has not
+    /// ended. The server runs one turn at a time, so it refuses this session's prompt as busy,
+    /// or runs it first; either way, once this session's turn is over it follows that one,
+    /// from the boundary at its prompt, rather than offer a prompt the server would refuse.
+    private var foreignTurn: (turn: UUID, boundary: SavedSession.RemoteBinding)?
     /// An attach found the runtime exited. Its exit is shown once its last output is in;
     /// `stoppedOn` names the server when the agent was stopped there rather than exiting.
     private var pendingExit: (through: UInt64, status: Int32, stoppedOn: String?)?
@@ -503,6 +508,7 @@ public final class SessionModel {
         interruptedPrompt = nil
         runtimeIsRemote = true
         backlogThrough = record.lastSequence
+        foreignTurn = nil
         runtimeID = id
         if let bound = record.sessionID { savedAgentSessionID = bound }
         sessionID = record.sessionID ?? savedAgentSessionID
@@ -692,6 +698,7 @@ public final class SessionModel {
         turnBoundary = nil
         pendingExit = nil
         unsentTurn = nil
+        foreignTurn = nil
     }
 
     private func resumeAttachWaiter() {
@@ -971,6 +978,10 @@ public final class SessionModel {
         lastActiveAt = now()
         cancellationRequested = false
         permissions.cancelAll()
+        if let foreign = foreignTurn, runtimeIsRemote, let runtimeID {
+            foreignTurn = nil
+            followTurn(foreign.turn, runtimeID: runtimeID, boundary: foreign.boundary)
+        }
         onChange?()
     }
 
@@ -1203,18 +1214,26 @@ public final class SessionModel {
             if turn == turnID, phase == .prompting, let runtimeID {
                 turnBoundary = SavedSession.RemoteBinding(runtimeID: runtimeID.rawValue, cursor: appliedSequence,
                                                           boundaryMessageID: history.messages.last?.id, boundaryTurnID: turn)
-            } else if phase == .ready, runtimeIsRemote, sequence > backlogThrough, let runtimeID {
+            } else if runtimeIsRemote, sequence > backlogThrough, let runtimeID {
                 // Another client prompted the runtime this session follows. The server runs
                 // one turn at a time, so this session follows that one to its end, as an
                 // attach follows the turn its record shows running, rather than offer a
-                // prompt the server would refuse.
-                followTurn(turn, runtimeID: runtimeID, boundary: SavedSession.RemoteBinding(
+                // prompt the server would refuse. While its own prompt is in flight, it
+                // follows once that prompt is answered; see `foreignTurn`.
+                let boundary = SavedSession.RemoteBinding(
                     runtimeID: runtimeID.rawValue, cursor: appliedSequence,
-                    boundaryMessageID: history.messages.last?.id, boundaryTurnID: turn))
-                onChange?()
+                    boundaryMessageID: history.messages.last?.id, boundaryTurnID: turn)
+                if phase == .ready {
+                    followTurn(turn, runtimeID: runtimeID, boundary: boundary)
+                    onChange?()
+                } else if phase == .prompting {
+                    foreignTurn = (turn, boundary)
+                }
             }
-        case let .turnEnded(id, _, sequence) where id == runtimeID,
-             let .skipped(id, sequence) where id == runtimeID:
+        case let .turnEnded(id, turn, sequence) where id == runtimeID:
+            appliedSequence = max(appliedSequence, sequence)
+            if foreignTurn?.turn == turn { foreignTurn = nil }
+        case let .skipped(id, sequence) where id == runtimeID:
             appliedSequence = max(appliedSequence, sequence)
         default:
             break

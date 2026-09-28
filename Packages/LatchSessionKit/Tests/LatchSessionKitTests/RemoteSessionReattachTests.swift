@@ -376,6 +376,49 @@ final class RemoteSessionReattachTests: XCTestCase {
         XCTAssertEqual(client.resolutions.count, 1)
         XCTAssertEqual(model.status, "Ready · end_turn")
     }
+
+    /// Another client's turn starts after this session sent its prompt but before the server
+    /// took it, so the server refuses it as busy after this session has seen the other turn
+    /// start. The session then follows that turn to its end rather than sit ready beside it.
+    func testAPromptRefusedForAnotherClientsTurnFollowsThatTurn() async throws {
+        let client = BusyRemoteClient()
+        let model = SessionModel(makeClient: { client })
+        await model.connect(remote: .custom("agent"), path: "/srv/app")
+        XCTAssertEqual(model.phase, .ready)
+        let sending = Task { await model.send("mine") }
+        try await eventually("the other turn seen while sending") { model.appliedSequence == 1 }
+        XCTAssertEqual(model.phase, .prompting)
+        client.refusePrompt()
+        await sending.value
+        XCTAssertEqual(model.phase, .prompting, "Following the other client's turn")
+        XCTAssertEqual(model.turnID, BusyRemoteClient.otherTurn)
+        XCTAssertEqual(model.status, "Working…")
+        XCTAssertEqual(model.errorMessage, "A turn is already running.")
+        XCTAssertEqual(model.messages.map(\.text), ["mine", "theirs"])
+        try await eventually("the other turn awaited") { client.awaited == [BusyRemoteClient.otherTurn] }
+
+        let ended = model.turnsEnded
+        client.endOtherTurn()
+        try await eventually("the other turn's end") { model.phase == .ready }
+        XCTAssertNil(model.turnID)
+        XCTAssertEqual(model.turnsEnded, ended + 1)
+        XCTAssertEqual(model.status, "Ready · end_turn")
+    }
+
+    /// The other turn ended before this session's refusal came back: nothing is left to follow.
+    func testAPromptRefusedForATurnThatHasEndedLeavesTheSessionReady() async throws {
+        let client = BusyRemoteClient(endsBeforeRefusal: true)
+        let model = SessionModel(makeClient: { client })
+        await model.connect(remote: .custom("agent"), path: "/srv/app")
+        let sending = Task { await model.send("mine") }
+        try await eventually("the other turn's start and end") { model.appliedSequence == 2 }
+        client.refusePrompt()
+        await sending.value
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertNil(model.turnID)
+        XCTAssertEqual(model.status, "Prompt failed")
+        XCTAssertEqual(client.awaited, [])
+    }
 }
 
 extension RemoteSessionReattachTests {
@@ -438,6 +481,103 @@ private final class ReplayingRemoteClient: AgentServiceClient {
         switch command {
         case let .stopRuntime(id): return .runtimeStopped(runtimeID: id)
         default: throw LatchAgentFailure(code: .commandFailed, message: "Unexpected command")
+        }
+    }
+
+    func close() {
+        continuation.finish()
+        lifetime.finish()
+    }
+
+    var transportDescription: String { "remote test double" }
+}
+
+/// A runtime another client prompts just after this session sends: the other turn starts,
+/// and the server refuses this session's prompt as busy when the test says so. The other turn
+/// ends when the test says so, or at once with `endsBeforeRefusal`.
+private final class BusyRemoteClient: AgentServiceClient {
+    static let otherTurn = UUID()
+    let events: AsyncStream<LatchAgentEvent>
+    let remoteEvents: AsyncStream<RemoteServiceEvent>?
+    var isRemote: Bool { true }
+    private let lifetime: AsyncStream<LatchAgentEvent>.Continuation
+    private let continuation: AsyncStream<RemoteServiceEvent>.Continuation
+    private let endsBeforeRefusal: Bool
+    private struct State {
+        var refusal: CheckedContinuation<Void, Never>?
+        var refused = false
+        var end: CheckedContinuation<Void, Never>?
+        var ended = false
+        var awaited: [UUID] = []
+    }
+    private let state = Mutex(State())
+
+    init(endsBeforeRefusal: Bool = false) {
+        self.endsBeforeRefusal = endsBeforeRefusal
+        (events, lifetime) = AsyncStream.makeStream()
+        let (stream, continuation) = AsyncStream<RemoteServiceEvent>.makeStream()
+        remoteEvents = stream
+        self.continuation = continuation
+    }
+
+    var awaited: [UUID] { state.withLock { $0.awaited } }
+
+    func refusePrompt() {
+        let waiter = state.withLock { state in
+            state.refused = true
+            defer { state.refusal = nil }
+            return state.refusal
+        }
+        waiter?.resume()
+    }
+
+    func endOtherTurn() {
+        let waiter = state.withLock { state in
+            state.ended = true
+            defer { state.end = nil }
+            return state.end
+        }
+        waiter?.resume()
+    }
+
+    func launch(_ launch: AgentLaunch, id: AgentRuntimeID) async throws -> LatchAgentResponse {
+        .runtimeStarted(runtimeID: id, initialization: ACPInitializeResponse(protocolVersion: 1, agentCapabilities: .init()))
+    }
+
+    func prompt(runtimeID id: AgentRuntimeID, turnID: UUID, blocks: [ACPPromptBlock]) async throws -> LatchAgentResponse {
+        continuation.yield(.turnStarted(runtimeID: id, turnID: Self.otherTurn, text: "theirs", attachments: [], sequence: 1))
+        if endsBeforeRefusal { continuation.yield(.turnEnded(runtimeID: id, turnID: Self.otherTurn, sequence: 2)) }
+        await withCheckedContinuation { waiter in
+            let refused = state.withLock { state in
+                if !state.refused { state.refusal = waiter }
+                return state.refused
+            }
+            if refused { waiter.resume() }
+        }
+        throw LatchAgentFailure(code: .commandFailed, message: "A turn is already running.")
+    }
+
+    func awaitTurn(runtimeID id: AgentRuntimeID, turnID: UUID) async throws -> LatchAgentResponse {
+        state.withLock { $0.awaited.append(turnID) }
+        await withCheckedContinuation { waiter in
+            let ended = state.withLock { state in
+                if !state.ended { state.end = waiter }
+                return state.ended
+            }
+            if ended { waiter.resume() }
+        }
+        continuation.yield(.turnEnded(runtimeID: id, turnID: turnID, sequence: 2))
+        return .promptCompleted(runtimeID: id, response: ACPPromptResponse(stopReason: "end_turn"))
+    }
+
+    func execute(_ command: LatchAgentCommand) async throws -> LatchAgentResponse {
+        switch command {
+        case let .newSession(id, _):
+            return .sessionCreated(runtimeID: id, session: ACPNewSessionResponse(sessionId: "remote-session"))
+        case let .stopRuntime(id):
+            return .runtimeStopped(runtimeID: id)
+        default:
+            throw LatchAgentFailure(code: .commandFailed, message: "Unexpected command")
         }
     }
 

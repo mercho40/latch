@@ -15,7 +15,8 @@ labels: bug
 
 **Environment**
 
-- Latch commit:
-- macOS version:
-- Xcode version:
+- Latch version, or commit if you built it:
+- macOS version, or iOS or iPadOS version and device:
+- Xcode version, if you built it:
+- For a remote session, `latch-server --version` and the server's system and architecture:
 - Agent and version (Codex, Claude Code, OpenCode, fx, or the custom command):

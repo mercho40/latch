@@ -1,0 +1,13 @@
+# Secret scan settings for the CI job, which passes this file with --config.
+# The default rules stay on; the exceptions are fake tokens that tests use as fixtures.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixture tokens in tests: 32 bytes 0 to 31, and base64 of \"foobarbazqux\" repeated"
+regexTarget = "secret"
+regexes = [
+  '''^latch_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8$''',
+  '''^latch_(Zm9vYmFyYmF6cXV4)+(Zm9vYmFyYmF6)?$''',
+]

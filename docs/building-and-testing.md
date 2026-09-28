@@ -159,14 +159,18 @@ builds static musl `latch-server` binaries in `.build/linux-server/latch-server-
 
 ### iOS build check
 
-The wire types and the client stay buildable for an iOS app:
+The wire types and the client stay buildable for an iOS app, and so does the app's code:
 
 ```sh
 swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteProtocol \
   --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
 swift build --package-path Packages/LatchServiceProtocol --target LatchRemoteClient \
   --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
+swift build --package-path Apps/LatchiOS \
+  --triple arm64-apple-ios18.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
 ```
+
+The last needs no Xcode 27: it builds the `LatchiOSUI` library, not the app and its icon.
 
 ### App tests against latch-server
 
@@ -181,7 +185,7 @@ After the XPC smoke, `Scripts/test-mac-app.sh` builds `latch-server` for this Ma
 - drops the link mid-turn, checks that the banner says it is reconnecting while the agent finishes the turn on the server, then reconnects and checks that the output from while the link was down is replayed and that the prompt ran once;
 - quits through the normal path, and checks that the quit saved the session's runtime, with the sequence it had reached, in a real session store on disk.
 
-The smoke waits 30 seconds between reconnects, so the link comes back only when it asks. After the app has exited, the script checks that the agent is still running and that the server has not logged it stopped, then sends the server SIGTERM and requires it to exit 0 within ten seconds, log the runtime as stopped, and take the agent with it. The smoke does not relaunch the app; re-attaching is covered by `RemoteSessionReattachTests`. CI does not run it, since it does not run `Scripts/test-mac-app.sh`.
+The smoke waits 30 seconds between reconnects, so the link comes back only when it asks. After the app has exited, the script checks that the agent is still running and that the server has not logged it stopped, then sends the server SIGTERM and requires it to exit 0 within ten seconds, log the runtime as stopped, and take the agent with it. The smoke does not relaunch the app; re-attaching is covered by `RemoteSessionReattachTests`. CI runs it in the Mac app bundle job.
 
 ### Testing against a Linux server locally
 
@@ -201,12 +205,16 @@ The remote smoke can run against such a server too, through a loopback forward, 
 
 ### CI
 
-Besides the macOS package tests, the app tests with the XPC probe, the site budget and the secret scan, CI runs:
+Besides the macOS package tests, the app tests with the XPC probe and the site budget, CI runs:
 
 - **Linux package tests:** the three package suites in `swift:6.4.0-noble` on x86_64 and arm64 runners.
-- **Static Linux build:** both musl binaries; the x86_64 one must print its version and pass `LatchServerExecutableTests`.
-- **iOS build check:** the two builds above.
-- **iOS app:** `Scripts/test-ios-app.sh`, described under [iOS app](#ios-app), on a runner with Xcode 27 or later selected. When the runner has no such Xcode, the job skips the script and leaves a notice, since `actool` before 27 cannot compile the icon; when it has no iOS Simulator runtime, the script builds and checks the app and says it ran nothing.
+- **Static Linux build:** both musl binaries on an x86_64 and an arm64 runner. Each must ask for 8 MiB thread stacks in `PT_GNU_STACK`, and on each runner the binary for its architecture must print its version and pass `LatchServerExecutableTests`.
+- **iOS build check:** the three builds above; the last compiles the app's code with `LatchSessionKit` and `LatchAgentCore`.
+- **Mac app bundle and smoke:** `Scripts/test-mac-app.sh`, on GitHub's `xcode-27` image, since `actool` before Xcode 27 cannot compile the icon and the `macos-26` image carries Xcode 26 only. Without focus, the smoke's permission check falls back to Escape and prints a note.
+- **iOS app:** `Scripts/test-ios-app.sh`, described under [iOS app](#ios-app), on the same `xcode-27` image; the job fails if the Xcode there is older than 27. When the runner has no iOS Simulator runtime, the script builds and checks the app and says it ran nothing.
+- **Secret scan:** gitleaks over the whole history, with `.github/gitleaks.toml`, which keeps the default rules and allows the fake tokens the tests use. Give a new fixture token the same form, or add it there.
+
+The `xcode-27` image is a preview on GitHub and may queue.
 
 The macOS package tests include `LatchSessionKit`.
 

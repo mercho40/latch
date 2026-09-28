@@ -39,8 +39,6 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     private var testTask: Task<Void, Never>?
     /// The name follows the host until the user types one of their own.
     private var nameEdited = false
-    /// A link's server is checked once, as the sheet appears.
-    private var checkedLink = false
     static let filledMessage = "Filled in from the pairing string."
 
     /// Adding, optionally filled in from a pairing link.
@@ -98,14 +96,6 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         // A name of the user's own stays when the host changes; one that was only ever the
         // host follows it, as while adding.
         nameEdited = stored.name != stored.host
-    }
-
-    /// A link fills in everything; what is left is to see that it reaches the server.
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        guard fromLink, !checkedLink else { return }
-        checkedLink = true
-        testConnection()
     }
 
     override func viewDidLoad() {
@@ -275,6 +265,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         refreshTestRow()
         let check = check
         let options = profile.connectionOptions
+        let fromLink = fromLink
         testTask = Task { [weak self] in
             let result: (String, Bool)
             var info: LatchRemoteServerInfo?
@@ -283,7 +274,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
                 info = answer
                 result = (ServerCheckText.summary(answer), true)
             } catch {
-                result = (ServerCheckText.failure(error), false)
+                result = (ServerCheckText.failure(error, offeringUnencryptedNetwork: !fromLink), false)
             }
             guard let self, !Task.isCancelled else { return }
             self.isTesting = false
@@ -303,13 +294,31 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     /// unless one was typed; from a link, the form says what to do next. The result row
     /// already says what was found.
     private func found(_ info: LatchRemoteServerInfo) {
-        if !nameEdited, !info.hostname.isEmpty {
-            nameField.text = info.hostname
+        if !nameEdited, let name = adoptableName(info.hostname) {
+            nameField.text = name
         }
         if fromLink, originalID == nil {
             note = "Tap Add to use this server."
             refresh()
         }
+    }
+
+    /// The host name a server reports, as a name for it: printable, at most 64 characters, and
+    /// not the name of another server here. The server says what it likes, so one reached from
+    /// a stranger's link must not pass for a server the user already has, or hide its text
+    /// behind bidirectional controls. Nil when nothing of it can be used.
+    func adoptableName(_ reported: String) -> String? {
+        let scalars = reported.unicodeScalars.filter { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator, .surrogate, .privateUse, .unassigned: false
+            default: true
+            }
+        }
+        let name = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 64 else { return nil }
+        let taken = store.servers.contains { $0.id != originalID && $0.name.caseInsensitiveCompare(name) == .orderedSame }
+            || store.missingTokens.contains { $0.id != originalID && $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        return taken ? nil : name
     }
 
     /// Waits for Test Connection to finish, for tests.

@@ -61,19 +61,57 @@ final class ServerEditorTests: XCTestCase {
         XCTAssertEqual(linked.hostField.text, "vps.example")
     }
 
-    /// A link's server is checked as the sheet appears, and goes by the name it gives itself.
-    func testALinkIsCheckedAtOnceAndNamedAfterTheServer() async throws {
-        let linked = editor(pairing: try LatchRemotePairing(host: "vps.tailnet.ts.net", token: token), check: { [info] _ in info })
+    /// Opening a link connects nowhere: anyone can make one, so the host it names is reached
+    /// only when the user taps Test Connection or Add. A server that answers goes by the name
+    /// it gives itself.
+    func testALinkIsCheckedOnlyWhenAskedAndNamedAfterTheServer() async throws {
+        let checks = CheckCount()
+        let linked = editor(pairing: try LatchRemotePairing(host: "vps.tailnet.ts.net", token: token), check: { [info] _ in
+            await checks.add()
+            return info
+        })
         XCTAssertEqual(linked.nameField.text, "vps.tailnet.ts.net")
         linked.viewDidAppear(false)
-        XCTAssertTrue(linked.isTesting)
+        XCTAssertFalse(linked.isTesting)
+        XCTAssertEqual(checks.value, 0)
+        linked.testConnection()
         await linked.testFinished()
+        XCTAssertEqual(checks.value, 1)
         XCTAssertEqual(linked.nameField.text, "vps")
         let footer = linked.tableView(linked.tableView, viewForFooterInSection: 0) as? UITableViewHeaderFooterView
         XCTAssertEqual((footer?.contentConfiguration as? UIListContentConfiguration)?.text,
                        "Tap Add to use this server.")
-        linked.viewDidAppear(false)
-        XCTAssertFalse(linked.isTesting, "Once")
+    }
+
+    /// A reported host name is taken only when it is printable, short and not another
+    /// server's name here, so a stranger's server cannot pass for one the user has.
+    func testAReportedNameIsTakenOnlyWhenItIsSafe() throws {
+        let store = InMemoryServerStore([ServerProfile(name: "vps", host: "vps.example", token: token)])
+        let linked = editor(store, pairing: try LatchRemotePairing(host: "203.0.113.9", token: .generate()))
+        XCTAssertEqual(linked.adoptableName("mini"), "mini")
+        XCTAssertNil(linked.adoptableName("vps"), "Already a server's name")
+        XCTAssertNil(linked.adoptableName("VPS"))
+        XCTAssertNil(linked.adoptableName("v\u{202E}ps"), "Bidirectional controls are dropped, leaving another server's name")
+        XCTAssertEqual(linked.adoptableName("mi\u{200B}ni\n"), "mini")
+        XCTAssertEqual(linked.adoptableName("  build\u{0007}box "), "buildbox")
+        XCTAssertNil(linked.adoptableName(String(repeating: "a", count: 65)))
+        XCTAssertNil(linked.adoptableName("\u{202E}\u{0000}"))
+
+        let original = try XCTUnwrap(store.servers.first)
+        let editing = editor(store, editing: original)
+        XCTAssertEqual(editing.adoptableName("vps"), "vps", "A server's own name")
+    }
+
+    /// From a link, a refused destination is not a reason to lift the check.
+    func testALinksRefusalDoesNotOfferTheUnencryptedNetwork() async throws {
+        let linked = editor(pairing: try LatchRemotePairing(host: "203.0.113.5", token: token), check: { _ in
+            throw LatchRemoteClientError.destinationNotAllowed(address: "203.0.113.5")
+        })
+        linked.testConnection()
+        await linked.testFinished()
+        XCTAssertEqual(linked.testResult?.succeeded, false)
+        XCTAssertEqual(linked.testResult?.text, "Latch did not send the token: 203.0.113.5 is neither this device nor on a "
+            + "Tailscale network. Check the host, and that Tailscale is connected.")
     }
 
     func testTheNameFollowsTheHostUntilTyped() {
@@ -303,4 +341,10 @@ private extension Result {
         guard case let .failure(error) = self else { return nil }
         return error
     }
+}
+
+@MainActor
+private final class CheckCount {
+    private(set) var value = 0
+    func add() { value += 1 }
 }

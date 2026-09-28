@@ -312,11 +312,32 @@ final class LatchRemoteConnectionTests: XCTestCase {
         defer { server.stop() }
         var options = server.options()
         options.peerAddressForTesting = [100, 101, 102, 103]
+        options.localAddressForTesting = [100, 90, 1, 2]
         options.interfaceNameForTesting = "utun4"
         let connection = connect(server, options: options)
         defer { connection.close() }
         try await server.nextConnection().acceptHello()
         _ = try await withTimeout { try await connection.waitUntilReady() }
+    }
+
+    /// Another VPN's tunnel, from an address of that VPN's: nothing is written.
+    func testATailnetAddressThroughAnotherVPNNeverReceivesTheHello() async throws {
+        let server = try await FakeServer.start()
+        defer { server.stop() }
+        var options = server.options()
+        options.peerAddressForTesting = [100, 101, 102, 103]
+        options.localAddressForTesting = [10, 8, 0, 2]
+        options.interfaceNameForTesting = "utun4"
+        let connection = connect(server, options: options)
+        let peer = try await server.nextConnection()
+        do {
+            _ = try await withTimeout { try await connection.waitUntilReady() }
+            XCTFail("Expected destinationNotAllowed")
+        } catch {
+            XCTAssertEqual(error as? LatchRemoteClientError, .destinationNotAllowed(address: "100.101.102.103"))
+        }
+        try await peer.waitForClose()
+        XCTAssertEqual(peer.byteCount, 0)
     }
 
     func testAWelcomeWithLimitsOutOfRangeIsAViolation() async throws {

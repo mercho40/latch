@@ -31,18 +31,37 @@ final class ServerMemory {
 
     /// Keeps the home a handshake made with `options` reported.
     func recordHome(_ home: String, options: LatchRemoteConnectionOptions) {
-        let host = options.host
-        recordHome(home, address: host.contains(":") ? "[\(host)]:\(options.port)" : "\(host):\(options.port)")
+        recordHome(home, address: Self.address(options))
     }
 
-    /// A server check that keeps the home each handshake reports, so every Test Connection,
-    /// New Session and Servers check leaves it for the rest of the app.
-    func recording(_ check: @escaping ServerCheck) -> ServerCheck {
-        { [weak self] options in
+    private static func address(_ options: LatchRemoteConnectionOptions) -> String {
+        let host = options.host
+        return host.contains(":") ? "[\(host)]:\(options.port)" : "\(host):\(options.port)"
+    }
+
+    /// A server check that keeps the home each handshake with a server in `servers` reports,
+    /// so every New Session and Servers check, and Test Connection on a saved server, leaves it
+    /// for the rest of the app. A server only being tried, as from a pairing link, leaves
+    /// nothing behind: once added, its first listing records its home.
+    func recording(_ check: @escaping ServerCheck, savedIn servers: any ServerStore) -> ServerCheck {
+        let saved = SavedServers(servers)
+        return { [weak self] options in
             let info = try await check(options)
-            await self?.recordHome(info.home, options: options)
+            await self?.recordHome(info.home, options: options, ifSavedIn: saved)
             return info
         }
+    }
+
+    private func recordHome(_ home: String, options: LatchRemoteConnectionOptions, ifSavedIn saved: SavedServers) {
+        let address = Self.address(options)
+        guard saved.store.servers.contains(where: { $0.address == address }) else { return }
+        recordHome(home, address: address)
+    }
+
+    /// The saved servers, held where a check, which must be `Sendable`, can reach them.
+    @MainActor private final class SavedServers {
+        let store: any ServerStore
+        init(_ store: any ServerStore) { self.store = store }
     }
 
     func home(for server: ServerProfile?) -> String? {

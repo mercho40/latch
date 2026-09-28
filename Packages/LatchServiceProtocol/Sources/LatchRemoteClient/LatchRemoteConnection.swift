@@ -15,8 +15,9 @@ public struct LatchRemoteConnectionOptions: Sendable {
     public var client: LatchRemoteClientInfo
     /// From `start()` until the welcome, covering name resolution, TCP and the hello.
     public var handshakeTimeout: Duration
-    /// Tests only: the address and interface the destination check sees instead of the real ones.
+    /// Tests only: the addresses and interface the destination check sees instead of the real ones.
     var peerAddressForTesting: [UInt8]?
+    var localAddressForTesting: [UInt8]?
     var interfaceNameForTesting: String?
 
     public init(
@@ -289,6 +290,7 @@ public final class LatchRemoteConnection: Sendable {
             let address = options.peerAddressForTesting ?? LatchRemoteDestinationPolicy.address(of: path?.remoteEndpoint)
             guard LatchRemoteDestinationPolicy.mayAuthenticate(
                 peerAddress: address,
+                localAddress: options.localAddressForTesting ?? LatchRemoteDestinationPolicy.address(of: path?.localEndpoint),
                 interfaceName: options.interfaceNameForTesting ?? LatchRemoteDestinationPolicy.interfaceName(of: path),
                 allowUnencryptedNetwork: options.allowUnencryptedNetwork
             ) else {

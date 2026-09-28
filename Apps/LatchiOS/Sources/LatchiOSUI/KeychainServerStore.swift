@@ -26,6 +26,9 @@ protocol TokenVault: AnyObject {
     func token(for id: UUID) throws(TokenVaultFailure) -> LatchRemoteToken?
     func setToken(_ token: LatchRemoteToken, for id: UUID) throws(TokenVaultFailure)
     func removeToken(for id: UUID)
+    /// Removes every token but those of `kept`. Best effort: a vault that cannot be listed,
+    /// as before the first unlock, keeps everything.
+    func removeTokens(except kept: Set<UUID>)
 }
 
 struct TokenVaultFailure: Error, Equatable {
@@ -75,6 +78,22 @@ final class KeychainTokenVault: TokenVault {
         SecItemDelete(query(id) as CFDictionary)
     }
 
+    func removeTokens(except kept: Set<UUID>) {
+        let search: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                     kSecAttrService as String: service,
+                                     kSecReturnAttributes as String: true,
+                                     kSecMatchLimit as String: kSecMatchLimitAll]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(search as CFDictionary, &result) == errSecSuccess,
+              let items = result as? [[String: Any]] else { return }
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String else { continue }
+            if let id = UUID(uuidString: account), kept.contains(id) { continue }
+            SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                           kSecAttrAccount as String: account] as CFDictionary)
+        }
+    }
+
     /// Stops the app when the Keychain refuses it for want of an entitlement, as it does a build
     /// signed without Configuration/Latch.entitlements. Tokens are kept nowhere else, so such a
     /// build could not keep a server, and saying so at launch beats failing at the first save.
@@ -96,6 +115,7 @@ final class InMemoryTokenVault: TokenVault {
     func token(for id: UUID) throws(TokenVaultFailure) -> LatchRemoteToken? { tokens[id] }
     func setToken(_ token: LatchRemoteToken, for id: UUID) throws(TokenVaultFailure) { tokens[id] = token }
     func removeToken(for id: UUID) { tokens[id] = nil }
+    func removeTokens(except kept: Set<UUID>) { tokens = tokens.filter { kept.contains($0.key) } }
 }
 
 /// Servers on iOS: each profile without its token in `servers.json` in Application Support,
@@ -105,6 +125,11 @@ final class InMemoryTokenVault: TokenVault {
 /// A profile whose token is gone, as after restoring a backup onto another device, is kept in
 /// the file and left out of `servers`; `missingTokens` lists it so the Servers list can offer
 /// to enter its token again under the same ID, which reconnects the sessions on it.
+///
+/// The Keychain outlives the app: deleting Latch leaves its items behind, and a reinstall
+/// starts without the file that names them. So each time the file is read, tokens it does not
+/// name are removed, all of them when there is no file. A file that cannot be read, as before
+/// the first unlock, removes nothing.
 @MainActor
 final class KeychainServerStore: PhoneServerStore {
     static let fileName = "servers.json"
@@ -179,6 +204,7 @@ final class KeychainServerStore: PhoneServerStore {
                 servers = []
                 missingTokens = []
                 fileProblem = nil
+                vault.removeTokens(except: [])
                 return
             }
             library = try JSONDecoder().decode(Library.self, from: data)
@@ -191,6 +217,7 @@ final class KeychainServerStore: PhoneServerStore {
             return
         }
         fileProblem = nil
+        vault.removeTokens(except: Set(library.servers.map(\.id)))
         var found: [ServerProfile] = []
         var missing: [ServerProfile.Stored] = []
         for stored in library.servers {

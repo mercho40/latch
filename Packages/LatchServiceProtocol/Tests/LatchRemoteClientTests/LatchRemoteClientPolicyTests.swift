@@ -39,7 +39,10 @@ final class LatchRemoteClientPolicyTests: XCTestCase {
 
     func testDestinationAllowsLoopbackAndTailnetOnly() {
         func allowed(_ address: [UInt8]?, interface: String? = "utun4", unencrypted: Bool = false) -> Bool {
-            LatchRemoteDestinationPolicy.mayAuthenticate(peerAddress: address, interfaceName: interface, allowUnencryptedNetwork: unencrypted)
+            let local: [UInt8]? = address?.count == 16 ? [0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0] + [UInt8](repeating: 1, count: 10)
+                : [100, 90, 1, 2]
+            return LatchRemoteDestinationPolicy.mayAuthenticate(peerAddress: address, localAddress: local, interfaceName: interface,
+                                                                allowUnencryptedNetwork: unencrypted)
         }
         XCTAssertTrue(allowed([127, 0, 0, 1]))
         XCTAssertTrue(allowed([127, 8, 9, 10]))
@@ -64,11 +67,12 @@ final class LatchRemoteClientPolicyTests: XCTestCase {
     }
 
     func testATailnetAddressNeedsATunnelInterface() {
-        func allowed(_ address: [UInt8], interface: String?) -> Bool {
-            LatchRemoteDestinationPolicy.mayAuthenticate(peerAddress: address, interfaceName: interface, allowUnencryptedNetwork: false)
-        }
         let tailnet: [UInt8] = [100, 101, 102, 103]
         let tailnet6: [UInt8] = [0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0] + [UInt8](repeating: 7, count: 10)
+        func allowed(_ address: [UInt8], interface: String?) -> Bool {
+            LatchRemoteDestinationPolicy.mayAuthenticate(peerAddress: address, localAddress: address.count == 4 ? [100, 90, 1, 2] : tailnet6,
+                                                         interfaceName: interface, allowUnencryptedNetwork: false)
+        }
         // With Tailscale down the route to a tailnet address is the default one.
         XCTAssertFalse(allowed(tailnet, interface: "en0"))
         XCTAssertFalse(allowed(tailnet6, interface: "en0"))
@@ -79,6 +83,28 @@ final class LatchRemoteClientPolicyTests: XCTestCase {
         // Loopback is judged by its address.
         XCTAssertTrue(allowed([127, 0, 0, 1], interface: nil))
         XCTAssertFalse(allowed([192, 168, 1, 10], interface: "utun3"))
+    }
+
+    /// Another VPN is a `utun` too, and with it on, Tailscale is off: a full tunnel carries a
+    /// tailnet address into that VPN's network. Only Tailscale gives this device a tailnet
+    /// address of its own to connect from.
+    func testATailnetAddressThroughAnotherVPNIsRefused() {
+        func allowed(_ peer: [UInt8], from local: [UInt8]?) -> Bool {
+            LatchRemoteDestinationPolicy.mayAuthenticate(peerAddress: peer, localAddress: local, interfaceName: "utun5",
+                                                         allowUnencryptedNetwork: false)
+        }
+        let tailnet: [UInt8] = [100, 101, 102, 103]
+        let tailnet6: [UInt8] = [0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0] + [UInt8](repeating: 7, count: 10)
+        XCTAssertTrue(allowed(tailnet, from: [100, 64, 0, 9]))
+        XCTAssertTrue(allowed(tailnet6, from: [0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0] + [UInt8](repeating: 2, count: 10)))
+        XCTAssertFalse(allowed(tailnet, from: [10, 8, 0, 2]), "A commercial VPN's address")
+        XCTAssertFalse(allowed(tailnet, from: [172, 16, 0, 2]))
+        XCTAssertFalse(allowed(tailnet6, from: [0xFD, 0x00] + [UInt8](repeating: 3, count: 14)))
+        XCTAssertFalse(allowed(tailnet, from: nil), "Unknown")
+        // Loopback needs no local address.
+        XCTAssertTrue(allowed([127, 0, 0, 1], from: nil))
+        XCTAssertTrue(LatchRemoteDestinationPolicy.mayAuthenticate(peerAddress: tailnet, localAddress: [10, 8, 0, 2],
+                                                                   interfaceName: "utun5", allowUnencryptedNetwork: true))
     }
 
     func testDispatchIntervalsSaturateInsteadOfOverflowing() {

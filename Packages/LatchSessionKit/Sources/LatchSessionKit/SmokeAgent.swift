@@ -1,3 +1,5 @@
+#if os(macOS)
+// The Mac app's bundle smoke and tests run this; the iOS app never does, so it does not carry it.
 public enum SmokeAgent {
     public static let script = #"""
     while IFS= read -r line; do
@@ -89,3 +91,4 @@ public enum SmokeAgent {
     done
     """#
 }
+#endif

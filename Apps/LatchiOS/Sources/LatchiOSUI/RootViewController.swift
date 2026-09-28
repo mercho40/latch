@@ -62,8 +62,8 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         self.library = library
         self.servers = servers
         self.memory = memory
-        // Every check, from any screen, leaves the server's home for the paths shown on it.
-        self.check = memory.recording(check)
+        // Every check of a saved server, from any screen, leaves its home for the paths shown on it.
+        self.check = memory.recording(check, savedIn: servers)
         self.badge = badge
         self.makeSessionViewController = makeSessionViewController
         sessions = SessionsViewController(library: library, defaults: defaults)

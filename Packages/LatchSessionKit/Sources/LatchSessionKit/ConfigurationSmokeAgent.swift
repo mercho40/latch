@@ -1,3 +1,5 @@
+#if os(macOS)
+// The Mac app's bundle smoke and tests run this; the iOS app never does, so it does not carry it.
 /// Provider-free ACP fixture shared by UI smoke runs and SessionModel integration tests.
 /// Stdout is exclusively JSON-RPC. Request IDs are extracted rather than assumed.
 public enum ConfigurationSmokeAgent {
@@ -206,3 +208,4 @@ public enum ConfigurationSmokeAgent {
         """#
     }
 }
+#endif

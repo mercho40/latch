@@ -92,6 +92,34 @@ final class KeychainServerStoreTests: XCTestCase {
         XCTAssertEqual(KeychainServerStore(directory: directory, vault: vault).server(id: vps.id)?.token, again.token)
     }
 
+    /// The Keychain outlives a deleted app: a reinstall, with no file, removes every token,
+    /// and a file removes the tokens it does not name. One that cannot be read removes none.
+    func testTokensTheFileDoesNotNameAreRemoved() throws {
+        let vault = InMemoryTokenVault()
+        let leftOver = UUID()
+        vault.tokens[leftOver] = .generate()
+        _ = KeychainServerStore(directory: directory, vault: vault)
+        XCTAssertEqual(vault.tokens, [:], "No file: the app was installed again")
+
+        let store = KeychainServerStore(directory: directory, vault: vault)
+        let vps = Fake.server("vps")
+        let mini = Fake.server("mini")
+        try store.save(vps)
+        try store.save(mini)
+        vault.removeToken(for: mini.id)
+        vault.tokens[leftOver] = .generate()
+        let reopened = KeychainServerStore(directory: directory, vault: vault)
+        XCTAssertEqual(Set(vault.tokens.keys), [vps.id])
+        XCTAssertEqual(reopened.servers, [vps])
+        XCTAssertEqual(reopened.missingTokens.map(\.id), [mini.id], "Still named, for its token to be entered again")
+
+        let file = directory.appendingPathComponent(KeychainServerStore.fileName)
+        try Data("{ not json".utf8).write(to: file)
+        vault.tokens[leftOver] = .generate()
+        _ = KeychainServerStore(directory: directory, vault: vault)
+        XCTAssertEqual(Set(vault.tokens.keys), [vps.id, leftOver])
+    }
+
     func testAnUnreadableFileIsNeverOverwritten() throws {
         let file = directory.appendingPathComponent(KeychainServerStore.fileName)
         try Data("{ not json".utf8).write(to: file)
@@ -132,5 +160,16 @@ final class KeychainServerStoreTests: XCTestCase {
                        kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
         vault.removeToken(for: id)
         XCTAssertNil(try vault.token(for: id))
+
+        let kept = UUID()
+        let dropped = UUID()
+        try vault.setToken(token, for: kept)
+        try vault.setToken(token, for: dropped)
+        defer { vault.removeTokens(except: []) }
+        vault.removeTokens(except: [kept])
+        XCTAssertEqual(try vault.token(for: kept), token)
+        XCTAssertNil(try vault.token(for: dropped))
+        vault.removeTokens(except: [])
+        XCTAssertNil(try vault.token(for: kept))
     }
 }

@@ -153,11 +153,14 @@ public enum ServerCheckText {
     }
 
     /// The failure in plain words. The destination refusal is the one a user can act on
-    /// here, so it names the checkbox that changes it.
-    public static func failure(_ error: any Error) -> String {
+    /// here, so it names the checkbox that changes it, unless the server came from a link,
+    /// which anyone can make: then it asks for the host and Tailscale to be checked instead.
+    public static func failure(_ error: any Error, offeringUnencryptedNetwork: Bool = true) -> String {
         if case let .destinationNotAllowed(address) = error as? LatchRemoteClientError {
             return "Latch did not send the token: \(address) is neither \(thisDevice) nor on a Tailscale network. "
-                + "Turn on “Allow unencrypted network” for this server to connect anyway."
+                + (offeringUnencryptedNetwork
+                    ? "Turn on “Allow unencrypted network” for this server to connect anyway."
+                    : "Check the host, and that Tailscale is connected.")
         }
         return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }

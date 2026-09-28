@@ -29,13 +29,13 @@ final class ServerMemoryTests: XCTestCase {
         XCTAssertEqual(ServerMemory.expandedPath("/srv", home: "/home/simon"), "/srv")
     }
 
-    /// Every check any screen makes leaves the server's home, by address.
+    /// Every check any screen makes of a saved server leaves its home, by address.
     func testACheckLeavesTheServersHome() async throws {
         let memory = memory()
         let vps = Fake.server("vps")
-        let check = memory.recording { _ in
+        let check = memory.recording({ _ in
             LatchRemoteServerInfo(version: "0.1.0", hostname: "vps", os: "Linux", arch: "x86_64", home: "/home/simon")
-        }
+        }, savedIn: InMemoryServerStore([vps]))
         XCTAssertNil(memory.home(for: vps))
         _ = try await check(vps.connectionOptions)
         XCTAssertEqual(memory.home(for: vps), "/home/simon")
@@ -43,6 +43,23 @@ final class ServerMemoryTests: XCTestCase {
         var renamed = vps
         renamed.name = "Build box"
         XCTAssertEqual(memory.home(for: renamed), "/home/simon", "The home is the machine's, whatever it is called")
+    }
+
+    /// A server only being tried, as from a pairing link that is then cancelled, leaves
+    /// nothing in the app's preferences.
+    func testACheckOfAServerNotAddedLeavesNothing() async throws {
+        let memory = memory()
+        let saved = Fake.server("vps")
+        let tried = Fake.server("stranger", port: 9000)
+        let servers = InMemoryServerStore([saved])
+        let check = memory.recording({ _ in
+            LatchRemoteServerInfo(version: "0.1.0", hostname: "x", os: "Linux", arch: "x86_64", home: "/home/x")
+        }, savedIn: servers)
+        _ = try await check(tried.connectionOptions)
+        XCTAssertNil(memory.home(for: tried))
+        try servers.save(tried)
+        _ = try await check(tried.connectionOptions)
+        XCTAssertEqual(memory.home(for: tried), "/home/x", "Once added")
     }
 
     func testARemovedServerIsRememberedUntilItsSessionsMove() {

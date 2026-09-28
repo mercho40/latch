@@ -21,20 +21,27 @@ public enum LatchRemoteDestinationPolicy {
         path?.availableInterfaces.first?.name
     }
 
-    /// Loopback peers always qualify, and tailnet peers when the path runs through a tunnel;
-    /// any other peer, or one whose address is unknown, only when the user allowed an
-    /// unencrypted network for this server.
+    /// Loopback peers always qualify, and tailnet peers when the path runs through a tunnel
+    /// from a tailnet address of this device's own; any other peer, or one whose address is
+    /// unknown, only when the user allowed an unencrypted network for this server.
     ///
     /// A tailnet address alone proves nothing: with Tailscale down, traffic to `100.64.0.0/10`
     /// follows the default route, and whoever answers there would read the token. Tailscale
     /// on macOS and iOS runs over a `utun` interface, the same rule the server applies to
-    /// its own tailnet address.
-    public static func mayAuthenticate(peerAddress: [UInt8]?, interfaceName: String?, allowUnencryptedNetwork: Bool) -> Bool {
+    /// its own tailnet address. So does every other VPN, and iOS runs one at a time: with
+    /// another one on, Tailscale is off and a full tunnel carries tailnet addresses into that
+    /// VPN's network. Tailscale gives this device a tailnet address on its interface, which
+    /// other VPNs do not, so the connection must come from one as well. A VPN that hands out
+    /// addresses in `100.64.0.0/10` itself would still pass.
+    public static func mayAuthenticate(peerAddress: [UInt8]?, localAddress: [UInt8]?, interfaceName: String?,
+                                       allowUnencryptedNetwork: Bool) -> Bool {
         if allowUnencryptedNetwork { return true }
         guard let peerAddress, let classification = LatchRemoteAddressPolicy.classify(peerAddress) else { return false }
         switch classification {
         case .loopback: return true
-        case .tailnet: return interfaceName?.hasPrefix("utun") == true
+        case .tailnet:
+            guard interfaceName?.hasPrefix("utun") == true, let localAddress else { return false }
+            return LatchRemoteAddressPolicy.classify(localAddress) == .tailnet
         case .unspecified, .other: return false
         }
     }

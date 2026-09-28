@@ -10,7 +10,7 @@ Requires macOS 15 or later on Apple silicon.
 curl -fsSL https://latchapp.dev/install.sh | sh
 ```
 
-The script downloads the latest GitHub release, checks its SHA-256 and code signature, and installs `Latch.app` into `/Applications` (or `~/Applications` if that is not writable). Run it again to update. `LATCH_VERSION=0.1.0` pins a release; `LATCH_INSTALL_DIR=/path` changes the destination.
+The script downloads the latest GitHub release, checks its SHA-256 and code signature, and installs `Latch.app` into `/Applications` (or `~/Applications` if that is not writable). Run it again to update. `LATCH_VERSION=0.2.0` pins a release; `LATCH_INSTALL_DIR=/path` changes the destination.
 
 Latch is signed ad hoc and is not notarized. Installing with `curl` does not set the quarantine attribute, so there is no Gatekeeper prompt. A zip downloaded in a browser needs `xattr -dr com.apple.quarantine /Applications/Latch.app` before it will open.
 
@@ -30,6 +30,10 @@ open .build/LatchMacApp/Build/Products/Release/Latch.app
 Built-in agents are found automatically if they are installed: `codex login` for Codex, a Claude login and Node.js 22+ for Claude Code, and the existing provider login for OpenCode and fx.
 
 Any other ACP server runs as the custom agent. Set its command in Settings → Agents, for example `my-agent acp`. Quotes and backslash escapes are supported; shell expansion and pipelines are not.
+
+## Agents on a server
+
+`latch-server` runs ACP agents on another machine, usually a Linux server reached over Tailscale, and keeps them running when the Mac sleeps or Latch quits. Latch on the Mac drives them, and so does the iPhone and iPad app, which you build yourself with Xcode. Each release has static `latch-server` binaries for Linux on x86_64 and aarch64. Setup: https://github.com/mercho40/latch/blob/main/docs/server.md
 
 ## Limits worth knowing
 

@@ -2,14 +2,14 @@
 
 A small, native macOS client for coding agents.
 
-Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol](https://agentclientprotocol.com) agent in a real AppKit window: sessions per workspace, streamed replies and tool activity, and native approval sheets for what the agent asks to do. There is no web view, no account, and no hosted service. The whole app is under 4 MB.
+Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol](https://agentclientprotocol.com) agent in a real AppKit window: sessions per workspace, streamed replies and tool activity, and native approval sheets for what the agent asks to do. There is no web view, no account, and no hosted service. The whole app is about 5.5 MB, a 3.2 MB download.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/latch-dark.png">
   <img alt="A Latch window: sessions grouped by workspace in the sidebar, a conversation with tool calls, a table and a code block, and a composer with model, effort and permission pickers." src="docs/images/latch-light.png" width="860">
 </picture>
 
-> **Early development.** Latch is at 0.1: expect bugs and breaking changes. Issues are welcome; please read [CONTRIBUTING.md](.github/CONTRIBUTING.md) before opening a pull request.
+> **Early development.** Latch is at 0.2: expect bugs and breaking changes. Issues are welcome; please read [CONTRIBUTING.md](.github/CONTRIBUTING.md) before opening a pull request.
 
 ## What works today
 

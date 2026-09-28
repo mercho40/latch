@@ -1,8 +1,8 @@
 // The iOS app: a control surface for agents on a latch-server. It never runs an agent itself.
 PRODUCT_NAME = Latch
 PRODUCT_BUNDLE_IDENTIFIER = dev.latchapp.ios
-MARKETING_VERSION = 0.1.0
-CURRENT_PROJECT_VERSION = 1
+MARKETING_VERSION = 0.2.0
+CURRENT_PROJECT_VERSION = 2
 IPHONEOS_DEPLOYMENT_TARGET = 18.0
 SDKROOT = iphoneos
 SUPPORTED_PLATFORMS = iphoneos iphonesimulator

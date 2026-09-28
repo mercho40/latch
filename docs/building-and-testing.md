@@ -268,11 +268,13 @@ Snapshots draw a window's layer, where glass and blur come out as their tint onl
 
 ## Releasing
 
-Releases are built locally, because hosted CI runners cannot compile the app icon yet, and are ad-hoc signed: there is no Developer ID and no notarization.
+Releases are built locally, with Xcode 27 and Apple's container tool running, and are ad-hoc signed: there is no Developer ID and no notarization. A release carries the Mac app and `latch-server` for Linux; the iOS app is built by whoever runs it.
 
-1. Set `MARKETING_VERSION` in both `Apps/LatchMac/Configuration/App.xcconfig` and `AgentService.xcconfig`, and `LatchServerVersion.current` in `Packages/LatchAgentCore/Sources/LatchAgentServer/LatchServerVersion.swift`, commit, and push `main`.
-2. Rehearse with `bash Scripts/release.sh --dry-run 0.2.0`. It runs the Release bundle verification and smoke test, archives the app with `ditto`, unpacks the archive again to check the signature survived, and leaves the zip, its `.sha256`, and the dSYMs in `.build/release/v0.2.0`.
-3. Publish with `bash Scripts/release.sh 0.2.0`. It refuses unless the tree is clean, `main` matches `origin/main`, the tag is new, and both xcconfigs and `LatchServerVersion` carry the version; then it tags, pushes the tag, and creates the GitHub release with generated notes and the checksum.
+1. Set `MARKETING_VERSION` in `Apps/LatchMac/Configuration/App.xcconfig`, `AgentService.xcconfig` and `Apps/LatchiOS/Configuration/App.xcconfig`, and `LatchServerVersion.current` in `Packages/LatchAgentCore/Sources/LatchAgentServer/LatchServerVersion.swift`. Increase `CURRENT_PROJECT_VERSION` in the same three xcconfigs by one. Update the version in the README's "Early development" note and in `site/index.html`'s heading. Commit, and push `main`.
+2. Rehearse with `bash Scripts/release.sh --dry-run 0.2.0`. It runs the Release bundle verification and smoke test, archives the app with `ditto`, unpacks the archive again to check the signature survived, then builds `latch-server` for Linux with `Scripts/build-linux-server.sh`, packs each architecture's binary alone into `latch-server-0.2.0-linux-x86_64.tar.gz` and `latch-server-0.2.0-linux-aarch64.tar.gz`, checks that each is an ELF executable for its architecture, and runs the aarch64 one from its tarball in a container, where `--version` must print the release's version. It leaves the zip, the tarballs, a `.sha256` for each, and the dSYMs in `.build/release/v0.2.0`.
+3. Publish with `bash Scripts/release.sh 0.2.0`. It refuses unless the tree is clean, `main` matches `origin/main`, the tag is new, the three xcconfigs and `LatchServerVersion` carry the version, and the container tool is running; then it tags, pushes the tag, and creates the GitHub release with generated notes, a line on the server tarballs, and every checksum.
+
+The Mac zip's name and its `.sha256` are what `Scripts/install.sh` downloads; keep both as they are.
 
 Do not mark a release as a pre-release: `Scripts/install.sh` follows GitHub's "latest release", which skips pre-releases. To test the installer without publishing, point it at a local copy of the release layout:
 

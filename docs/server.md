@@ -16,15 +16,32 @@ Provider keys that an agent reads from the environment go in an `EnvironmentFile
 
 ## Get a binary
 
-Releases do not include `latch-server` yet; build it.
-
-**From a Mac**, with [Apple's container tool](https://github.com/apple/container) running (`container system start`):
+Each [release](https://github.com/mercho40/latch/releases) from 0.2.0 carries `latch-server` for Linux on x86_64 and aarch64: static binaries that run on any distribution, each alone in a tarball with a SHA-256 file beside it. On the server:
 
 ```sh
+version=0.2.0
+arch="$(uname -m)"   # x86_64 or aarch64
+base="https://github.com/mercho40/latch/releases/download/v$version"
+curl -fsSLO "$base/latch-server-$version-linux-$arch.tar.gz"
+curl -fsSLO "$base/latch-server-$version-linux-$arch.tar.gz.sha256"
+sha256sum -c "latch-server-$version-linux-$arch.tar.gz.sha256"
+tar -xzf "latch-server-$version-linux-$arch.tar.gz"
+install -D -m 755 latch-server ~/.local/bin/latch-server
+rm latch-server "latch-server-$version-linux-$arch.tar.gz" "latch-server-$version-linux-$arch.tar.gz.sha256"
+```
+
+`sha256sum -c` must print `OK`. The checksum comes from the same release as the tarball, so it catches a damaged download, not a compromised release. To update, run the same commands with the new version and restart the service. Use the server from the same release as the apps.
+
+### Build it instead
+
+**From a Mac**, with [Apple's container tool](https://github.com/apple/container) running (`container system start`), in a clone of the repository at the release's tag:
+
+```sh
+git clone --branch v0.2.0 https://github.com/mercho40/latch.git && cd latch
 bash Scripts/build-linux-server.sh
 ```
 
-This builds static musl binaries in `.build/linux-server/latch-server-x86_64` and `latch-server-aarch64`. Copy the one that matches `uname -m` on the server:
+This builds the same static musl binaries a release carries, in `.build/linux-server/latch-server-x86_64` and `latch-server-aarch64`. Copy the one that matches `uname -m` on the server:
 
 ```sh
 ssh vps mkdir -p .local/bin
@@ -34,7 +51,7 @@ scp .build/linux-server/latch-server-x86_64 vps:.local/bin/latch-server
 **On the server**, with a Swift 6.4 toolchain:
 
 ```sh
-git clone https://github.com/mercho40/latch.git && cd latch
+git clone --branch v0.2.0 https://github.com/mercho40/latch.git && cd latch
 swift build -c release --package-path Packages/LatchAgentCore --product latch-server
 install -D -m 755 "$(swift build -c release --package-path Packages/LatchAgentCore --show-bin-path)/latch-server" ~/.local/bin/latch-server
 ```
@@ -177,7 +194,7 @@ An agent nobody has been attached to for 24 hours, with no turn running, is stop
 
 ## On a Mac
 
-Nothing is packaged for macOS: releases do not include `latch-server`, and there is no launchd property list. Build it from a clone, with Xcode 27:
+Nothing is packaged for macOS: releases carry `latch-server` for Linux only, and there is no launchd property list. Build it from a clone, with Xcode 27:
 
 ```sh
 swift build -c release --package-path Packages/LatchAgentCore --product latch-server

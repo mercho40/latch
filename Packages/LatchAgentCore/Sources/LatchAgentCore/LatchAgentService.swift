@@ -1,3 +1,4 @@
+import Foundation
 import LatchACP
 import LatchServiceProtocol
 
@@ -13,10 +14,12 @@ public actor LatchAgentService {
 
     public init(
         registry: AgentRuntimeRegistry = AgentRuntimeRegistry(),
+        // The version of the bundle this runs in, the Mac's XPC service, which carries the
+        // app's; latch-server passes its own.
         clientInfo: ACPImplementation = ACPImplementation(
             name: "latch-agent",
             title: "Latch Agent",
-            version: "0.1.0"
+            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         )
     ) {
         self.registry = registry

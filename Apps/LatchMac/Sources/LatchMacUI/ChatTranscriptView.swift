@@ -9,18 +9,24 @@ final class ChatTranscriptView: NSView {
     static let horizontalInset: CGFloat = 20
     static let rowSpacing: CGFloat = 12
     static let groupedRowSpacing: CGFloat = 2
+    /// How far each level of a subagent's rows sits in from the row of its call.
+    static let nestingIndent: CGFloat = 20
 
     let scrollView = NSScrollView()
     var messageCount: Int { order.count }
     /// Row geometry in transcript order, so a layout test can compare what the
     /// viewport-limited resize path produced against a full measurement.
-    var rowFrames: [NSRect] { order.compactMap { rows[$0]?.frame } }
+    var rowFrames: [NSRect] { order.compactMap { rows[$0] }.filter { !$0.isHidden }.map(\.frame) }
 
     private let document = TranscriptDocumentView()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let jump = FloatingRoundButton.make(symbol: "arrow.down", label: "Jump to Latest")
     private var rows: [UUID: TranscriptMessageView] = [:]
+    /// Display order: each subagent's rows directly under the row of its call, depth first,
+    /// wherever the main agent's own messages fell between them.
     private var order: [UUID] = []
+    /// The row of the subagent each nested row belongs to, among the rows shown.
+    private var parents: [UUID: UUID] = [:]
     private var working = false
     private var followsBottom = true
     private var arranging = false
@@ -111,7 +117,7 @@ final class ChatTranscriptView: NSView {
 
     private func anchor() -> Anchor {
         let y = scrollView.contentView.bounds.minY
-        let id = order.first { (rows[$0]?.frame.maxY ?? 0) > y }
+        let id = order.first { rows[$0].map { !$0.isHidden && $0.frame.maxY > y } ?? false }
         return Anchor(id: id, offset: y - (id.flatMap { rows[$0]?.frame.minY } ?? 0), origin: y)
     }
 
@@ -121,24 +127,31 @@ final class ChatTranscriptView: NSView {
         var seen = Set<UUID>()
         let retained = messages.suffix(ChatHistory.maximumMessageCount).filter { seen.insert($0.id).inserted }
         let ids = Set(retained.map(\.id))
-        for id in order where !ids.contains(id) {
+        for id in Array(rows.keys) where !ids.contains(id) {
             rows.removeValue(forKey: id)?.removeFromSuperview()
         }
-        order = retained.map(\.id)
+        let nesting = Self.nesting(of: retained)
+        order = nesting.order
+        parents = nesting.parents
+        let progress = Self.subagentProgress(of: retained, parents: parents)
         for message in retained {
             if let row = rows[message.id], row.role == message.role {
-                row.update(text: message.text)
+                row.update(text: message.text, tool: message.tool)
             } else {
                 rows.removeValue(forKey: message.id)?.removeFromSuperview()
                 let row = TranscriptMessageView(message: message)
                 row.onDisclosure = { [weak self] in
                     guard let self else { return }
+                    self.refreshVisibility()
+                    if !self.findTerm.isEmpty { self.recomputeMatches() }
                     self.arrange(restoring: self.anchor())
                 }
                 rows[message.id] = row
                 document.addSubview(row)
             }
+            rows[message.id]?.subagentProgress = progress[message.id]
         }
+        refreshVisibility()
         if !findTerm.isEmpty { recomputeMatches() }
         working = isWorking
         let label = working ? "Working…" : ""
@@ -152,6 +165,74 @@ final class ChatTranscriptView: NSView {
         super.layout()
         guard !arranging else { return }
         arrange(restoring: anchor())
+    }
+
+    /// Display order and parents. A message whose parent is not shown, or that would close a
+    /// loop, stays at the top level in its own place.
+    static func nesting(of messages: [ChatMessage]) -> (order: [UUID], parents: [UUID: UUID]) {
+        let ids = Set(messages.map(\.id))
+        var parents: [UUID: UUID] = [:]
+        for message in messages {
+            guard let parent = message.parentID, parent != message.id, ids.contains(parent) else { continue }
+            parents[message.id] = parent
+        }
+        // A loop has no top to hang from; cut it at the message that closes it.
+        for message in messages where parents[message.id] != nil {
+            var seen: Set<UUID> = [message.id]
+            var current = parents[message.id]
+            while let ancestor = current {
+                if !seen.insert(ancestor).inserted { parents[message.id] = nil; break }
+                current = parents[ancestor]
+            }
+        }
+        var children: [UUID: [UUID]] = [:]
+        for message in messages { if let parent = parents[message.id] { children[parent, default: []].append(message.id) } }
+        var order: [UUID] = []
+        order.reserveCapacity(messages.count)
+        func visit(_ id: UUID) {
+            order.append(id)
+            for child in children[id] ?? [] { visit(child) }
+        }
+        for message in messages where parents[message.id] == nil { visit(message.id) }
+        return (order, parents)
+    }
+
+    /// For each subagent's row, how many tool calls are under it, at any depth, and the
+    /// title of the latest of them.
+    fileprivate static func subagentProgress(of messages: [ChatMessage], parents: [UUID: UUID]) -> [UUID: TranscriptMessageView.SubagentProgress] {
+        let subagents = Set(messages.filter { $0.tool?.runsSubagent == true }.map(\.id))
+        guard !subagents.isEmpty else { return [:] }
+        var progress: [UUID: TranscriptMessageView.SubagentProgress] = [:]
+        // Every streaming frame comes through here: only rows under a parent count.
+        for message in messages where message.role == .tool && parents[message.id] != nil {
+            let title = TranscriptMessageView.toolTitle(message.text)
+            var current = parents[message.id]
+            while let ancestor = current {
+                if subagents.contains(ancestor) {
+                    progress[ancestor, default: .init(steps: 0, latest: nil)].steps += 1
+                    progress[ancestor]?.latest = title
+                }
+                current = parents[ancestor]
+            }
+        }
+        return progress
+    }
+
+    /// Rows under a folded subagent are hidden, and the rest sit in by their depth.
+    private func refreshVisibility() {
+        for id in order {
+            guard let row = rows[id] else { continue }
+            var depth = 0
+            var hidden = false
+            var current = parents[id]
+            while let ancestor = current {
+                depth += 1
+                if rows[ancestor]?.isExpanded == false { hidden = true }
+                current = parents[ancestor]
+            }
+            row.depth = depth
+            if row.isHidden != hidden { row.isHidden = hidden }
+        }
     }
 
     /// While the window edge is being dragged, only the rows the reader can see are
@@ -216,15 +297,18 @@ final class ChatTranscriptView: NSView {
         // drifts as it goes — that is what the margin is for.
         let viewport = scrollView.contentView.bounds
         let measured = viewport.insetBy(dx: 0, dy: -max(viewport.height, 1))
-        for (position, id) in order.enumerated() {
-            guard let row = rows[id] else { continue }
+        let shown = order.compactMap { rows[$0] }.filter { !$0.isHidden }
+        for (position, row) in shown.enumerated() {
+            // A nested row starts its guide line half an indent in from its parent's content.
+            let leading = row.depth > 0 ? CGFloat(row.depth) * Self.nestingIndent - TranscriptMessageView.guideWidth : 0
+            let rowWidth = max(1, columnWidth - leading)
             let deferrable = limitsMeasurementToViewport && row.frame.height > 0
-                && !measured.intersects(NSRect(x: inset, y: y, width: columnWidth, height: row.frame.height))
-            let height = deferrable ? row.deferArrange(width: columnWidth) : row.arrange(width: columnWidth)
-            row.frame.origin = NSPoint(x: inset, y: y)
+                && !measured.intersects(NSRect(x: inset + leading, y: y, width: rowWidth, height: row.frame.height))
+            let height = deferrable ? row.deferArrange(width: rowWidth) : row.arrange(width: rowWidth)
+            row.frame.origin = NSPoint(x: inset + leading, y: y)
             // A run of collapsed tool calls is one burst of activity, so its rows sit together as a
             // group; the ordinary gap is what separates that group from the messages around it.
-            let next = position + 1 < order.count ? rows[order[position + 1]] : nil
+            let next = position + 1 < shown.count ? shown[position + 1] : nil
             y += height + (row.isCollapsedTool && next?.isCollapsedTool == true ? Self.groupedRowSpacing : Self.rowSpacing)
         }
         if !status.isHidden {
@@ -261,6 +345,16 @@ final class ChatTranscriptView: NSView {
         let clip = scrollView.contentView.bounds
         followsBottom = document.frame.height - clip.maxY <= 24
         jump.isHidden = followsBottom
+    }
+
+    /// Opens or folds a tool call, thinking or a subagent, as its disclosure triangle does.
+    func toggleDisclosure(of id: UUID) {
+        rows[id]?.toggleDisclosure()
+    }
+
+    /// Where a row is in the document, or nil while it is hidden under a folded subagent.
+    func visibleFrame(of id: UUID) -> NSRect? {
+        rows[id].flatMap { $0.isHidden ? nil : $0.frame }
     }
 
     @objc func jumpToLatest() {
@@ -330,7 +424,7 @@ final class ChatTranscriptView: NSView {
         matches = []
         guard !findTerm.isEmpty else { return }
         for id in order {
-            guard let row = rows[id], !row.textView.isHidden else { continue }
+            guard let row = rows[id], !row.isHidden, !row.textView.isHidden else { continue }
             let haystack = row.textView.string as NSString
             var location = 0
             while location < haystack.length {
@@ -492,6 +586,20 @@ final class ChatTranscriptView: NSView {
         try require(toolRow.subviews.compactMap { $0 as? NSButton }.contains { !$0.isHidden && $0.accessibilityLabel()?.contains("completed") == true }, "Tool status update is not accessibility discoverable")
         toolRow.toggleDisclosure()
         try require(toolRow.textView.isHidden && toolRow.frame.height == toolHeight, "Tool did not collapse")
+        let thought = ChatMessage(role: .thought, text: "Where does it start?\nProbably in main.")
+        let subagent = ChatMessage(role: .tool, text: "Explore the code · in_progress\n\nFind the entry point",
+                                   tool: ToolSummary(callID: "a", kind: "think", status: "in_progress", toolName: "Agent", runsSubagent: true))
+        let step = ChatMessage(role: .tool, text: "Read main.swift · completed", tool: ToolSummary(callID: "r", kind: "read", status: "completed"),
+                               parentID: subagent.id)
+        let words = ChatMessage(role: .assistant, text: "It starts in main.", parentID: subagent.id)
+        probe.update(messages: [thought, subagent, step, words], isWorking: true)
+        let thoughtRow = probe.rows[thought.id]!, subagentRow = probe.rows[subagent.id]!
+        try require(thoughtRow.textView.isHidden && thoughtRow.headerText == "Thinking: Where does it start?", "Thinking is not a folded row titled by its first line")
+        try require(probe.rows[step.id]!.isHidden && probe.rows[words.id]!.isHidden, "A folded subagent shows its rows")
+        try require(subagentRow.headerText.hasSuffix(" · 1 step — Read main.swift"), "A running subagent's header does not say how far it has got")
+        subagentRow.toggleDisclosure()
+        let stepRow = probe.rows[step.id]!
+        try require(!stepRow.isHidden && stepRow.depth == 1 && stepRow.frame.minX > subagentRow.frame.minX, "An opened subagent's rows are not shown indented under it")
         probe.update(messages: (0..<405).map { ChatMessage(role: .tool, text: "Tool \($0)") }, isWorking: false)
         try require(probe.messageCount == 400 && probe.rows.count == 400, "Transcript exceeded history bound")
         probe.update(messages: [], isWorking: false)
@@ -501,6 +609,11 @@ final class ChatTranscriptView: NSView {
         probe.update(messages: [], isWorking: false)
         try require(probe.status.isHidden && probe.status.stringValue.isEmpty, "Working indicator remains after prompting")
     }
+}
+
+/// The guide line's width, for tests; the row type itself is private.
+enum TranscriptMessageViewGuide {
+    static let width: CGFloat = 10
 }
 
 @MainActor
@@ -539,10 +652,32 @@ private final class TranscriptMessageView: NSView {
     private var bubbleRadius: CGFloat = 12
     private var hoverTracking: NSTrackingArea?
     private var hovered = false
-    private var isDisclosure: Bool { role == .tool }
+    private var isDisclosure: Bool { role == .tool || role == .thought }
     var isCollapsedTool: Bool { isDisclosure && !expanded }
+    /// What a subagent's row holds: rows under a folded one are hidden.
+    var isExpanded: Bool { !isDisclosure || expanded }
     /// Clears the 20pt disclosure triangle drawn at the row's leading edge.
     static let disclosureIndent: CGFloat = 24
+    /// A nested row's guide line, and the gap after it, before its content.
+    static let guideWidth = TranscriptMessageViewGuide.width
+    private(set) var tool: ToolSummary?
+    /// How many levels of subagent this row is under; a nested row draws a guide line at its
+    /// leading edge, and sits in one indent further for each level.
+    var depth = 0 {
+        didSet { if depth != oldValue { needsDisplay = true } }
+    }
+
+    struct SubagentProgress: Equatable {
+        var steps: Int
+        /// The title of the latest call under the subagent.
+        var latest: String?
+    }
+    /// For a subagent's row: its calls so far, shown in the header so it need not be opened.
+    var subagentProgress: SubagentProgress? {
+        didSet { if subagentProgress != oldValue { refreshHeader() } }
+    }
+    /// The header as words, for the tooltip and accessibility; the label also carries a symbol.
+    private(set) var headerText = ""
 
     override var isFlipped: Bool { true }
 
@@ -554,6 +689,7 @@ private final class TranscriptMessageView: NSView {
         case .user: "You"
         case .assistant: "Assistant"
         case .tool: "Tool"
+        case .thought: "Thinking"
         }
         label.font = .systemFont(ofSize: 12)
         label.textColor = .secondaryLabelColor
@@ -599,12 +735,16 @@ private final class TranscriptMessageView: NSView {
         textView.setAccessibilityLabel("\(label.stringValue) message")
         textView.isHidden = isDisclosure
         addSubview(textView)
-        update(text: message.text)
+        update(text: message.text, tool: message.tool)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func update(text: String) {
+    func update(text: String, tool: ToolSummary? = nil) {
+        if tool != self.tool {
+            self.tool = tool
+            if rawText == text { refreshHeader() }
+        }
         guard rawText != text else { return }
         rawText = text
         measuredWidth = -1
@@ -617,6 +757,14 @@ private final class TranscriptMessageView: NSView {
             // The header label already carries the title line; repeating it as the body's first line
             // made every expanded row say the same thing twice.
             content = ToolTranscriptStyle.render(Self.toolBody(text), titled: false)
+        } else if role == .thought {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineSpacing = 2
+            content = NSAttributedString(string: text, attributes: [
+                .font: NSFont.systemFont(ofSize: ChatMarkdown.bodyFontSize - 1),
+                .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph,
+            ])
         } else {
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineBreakMode = .byWordWrapping
@@ -645,12 +793,112 @@ private final class TranscriptMessageView: NSView {
             // Measure once per source update, not on every viewport layout.
             naturalTextWidth = ceil(content.size().width)
         }
-        if isDisclosure {
-            let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-            label.attributedStringValue = Self.toolHeader(firstLine.isEmpty ? "Tool activity" : firstLine, font: label.font)
-            label.toolTip = firstLine
-            updateDisclosureAccessibility()
+        if isDisclosure { refreshHeader() }
+    }
+
+    /// A tool call's header: a symbol for its kind, "title · status", and for a subagent how far
+    /// it has got. Thinking reads "Thinking" and its first words.
+    private func refreshHeader() {
+        guard isDisclosure, let text = rawText else { return }
+        // Claude titles its thinking in bold; the header shows the words, not the markers.
+        let firstLine = role == .thought ? Self.firstLine(of: text).trimmingCharacters(in: CharacterSet(charactersIn: "*_ "))
+            : Self.firstLine(of: text)
+        let font = label.font ?? .systemFont(ofSize: 12)
+        let oneLine = NSMutableParagraphStyle()
+        oneLine.lineBreakMode = role == .thought ? .byTruncatingTail : .byTruncatingMiddle
+        let quiet: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.tertiaryLabelColor, .paragraphStyle: oneLine]
+        let header = NSMutableAttributedString(attributedString: Self.symbol(role == .thought ? "brain" : Self.symbolName(for: tool, title: firstLine),
+                                                                          font: font, paragraph: oneLine))
+        if role == .thought {
+            header.append(NSAttributedString(string: "Thinking", attributes: [
+                .font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: oneLine,
+            ]))
+            if !firstLine.isEmpty { header.append(NSAttributedString(string: "  " + firstLine, attributes: quiet)) }
+            headerText = "Thinking: " + firstLine
+        } else {
+            let line = firstLine.isEmpty ? "Tool activity" : firstLine
+            header.append(Self.toolHeader(line, font: font))
+            headerText = line
+            if let progress = subagentProgress, progress.steps > 0 {
+                var extra = " · \(progress.steps) \(progress.steps == 1 ? "step" : "steps")"
+                // While it works, its latest call says what it is doing now.
+                if Self.isRunning(tool?.status), let latest = progress.latest { extra += " — " + latest }
+                header.append(NSAttributedString(string: extra, attributes: quiet))
+                headerText += extra
+            }
         }
+        label.attributedStringValue = header
+        label.toolTip = headerText
+        updateDisclosureAccessibility()
+    }
+
+    /// The text up to its first line break, without walking a long message's whole text.
+    static func firstLine(of text: String) -> String {
+        String(text.prefix { !$0.isNewline })
+    }
+
+    static func isRunning(_ status: String?) -> Bool {
+        ["pending", "in_progress", "running"].contains(status?.lowercased() ?? "")
+    }
+
+    /// The title of a tool row's text, without its status.
+    static func toolTitle(_ text: String) -> String {
+        let firstLine = firstLine(of: text)
+        guard let separator = firstLine.range(of: " · ", options: .backwards) else { return firstLine }
+        return String(firstLine[..<separator.lowerBound])
+    }
+
+    /// A symbol for what kind of thing a call does, from ACP's kinds; a subagent's has its own.
+    static func symbolName(for tool: ToolSummary?, title: String = "") -> String {
+        if tool?.runsSubagent == true { return "person.2" }
+        return switch tool?.kind ?? Self.guessedKind(title) {
+        case "read": "doc.text"
+        case "edit": "pencil"
+        case "delete": "trash"
+        case "move": "arrow.left.arrow.right"
+        case "search": "magnifyingglass"
+        case "execute": "terminal"
+        case "think": "lightbulb"
+        case "fetch": "globe"
+        case "switch_mode": "arrow.triangle.branch"
+        default: "wrench.and.screwdriver"
+        }
+    }
+
+    /// A row saved before calls carried their kind says it by its title's first word, as
+    /// Claude Code's titles do: "Read …", "Edit …", "Search …".
+    static func guessedKind(_ title: String) -> String? {
+        switch title.prefix { !$0.isWhitespace }.lowercased() {
+        case "read", "view", "list": "read"
+        case "edit", "write", "update", "create": "edit"
+        case "delete", "remove": "delete"
+        case "move", "rename": "move"
+        case "search", "grep", "glob", "find": "search"
+        case "run", "bash", "execute", "terminal": "execute"
+        case "fetch", "websearch", "webfetch": "fetch"
+        default: title.hasPrefix("`") ? "execute" : nil
+        }
+    }
+
+    /// A symbol sat on the text's baseline, in the secondary colour, and a space after it.
+    private static func symbol(_ name: String, font: NSFont, paragraph: NSParagraphStyle) -> NSAttributedString {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph]
+        let configuration = NSImage.SymbolConfiguration(pointSize: font.pointSize, weight: .regular)
+            .applying(.init(hierarchicalColor: .secondaryLabelColor))
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(configuration) else {
+            return NSAttributedString()
+        }
+        let glyph = NSTextAttachment()
+        glyph.image = image
+        // Sized to the capitals and centred on them: a symbol at the font's point size stands
+        // taller than the line, and the header then no longer fits in one.
+        let height = ceil(font.capHeight * 1.4)
+        let width = image.size.width * height / max(1, image.size.height)
+        glyph.bounds = NSRect(x: 0, y: (font.capHeight - height) / 2, width: width, height: height)
+        let piece = NSMutableAttributedString(attachment: glyph)
+        piece.append(NSAttributedString(string: " "))
+        piece.addAttributes(attributes, range: NSRange(location: 0, length: piece.length))
+        return piece
     }
 
     /// Each attachment as a symbol and its name, in the secondary colour, on the line above the text.
@@ -812,10 +1060,13 @@ private final class TranscriptMessageView: NSView {
     }
 
     func arrange(width: CGFloat) -> CGFloat {
+        // A nested row's content starts after its guide line.
+        let lead: CGFloat = depth > 0 ? Self.guideWidth : 0
+        let contentWidth = max(1, width - lead)
         let user = role == .user
-        let padding: CGFloat = user ? min(12, width * 0.08) : 0
-        let bubbleWidth = user ? min(width * 0.8, max(1, naturalTextWidth) + padding * 2) : width
-        let x = user ? width - bubbleWidth : 0
+        let padding: CGFloat = user ? min(12, contentWidth * 0.08) : 0
+        let bubbleWidth = user ? min(contentWidth * 0.8, max(1, naturalTextWidth) + padding * 2) : contentWidth
+        let x = lead + (user ? contentWidth - bubbleWidth : 0)
         // Expanded tool text lines up with its header title, not with the disclosure triangle.
         let bodyIndent: CGFloat = isDisclosure ? Self.disclosureIndent : 0
         let textWidth = max(1, bubbleWidth - padding * 2 - bodyIndent)
@@ -842,12 +1093,12 @@ private final class TranscriptMessageView: NSView {
             bubble = newBubble
             needsDisplay = true
         }
-        label.frame = NSRect(x: Self.disclosureIndent, y: 3,
-                             width: max(1, width - Self.disclosureIndent), height: 18)
+        label.frame = NSRect(x: lead + Self.disclosureIndent, y: 3,
+                             width: max(1, contentWidth - Self.disclosureIndent), height: 18)
         // Trailing edge under the bubble text, not under the bubble's rounded edge.
-        let copyX = user ? max(0, width - padding - 40) : bodyIndent
-        copy.frame = NSRect(x: copyX, y: headerHeight + bodyHeight + 2, width: min(40, width), height: 20)
-        disclosure.frame = NSRect(x: 0, y: 2, width: min(20, width), height: 20)
+        let copyX = user ? max(0, width - padding - 40) : lead + bodyIndent
+        copy.frame = NSRect(x: copyX, y: headerHeight + bodyHeight + 2, width: min(40, contentWidth), height: 20)
+        disclosure.frame = NSRect(x: lead, y: 2, width: min(20, contentWidth), height: 20)
         let textFrame = NSRect(x: x + padding + bodyIndent, y: headerHeight + padding,
                                width: textWidth, height: measuredHeight)
         if textView.frame != textFrame { textView.frame = textFrame }
@@ -856,6 +1107,10 @@ private final class TranscriptMessageView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        if depth > 0 {
+            NSColor.separatorColor.setFill()
+            NSRect(x: 3, y: 0, width: 1, height: bounds.height).fill()
+        }
         guard role == .user else { return }
         NSColor.quaternaryLabelColor.setFill()
         // Concentric with the text inside: the corner never cuts closer than the padding.
@@ -893,8 +1148,8 @@ private final class TranscriptMessageView: NSView {
     }
 
     private func updateDisclosureAccessibility() {
-        disclosure.setAccessibilityLabel("\(expanded ? "Collapse" : "Expand") \(label.stringValue)")
-        disclosure.toolTip = label.stringValue
+        disclosure.setAccessibilityLabel("\(expanded ? "Collapse" : "Expand") \(headerText)")
+        disclosure.toolTip = headerText
     }
 
     @objc func toggleDisclosure() {

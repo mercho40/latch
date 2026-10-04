@@ -146,8 +146,8 @@ struct LatchACPProbe {
             let title = tool.title.map { " \($0)" } ?? ""
             let status = tool.status.map { " status=\($0)" } ?? ""
             print("\n[\(phase) \(tool.toolCallID)]\(title)\(status)")
-        case .plan:
-            print("\n[plan updated]")
+        case let .plan(entries):
+            print("\n[plan: \(entries.filter { $0.status == .completed }.count) of \(entries.count) done]")
         case .usage:
             break
         case let .availableCommands(commands):

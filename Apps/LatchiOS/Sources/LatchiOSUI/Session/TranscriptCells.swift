@@ -11,19 +11,42 @@ struct TranscriptCellContext {
     var toggle: (UUID) -> Void
     /// The pictures kept for a prompt's attachments, in order; nil where there is none.
     var thumbnails: (UUID) -> [UIImage?] = { _ in [] }
+    /// Where a row sits among subagents, and what happened under it.
+    var row: (UUID) -> TranscriptRowInfo = { _ in TranscriptRowInfo() }
 }
 
-/// A transcript row: no background, no selection, content running the readable width.
+/// A transcript row: no background, no selection, content running the readable width. A row
+/// under a subagent's is indented a step for each subagent above it, with a thin line down
+/// each step, so a run of them reads as one branch.
 class TranscriptCell: UICollectionViewListCell {
     /// Space above and below the content, so tool calls in a row sit together as one burst.
     var verticalInsets: (top: CGFloat, bottom: CGFloat) { (8, 8) }
     private(set) var topConstraint: NSLayoutConstraint?
     private(set) var bottomConstraint: NSLayoutConstraint?
+    private var leadingConstraint: NSLayoutConstraint?
+    /// One step of nesting under a subagent.
+    static let indentWidth: CGFloat = 16
+    /// How far the content is indented.
+    private(set) var indent: CGFloat = 0
+    private let guides = IndentGuidesView()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundConfiguration = .clear()
         accessibilityRespondsToUserInteraction = true
+        guides.frame = contentView.bounds
+        guides.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentView.addSubview(guides)
+    }
+
+    /// Indents the content for `depth` subagents above it.
+    func setDepth(_ depth: Int) {
+        guides.depth = depth
+        let indent = CGFloat(depth) * Self.indentWidth
+        guard indent != self.indent else { return }
+        self.indent = indent
+        leadingConstraint?.constant = indent
+        setNeedsLayout()
     }
 
     @available(*, unavailable)
@@ -65,18 +88,23 @@ class TranscriptCell: UICollectionViewListCell {
         bottom.priority = .required - 1
         top.isActive = true
         bottom.isActive = true
-        if leading { view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor).isActive = true }
+        if leading {
+            let constraint = view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: indent)
+            constraint.isActive = true
+            leadingConstraint = constraint
+        }
         if trailing { view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor).isActive = true }
         topConstraint = top
         bottomConstraint = bottom
     }
 
-    /// Called with the width the layout gives the cell, before it measures its height.
+    /// Called with the width the layout gives the content, past its indent, before the cell
+    /// measures its height.
     func prepare(width: CGFloat) {}
 
     override func preferredLayoutAttributesFitting(_ layoutAttributes: UICollectionViewLayoutAttributes)
         -> UICollectionViewLayoutAttributes {
-        prepare(width: layoutAttributes.size.width)
+        prepare(width: layoutAttributes.size.width - indent)
         return super.preferredLayoutAttributesFitting(layoutAttributes)
     }
 
@@ -84,6 +112,43 @@ class TranscriptCell: UICollectionViewListCell {
         UIAccessibilityCustomAction(name: name, image: UIImage(systemName: "doc.on.doc")) { _ in
             UIPasteboard.general.string = text()
             return true
+        }
+    }
+}
+
+/// The thin lines down a nested row's indent, one for each subagent above it. Each runs the
+/// row's full height, so the rows of one subagent join into one line.
+final class IndentGuidesView: UIView {
+    var depth = 0 {
+        didSet {
+            guard depth != oldValue else { return }
+            while lines.count < depth {
+                let line = UIView()
+                line.backgroundColor = .separator
+                addSubview(line)
+                lines.append(line)
+            }
+            for (level, line) in lines.enumerated() { line.isHidden = level >= depth }
+            setNeedsLayout()
+        }
+    }
+    private var lines: [UIView] = []
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        for (level, line) in lines.enumerated() {
+            // A point wide, in the middle of its step of the indent.
+            let x = CGFloat(level) * TranscriptCell.indentWidth + TranscriptCell.indentWidth / 2 - 0.5
+            line.frame = CGRect(x: x, y: 0, width: 1, height: bounds.height)
         }
     }
 }
@@ -270,6 +335,7 @@ final class AssistantMessageCell: TranscriptCell {
     func configure(_ message: ChatMessage, context: TranscriptCellContext) {
         text = message.text
         agentTitle = context.agentTitle
+        setDepth(context.row(message.id).depth)
         let blocks = context.cache.blocks(for: message.id, text: message.text, traits: context.renderer.traits)
         markdown.show(blocks, renderer: context.renderer)
         setNeedsLayout()
@@ -326,7 +392,7 @@ final class AssistantMessageCell: TranscriptCell {
     /// would solve every block's constraints again on each streamed frame.
     override func preferredLayoutAttributesFitting(_ layoutAttributes: UICollectionViewLayoutAttributes)
         -> UICollectionViewLayoutAttributes {
-        markdown.prepare(width: layoutAttributes.size.width)
+        markdown.prepare(width: layoutAttributes.size.width - indent)
         let fitted = layoutAttributes.copy() as? UICollectionViewLayoutAttributes ?? layoutAttributes
         let insets = verticalInsets
         fitted.size.height = markdown.preparedHeight + insets.top + insets.bottom
@@ -334,9 +400,17 @@ final class AssistantMessageCell: TranscriptCell {
     }
 }
 
+/// A row that folds away what it holds behind a header: a tool call, a subagent, a thought.
+@MainActor
+protocol DisclosureCell: TranscriptCell {
+    var header: ToolCallHeader { get }
+    var isExpanded: Bool { get }
+}
+
 /// A tool call: one compact row with its symbol, title and status, which expands to the
-/// details in monospace.
-final class ToolCallCell: TranscriptCell {
+/// details in monospace. A subagent's row also counts the steps under it, names the latest
+/// while it runs, and expanding it shows those rows too, under it.
+final class ToolCallCell: TranscriptCell, DisclosureCell {
     /// The header's own 44 point height is the spacing, so a burst of calls sits together.
     override var verticalInsets: (top: CGFloat, bottom: CGFloat) { (0, 2) }
     let header = ToolCallHeader()
@@ -390,10 +464,12 @@ final class ToolCallCell: TranscriptCell {
         text = message.text
         id = message.id
         toggle = context.toggle
-        let tool = ToolCallPresentation(text: message.text)
+        let tool = ToolCallPresentation(message)
         self.tool = tool
+        let row = context.row(message.id)
+        setDepth(row.depth)
         isExpanded = context.isExpanded(message.id)
-        header.show(tool, expanded: isExpanded, hasDetails: !tool.details.isEmpty, traits: context.renderer.traits)
+        header.show(tool, expanded: isExpanded, hasDetails: !tool.details.isEmpty, traits: context.renderer.traits, row: row)
         detailsBox.isHidden = !isExpanded || tool.details.isEmpty
         if !detailsBox.isHidden {
             let font = context.renderer.monospaced(12.5, for: .footnote)
@@ -413,20 +489,108 @@ final class ToolCallCell: TranscriptCell {
     }
 }
 
-/// The tappable row of a tool call. Its whole width is the target. At accessibility text
-/// sizes the status and chevron move under the symbol and title, which wraps, as a list
-/// cell's does. While the tool runs its symbol is faint and its status says so: "Working…"
-/// under the conversation already spins, and one spinner on screen is enough.
+/// What the agent thought on the way, folded to one line: "Thinking" and its first words.
+/// Open, the whole thought follows in the secondary colour as plain text, under the title.
+final class ThoughtCell: TranscriptCell, DisclosureCell {
+    override var verticalInsets: (top: CGFloat, bottom: CGFloat) { (0, 2) }
+    let header = ToolCallHeader()
+    let textView = TranscriptTextView()
+    private let textBox = UIView()
+    private lazy var textLeading = textView.leadingAnchor.constraint(equalTo: textBox.leadingAnchor)
+    private let stack = UIStackView()
+    private(set) var text = ""
+    private var id: UUID?
+    private var toggle: ((UUID) -> Void)?
+    private(set) var isExpanded = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textBox.addSubview(textView)
+        NSLayoutConstraint.activate([
+            textLeading,
+            textView.trailingAnchor.constraint(equalTo: textBox.trailingAnchor),
+            textView.topAnchor.constraint(equalTo: textBox.topAnchor),
+            textView.bottomAnchor.constraint(equalTo: textBox.bottomAnchor, constant: -8),
+        ])
+        stack.axis = .vertical
+        stack.spacing = 0
+        stack.addArrangedSubview(header)
+        stack.addArrangedSubview(textBox)
+        pin(stack)
+        header.addAction(UIAction { [weak self] _ in
+            guard let self, let id else { return }
+            toggle?(id)
+        }, for: .primaryActionTriggered)
+    }
+
+    override var textViews: [TranscriptTextView] { textBox.isHidden ? [] : [textView] }
+
+    func configure(_ message: ChatMessage, context: TranscriptCellContext) {
+        text = message.text
+        id = message.id
+        toggle = context.toggle
+        setDepth(context.row(message.id).depth)
+        isExpanded = context.isExpanded(message.id)
+        let traits = context.renderer.traits
+        header.showThought(ThoughtPresentation.preview(message.text), expanded: isExpanded, traits: traits)
+        textBox.isHidden = !isExpanded
+        if isExpanded {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineSpacing = 2
+            textView.setText(NSAttributedString(string: message.text.trimmingCharacters(in: .whitespacesAndNewlines), attributes: [
+                .font: UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits),
+                .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph,
+            ]))
+        }
+        // Under the title, past the symbol.
+        textLeading.constant = header.titleInset
+        header.accessibilityCustomActions = [Self.copyAction { [weak self] in self?.text ?? "" }]
+        setNeedsLayout()
+    }
+
+    override func prepare(width: CGFloat) {
+        if !textBox.isHidden { textView.prepare(width: width - textLeading.constant) }
+    }
+}
+
+/// The tappable row of a tool call, a subagent or a thought. Its whole width is the target.
+/// At accessibility text sizes the status and chevron move under the symbol and title, which
+/// wraps, as a list cell's does. While the tool runs its symbol is faint and its status says
+/// so: "Working…" under the conversation already spins, and one spinner on screen is enough.
 final class ToolCallHeader: UIControl {
     private let symbol = UIImageView()
     private let symbolColumn = UIView()
     private var symbolWidth: NSLayoutConstraint?
     private let titleLabel = UILabel()
+    /// A second line under the title: the step a subagent is on.
+    private let subtitleLabel = UILabel()
+    private let titleColumn = UIStackView()
     private let statusLabel = UILabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
     private let spacer = UIView()
     private let firstRow = UIStackView()
     private let stack = UIStackView()
+
+    /// What a header shows, and how VoiceOver reads it.
+    private struct Content {
+        var symbol: String
+        var title: String
+        /// After the title, quieter, on the same line.
+        var preview = ""
+        var isCommand = false
+        /// Words, such as a subagent's task, which are cut at their end rather than their middle.
+        var isProse = false
+        var status = ""
+        var statusColor = UIColor.secondaryLabel
+        var subtitle: String?
+        var isRunning = false
+        var canExpand: Bool
+        /// The label VoiceOver reads; a command in it symbol by symbol.
+        var spoken: NSAttributedString
+        var spokenValue: String?
+        var hint: (show: String, hide: String)
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -445,6 +609,13 @@ final class ToolCallHeader: UIControl {
         symbolColumn.setContentHuggingPriority(.required, for: .horizontal)
         titleLabel.textColor = .secondaryLabel
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleLabel.textColor = .secondaryLabel
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        titleColumn.axis = .vertical
+        titleColumn.spacing = 1
+        titleColumn.addArrangedSubview(titleLabel)
+        titleColumn.addArrangedSubview(subtitleLabel)
+        titleColumn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.setContentHuggingPriority(.required, for: .horizontal)
         statusLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         chevron.tintColor = .tertiaryLabel
@@ -474,6 +645,9 @@ final class ToolCallHeader: UIControl {
     private var stacked: Bool?
     private weak var secondRow: UIStackView?
 
+    /// Where the title starts, past the symbol's column.
+    var titleInset: CGFloat { (symbolWidth?.constant ?? 22) + (stacked == true ? 8 : 10) }
+
     /// One row, or at accessibility sizes the symbol and title, which wraps, over the status
     /// with the chevron at the end, so the row reads in the order it is spoken.
     private func arrange(stacked: Bool) {
@@ -482,7 +656,7 @@ final class ToolCallHeader: UIControl {
         (stack.arrangedSubviews + firstRow.arrangedSubviews).forEach { $0.removeFromSuperview() }
         if stacked {
             firstRow.alignment = .firstBaseline
-            [symbolColumn, titleLabel].forEach(firstRow.addArrangedSubview)
+            [symbolColumn, titleColumn].forEach(firstRow.addArrangedSubview)
             let secondRow = UIStackView(arrangedSubviews: [statusLabel, spacer, chevron])
             secondRow.spacing = 8
             secondRow.alignment = .center
@@ -495,27 +669,69 @@ final class ToolCallHeader: UIControl {
             stack.spacing = 4
             [firstRow, secondRow].forEach(stack.addArrangedSubview)
             titleLabel.numberOfLines = 4
+            subtitleLabel.numberOfLines = 3
+            // "4 steps · Running" wraps rather than be cut short.
+            statusLabel.numberOfLines = 2
+            statusLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         } else {
             stack.axis = .horizontal
             stack.alignment = .center
             stack.spacing = 8
-            [symbolColumn, titleLabel, statusLabel, chevron].forEach(stack.addArrangedSubview)
+            [symbolColumn, titleColumn, statusLabel, chevron].forEach(stack.addArrangedSubview)
             stack.setCustomSpacing(10, after: symbolColumn)
             titleLabel.numberOfLines = 1
+            subtitleLabel.numberOfLines = 1
+            statusLabel.numberOfLines = 1
+            statusLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
     }
 
-    func show(_ tool: ToolCallPresentation, expanded: Bool, hasDetails: Bool, traits: UITraitCollection) {
+    /// A tool call. With `row`, a subagent's: how many steps are under it and, while it runs,
+    /// the latest of them.
+    func show(_ tool: ToolCallPresentation, expanded: Bool, hasDetails: Bool, traits: UITraitCollection,
+              row: TranscriptRowInfo = TranscriptRowInfo()) {
+        let steps = row.steps == 0 ? nil : row.steps == 1 ? "1 step" : "\(row.steps) steps"
+        let status = [steps, tool.statusText].compactMap { $0 }.filter { !$0.isEmpty }
+        let live = tool.state == .running || tool.state == .pending
+        let subtitle = (tool.runsSubagent || row.hasChildren) && live ? row.latestStep : nil
+        let spoken = NSMutableAttributedString(string: tool.runsSubagent ? "Subagent: " : "Tool: ")
+        spoken.append(NSAttributedString(string: tool.displayTitle,
+                                          attributes: tool.isCommand ? [.accessibilitySpeechPunctuation: true] : [:]))
+        if !status.isEmpty { spoken.append(NSAttributedString(string: ", " + status.joined(separator: ", "))) }
+        show(Content(symbol: tool.symbolName, title: tool.displayTitle, isCommand: tool.isCommand, isProse: tool.runsSubagent,
+                     status: status.joined(separator: " · "), statusColor: tool.statusColor, subtitle: subtitle,
+                     isRunning: tool.state == .running, canExpand: hasDetails || row.hasChildren, spoken: spoken,
+                     spokenValue: subtitle.map { "Latest step: \($0)" }, hint: Self.hint(details: hasDetails, steps: row.hasChildren)),
+             expanded: expanded, traits: traits)
+    }
+
+    private static func hint(details: Bool, steps: Bool) -> (show: String, hide: String) {
+        switch (details, steps) {
+        case (true, true): ("Shows its details and steps.", "Hides its details and steps.")
+        case (false, true): ("Shows its steps.", "Hides its steps.")
+        default: ("Shows the details.", "Hides the details.")
+        }
+    }
+
+    /// A thought: "Thinking", and the start of it.
+    func showThought(_ preview: String, expanded: Bool, traits: UITraitCollection) {
+        show(Content(symbol: "brain", title: "Thinking", preview: preview, canExpand: true,
+                     spoken: NSAttributedString(string: "Thinking"), spokenValue: preview.isEmpty ? nil : preview,
+                     hint: ("Shows the whole thought.", "Hides the thought.")),
+             expanded: expanded, traits: traits)
+    }
+
+    private func show(_ content: Content, expanded: Bool, traits: UITraitCollection) {
         arrange(stacked: traits.preferredContentSizeCategory.isAccessibilityCategory)
         let font = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
-        symbol.image = UIImage(systemName: tool.symbolName)
+        symbol.image = UIImage(systemName: content.symbol)
         symbol.preferredSymbolConfiguration = .init(font: font)
         // The column grows with the symbol, so a large one never runs into the title.
         let column = UIFontMetrics(forTextStyle: .subheadline).scaledValue(for: 22, compatibleWith: traits).rounded()
         symbolWidth?.constant = column
         secondRow?.directionalLayoutMargins.leading = column + 8
         // A command is set in monospace, as the Mac sets it, without the backticks around it.
-        titleLabel.font = tool.isCommand
+        let titleFont = content.isCommand
             ? UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .monospacedSystemFont(ofSize: 14, weight: .regular),
                                                                     compatibleWith: traits)
             : font
@@ -525,40 +741,59 @@ final class ToolCallHeader: UIControl {
         let paragraph = NSMutableParagraphStyle()
         paragraph.hyphenationFactor = 0
         paragraph.usesDefaultHyphenation = false
-        paragraph.lineBreakMode = stacked == true ? .byWordWrapping : .byTruncatingMiddle
-        let shown = stacked == true ? Self.breakable(tool.displayTitle, command: tool.isCommand) : tool.displayTitle
-        titleLabel.attributedText = NSAttributedString(string: shown, attributes: [
-            .font: titleLabel.font as Any, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph,
+        paragraph.lineBreakMode = stacked == true ? .byWordWrapping
+            : content.preview.isEmpty && !content.isProse ? .byTruncatingMiddle : .byTruncatingTail
+        let shown = stacked == true ? Self.breakable(content.title, command: content.isCommand) : content.title
+        let title = NSMutableAttributedString(string: shown, attributes: [
+            .font: titleFont, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph,
         ])
+        if !content.preview.isEmpty {
+            title.append(NSAttributedString(string: "  " + content.preview, attributes: [
+                .font: titleFont, .foregroundColor: UIColor.tertiaryLabel, .paragraphStyle: paragraph,
+            ]))
+        }
+        titleLabel.font = titleFont
+        titleLabel.attributedText = title
         titleLabel.lineBreakMode = paragraph.lineBreakMode
-        symbol.alpha = tool.state == .running ? 0.5 : 1
+        // The latest step's title, which breaks as a title does.
+        let step = NSMutableParagraphStyle()
+        step.hyphenationFactor = 0
+        step.usesDefaultHyphenation = false
+        step.lineBreakMode = stacked == true ? .byWordWrapping : .byTruncatingMiddle
+        let subtitle = content.subtitle ?? ""
+        subtitleLabel.attributedText = NSAttributedString(
+            string: stacked == true ? Self.breakable(subtitle, command: false) : subtitle,
+            attributes: [.font: UIFont.preferredFont(forTextStyle: .footnote, compatibleWith: traits),
+                         .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: step])
+        subtitleLabel.lineBreakMode = step.lineBreakMode
+        subtitleLabel.isHidden = subtitle.isEmpty
+        symbol.alpha = content.isRunning ? 0.5 : 1
         statusLabel.font = UIFont.preferredFont(forTextStyle: .footnote, compatibleWith: traits)
-        statusLabel.text = tool.statusText
-        statusLabel.textColor = tool.statusColor
-        statusLabel.isHidden = tool.statusText.isEmpty
+        statusLabel.text = content.status
+        statusLabel.textColor = content.statusColor
+        statusLabel.isHidden = content.status.isEmpty
         chevron.preferredSymbolConfiguration = .init(font: UIFont.preferredFont(forTextStyle: .caption1, compatibleWith: traits),
                                                      scale: .medium)
         // Kept in place when there is nothing to show, so every status lines up.
-        chevron.alpha = hasDetails ? 1 : 0
+        chevron.alpha = content.canExpand ? 1 : 0
         chevron.transform = expanded ? CGAffineTransform(rotationAngle: .pi / 2) : .identity
-        isEnabled = hasDetails
-        let label = "Tool: \(tool.displayTitle)" + (tool.statusText.isEmpty ? "" : ", \(tool.statusText)")
-        accessibilityLabel = label
+        isEnabled = content.canExpand
         // A command is read symbol by symbol: `rm -rf ~/` and `rm -rf .` differ by one.
-        if tool.isCommand {
-            let spoken = NSMutableAttributedString(string: "Tool: ")
-            spoken.append(NSAttributedString(string: tool.displayTitle, attributes: [.accessibilitySpeechPunctuation: true]))
-            if !tool.statusText.isEmpty { spoken.append(NSAttributedString(string: ", \(tool.statusText)")) }
-            accessibilityAttributedLabel = spoken
+        var punctuated = false
+        content.spoken.enumerateAttribute(.accessibilitySpeechPunctuation, in: NSRange(location: 0, length: content.spoken.length)) {
+            value, _, _ in if value != nil { punctuated = true }
+        }
+        if punctuated {
+            accessibilityAttributedLabel = content.spoken
         } else {
             accessibilityAttributedLabel = nil
-            accessibilityLabel = label
+            accessibilityLabel = content.spoken.string
         }
-        // Only a call with details is a control; one without is a line of text.
-        accessibilityTraits = hasDetails ? .button : .staticText
-        accessibilityHint = hasDetails ? (expanded ? "Hides the details." : "Shows the details.") : nil
-        accessibilityExpandedStatus = hasDetails ? (expanded ? .expanded : .collapsed) : .unsupported
-        accessibilityValue = nil
+        accessibilityValue = content.spokenValue
+        // Only a row with something to show is a control; one without is a line of text.
+        accessibilityTraits = content.canExpand ? .button : .staticText
+        accessibilityHint = content.canExpand ? (expanded ? content.hint.hide : content.hint.show) : nil
+        accessibilityExpandedStatus = content.canExpand ? (expanded ? .expanded : .collapsed) : .unsupported
     }
 
     override var isHighlighted: Bool {

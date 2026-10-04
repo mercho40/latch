@@ -50,6 +50,13 @@ final class RemoteSessionReattachTests: XCTestCase {
         let restored = try await SessionStore(directory: directory).load()
         XCTAssertEqual(restored.version, 2)
         XCTAssertEqual(restored.sessions.first?.remote, binding)
+        // Thinking is a kind of message older builds cannot read, so it marks the next version.
+        var thinking = remote
+        thinking.messages.append(ChatMessage(role: .thought, text: "hmm"))
+        try await store.save(SavedSessionLibrary(sessions: [thinking], selectedSessionID: nil))
+        let withThinking = try await SessionStore(directory: directory).load()
+        XCTAssertEqual(withThinking.version, 3)
+        XCTAssertEqual(withThinking.sessions.first?.messages.last?.role, .thought)
 
         remote.serverID = nil
         do {
@@ -259,7 +266,8 @@ final class RemoteSessionReattachTests: XCTestCase {
     // MARK: The model alone
 
     /// Replayed history in a transcript that shows it: a user message ends at anything other
-    /// than more of it, or at a chunk naming another message; another session's is not shown.
+    /// than more of it, or at a chunk naming another message; thinking shows as its own rows, as
+    /// it does live, so it parts the words around it; another session's is not shown.
     func testReplayedHistoryIsShownMessageByMessage() async throws {
         let id = ReplayingRemoteClient.runtimeID
         let updates: [ACPSessionNotification] = [
@@ -278,8 +286,8 @@ final class RemoteSessionReattachTests: XCTestCase {
         await model.connect(remote: .custom("agent"), path: "/srv/app")
         XCTAssertEqual(model.phase, .ready)
         try await eventually("the history") { model.appliedSequence == UInt64(updates.count) }
-        XCTAssertEqual(texts(model), ["first", "second part", "third", "fourth", "answer goes on"])
-        XCTAssertEqual(model.messages.map(\.role), [.user, .user, .user, .user, .assistant])
+        XCTAssertEqual(texts(model), ["first", "hmm", "second part", "third", "fourth", "answer", "hmm", " goes on"])
+        XCTAssertEqual(model.messages.map(\.role), [.user, .thought, .user, .user, .user, .assistant, .thought, .assistant])
     }
 
     /// A relaunch whose place in the journal was evicted: losing only history another client's

@@ -1,4 +1,5 @@
 import Foundation
+import LatchACP
 import XCTest
 @testable import LatchSessionKit
 
@@ -108,13 +109,88 @@ final class ChatMessageTests: XCTestCase {
         history.appendAssistant("Reading")
         history.updateTool(toolCallID: "read-1", title: nil, status: "completed")
         XCTAssertEqual(history.messages.count, 2)
-        XCTAssertEqual(history.messages[0], ChatMessage(id: id, role: .tool, text: "Read file · completed"))
+        XCTAssertEqual(history.messages[0], ChatMessage(id: id, role: .tool, text: "Read file · completed",
+                                                        tool: ToolSummary(callID: "read-1", status: "completed")))
         history.updateTool(toolCallID: "read-1", title: "Read another file", status: nil)
         XCTAssertEqual(history.messages[0].text, "Read another file · completed")
         history.appendAssistant("Done")
         XCTAssertNotEqual(history.messages[1].id, history.messages[2].id)
         history.updateTool(toolCallID: "read-2", title: nil, status: nil)
         XCTAssertEqual(history.messages.last?.text, "read-2 · updated")
+    }
+
+    /// A subagent's calls, words and thinking go under the call that runs it; the main agent's
+    /// words never run into a subagent's, and a call whose parent this history never saw stays on top.
+    func testSubagentRowsGoUnderTheCallThatRunsThem() throws {
+        var history = ChatHistory()
+        history.appendAssistant("Looking.")
+        history.updateTool(Self.toolCall("agent-1", kind: "think", meta: ["toolName": .string("Agent"), "subagent": .bool(true)]))
+        let agentRow = try XCTUnwrap(history.messageID(forToolCall: "agent-1"))
+        history.appendThought("Where is it?", parentID: agentRow)
+        history.appendAssistant("Found it ", parentID: agentRow)
+        history.appendAssistant("in Sources.", parentID: agentRow)
+        history.updateTool(Self.toolCall("read-1", kind: "read", meta: ["toolName": .string("Read"), "parentToolUseId": .string("agent-1")]))
+        history.appendAssistant("Done.")
+        history.updateTool(Self.toolCall("lost-1", meta: ["parentToolUseId": .string("never-seen")]))
+
+        let rows = history.messages.map { ($0.role, $0.text, $0.parentID) }
+        XCTAssertEqual(rows.map(\.0), [.assistant, .tool, .thought, .assistant, .tool, .assistant, .tool])
+        XCTAssertEqual(rows.map(\.2), [nil, nil, agentRow, agentRow, agentRow, nil, nil])
+        XCTAssertEqual(rows[3].1, "Found it in Sources.")
+        XCTAssertEqual(history.messages[1].tool, ToolSummary(callID: "agent-1", kind: "think", status: "updated", toolName: "Agent", runsSubagent: true))
+        XCTAssertEqual(history.messages[4].tool?.toolName, "Read")
+        XCTAssertEqual(history.messages[1].text, "agent-1 · updated", "The row's text keeps its form")
+        XCTAssertEqual(history.transcript.components(separatedBy: "\n\n")[2], "Thinking\nWhere is it?")
+    }
+
+    /// A subagent whose own row the bounds took still keeps its words apart from the main
+    /// agent's: they name the missing row, and show at the top.
+    func testASubagentsWordsStayApartAfterItsRowIsEvicted() throws {
+        var history = ChatHistory()
+        history.updateTool(Self.toolCall("agent-1", meta: ["subagent": .bool(true)]))
+        let agentRow = try XCTUnwrap(history.messageID(forToolCall: "agent-1"))
+        for index in 0..<ChatHistory.maximumMessageCount { history.appendAssistant("\(index)", newMessage: true) }
+        XCTAssertFalse(history.messages.contains { $0.id == agentRow }, "Evicted")
+        history.appendAssistant("Main says", newMessage: true)
+        history.appendAssistant(" this", parentID: history.messageID(forToolCall: "agent-1"))
+        history.updateTool(Self.toolCall("read-1", meta: ["parentToolUseId": .string("agent-1")]))
+        let last = history.messages.suffix(3)
+        XCTAssertEqual(last.map(\.text), ["Main says", " this", "read-1 · updated"])
+        XCTAssertEqual(last.map(\.parentID), [nil, agentRow, agentRow])
+    }
+
+    /// A later update that names only what changed keeps the kind and tool name earlier ones gave.
+    func testToolSummaryKeepsWhatEarlierUpdatesSaid() {
+        var history = ChatHistory()
+        history.updateTool(Self.toolCall("bash-1", kind: "execute", status: "pending", meta: ["toolName": .string("Bash")]))
+        history.updateTool(Self.toolCall("bash-1", status: "completed"))
+        XCTAssertEqual(history.messages.first?.tool, ToolSummary(callID: "bash-1", kind: "execute", status: "completed", toolName: "Bash"))
+    }
+
+    /// Saved messages from before summaries and parents decode as before, and new ones encode
+    /// nothing they do not have.
+    func testMessagesWithoutSummariesOrParentsKeepTheirSavedForm() throws {
+        let old = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","role":"tool","text":"Read · completed"}"#
+        let decoded = try JSONDecoder().decode(ChatMessage.self, from: Data(old.utf8))
+        XCTAssertNil(decoded.tool)
+        XCTAssertNil(decoded.parentID)
+        let encoded = try XCTUnwrap(String(data: try JSONEncoder().encode(decoded), encoding: .utf8))
+        XCTAssertFalse(encoded.contains("\"tool\":"), encoded)
+        XCTAssertFalse(encoded.contains("parentID"), encoded)
+        let full = ChatMessage(role: .thought, text: "hmm", tool: ToolSummary(callID: "x", runsSubagent: true), parentID: UUID())
+        XCTAssertEqual(try JSONDecoder().decode(ChatMessage.self, from: try JSONEncoder().encode(full)), full)
+    }
+
+    private static func toolCall(_ id: String, kind: String? = nil, status: String? = nil,
+                                 meta: [String: ACPJSONValue] = [:]) -> ACPToolCallEvent {
+        var update: [String: ACPJSONValue] = ["sessionUpdate": .string("tool_call"), "toolCallId": .string(id)]
+        if let kind { update["kind"] = .string(kind) }
+        if let status { update["status"] = .string(status) }
+        if !meta.isEmpty { update["_meta"] = .object(["claudeCode": .object(meta)]) }
+        guard case let .toolCall(event, _) = ACPSessionNotification(sessionId: "s", update: .object(update)).event else {
+            fatalError("A tool call")
+        }
+        return event
     }
 
     func testCountBoundAndEvictedToolMetadata() throws {

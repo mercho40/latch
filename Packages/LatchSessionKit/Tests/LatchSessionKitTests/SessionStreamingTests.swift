@@ -95,6 +95,53 @@ final class SessionStreamingTests: XCTestCase {
         await model.disconnect()
     }
 
+    /// Thinking shows as its own rows, a subagent's call, words and thinking go under the call
+    /// that runs it, and the plan is the session's, replaced by each update and cleared by an empty one.
+    @MainActor func testThinkingSubagentsAndThePlanReachTheSession() async throws {
+        let started = expectation(description: "Prompt started")
+        let client = StreamingClient(promptStarted: started)
+        let model = await connected(client)
+        let runtimeValue = await client.runtime
+        let runtime = try XCTUnwrap(runtimeValue)
+        let prompt = Task { await model.send("Question") }
+        await fulfillment(of: [started], timeout: 3)
+
+        func chunk(_ kind: String, _ text: String, parent: String? = nil) -> ACPJSONValue {
+            var update: [String: ACPJSONValue] = ["sessionUpdate": .string(kind), "content": .object(["type": .string("text"), "text": .string(text)])]
+            if let parent { update["_meta"] = .object(["claudeCode": .object(["parentToolUseId": .string(parent)])]) }
+            return .object(update)
+        }
+        let plan: ACPJSONValue = .object(["sessionUpdate": .string("plan"), "entries": .array([
+            .object(["content": .string("Look"), "status": .string("in_progress")]),
+            .object(["content": .string("Fix"), "status": .string("pending")]),
+        ])])
+        await client.update(runtime, value: plan, sequence: 12)
+        await client.update(runtime, value: chunk("agent_thought_chunk", "Where to look?"), sequence: 13)
+        await client.update(runtime, value: .object([
+            "sessionUpdate": .string("tool_call"), "toolCallId": .string("agent-1"), "title": .string("Explore"), "kind": .string("think"),
+            "_meta": .object(["claudeCode": .object(["toolName": .string("Agent"), "subagent": .bool(true)])]),
+        ]), sequence: 14)
+        await client.update(runtime, value: chunk("agent_thought_chunk", "Sources first.", parent: "agent-1"), sequence: 15)
+        await client.update(runtime, value: chunk("agent_message_chunk", "It is in Sources.", parent: "agent-1"), sequence: 16)
+        await client.update(runtime, value: chunk("agent_message_chunk", "Found it."), sequence: 17)
+        await drain(client, runtime: runtime)
+
+        XCTAssertEqual(model.plan, [ACPPlanEntry(content: "Look", status: .inProgress), ACPPlanEntry(content: "Fix", status: .pending)])
+        let messages = model.messages
+        XCTAssertEqual(messages.map(\.role), [.user, .thought, .tool, .thought, .assistant, .assistant])
+        XCTAssertEqual(messages.map(\.text), ["Question", "Where to look?", "Explore · updated", "Sources first.", "It is in Sources.", "Found it."])
+        let agentRow = messages[2].id
+        XCTAssertEqual(messages.map(\.parentID), [nil, nil, nil, agentRow, agentRow, nil])
+        XCTAssertEqual(messages[2].tool?.runsSubagent, true)
+
+        await client.update(runtime, value: .object(["sessionUpdate": .string("plan"), "entries": .array([])]), sequence: 18)
+        await drain(client, runtime: runtime)
+        XCTAssertEqual(model.plan, [])
+        await client.completePrompt(updatesThrough: 18)
+        await prompt.value
+        await model.disconnect()
+    }
+
     /// Disconnecting while a local turn's reply waits for its last update lets go of it.
     @MainActor func testDisconnectingLetsGoOfALocalReplyWaitingForItsLastUpdate() async throws {
         let started = expectation(description: "Prompt started")
@@ -370,7 +417,7 @@ private actor StreamingClient: AgentServiceClient {
         ]), sequence: 11)
     }
 
-    private func update(_ runtime: AgentRuntimeID, session: String = session, value: ACPJSONValue, sequence: UInt64) {
+    func update(_ runtime: AgentRuntimeID, session: String = session, value: ACPJSONValue, sequence: UInt64) {
         continuation.yield(.sessionUpdate(runtimeID: runtime, notification: ACPSessionNotification(
             sessionId: session, update: value, localSequence: sequence)))
     }

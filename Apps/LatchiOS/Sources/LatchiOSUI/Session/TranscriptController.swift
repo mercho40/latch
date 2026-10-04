@@ -28,9 +28,10 @@ final class TranscriptCollectionView: UICollectionView {
 }
 
 /// The conversation: one list row per message, keyed by the message's ID, so a streaming
-/// update reconfigures the one row whose text changed and leaves the rest alone. While the
-/// reader is at the end it stays there as the answer grows; once they scroll up it stays put,
-/// and `onScroll` lets the screen offer a way back.
+/// update reconfigures the one row whose text changed and leaves the rest alone. What a
+/// subagent did is shown under its row, in the order `TranscriptOutline` gives, while that row
+/// is expanded. While the reader is at the end it stays there as the answer grows; once they
+/// scroll up it stays put, and `onScroll` lets the screen offer a way back.
 @MainActor
 final class TranscriptController: NSObject, UICollectionViewDelegate {
     /// The widest the conversation's column gets, so lines on an iPad stay a comfortable
@@ -61,8 +62,15 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
     private var dataSource: UICollectionViewDiffableDataSource<Int, Item>!
     private var messages: [UUID: ChatMessage] = [:]
     private var kinds: [UUID: ChatMessageKind] = [:]
+    /// Every message, in the order it arrived.
+    private var arrival: [ChatMessage] = []
+    /// The rows shown, in order: what is under a collapsed row is not among them.
     private(set) var order: [UUID] = []
+    private var rowInfo: [UUID: TranscriptRowInfo] = [:]
     private(set) var expanded: Set<UUID> = []
+    /// A row opened while the transcript followed its end. It follows the end only while that
+    /// keeps the row's top in sight: past that, the reader is reading the row, and it stays put.
+    private var opening: UUID?
     private var isWorking = false
     private var isStopping = false
     /// Set while the transcript moves itself, so only the reader's moves change `isPinned`.
@@ -124,7 +132,8 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
             cache: cache,
             isExpanded: { [weak self] in self?.expanded.contains($0) ?? false },
             toggle: { [weak self] in self?.toggle($0) },
-            thumbnails: { [weak self] in self?.sentImages?.images(for: $0) ?? [] })
+            thumbnails: { [weak self] in self?.sentImages?.images(for: $0) ?? [] },
+            row: { [weak self] in self?.rowInfo[$0] ?? TranscriptRowInfo() })
     }
 
     private func configureDataSource() {
@@ -137,6 +146,10 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
             cell.configure(message, context: context)
         }
         let tool = UICollectionView.CellRegistration<ToolCallCell, UUID> { [weak self] cell, _, id in
+            guard let self, let message = messages[id] else { return }
+            cell.configure(message, context: context)
+        }
+        let thought = UICollectionView.CellRegistration<ThoughtCell, UUID> { [weak self] cell, _, id in
             guard let self, let message = messages[id] else { return }
             cell.configure(message, context: context)
         }
@@ -155,6 +168,7 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
             case .user: return view.dequeueConfiguredReusableCell(using: user, for: path, item: id)
             case .assistant: return view.dequeueConfiguredReusableCell(using: assistant, for: path, item: id)
             case .tool: return view.dequeueConfiguredReusableCell(using: tool, for: path, item: id)
+            case .thought: return view.dequeueConfiguredReusableCell(using: thought, for: path, item: id)
             case .notice: return view.dequeueConfiguredReusableCell(using: notice, for: path, item: id)
             }
         }
@@ -164,17 +178,19 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
         switch message.role {
         case .user: .user
         case .tool: .tool
+        case .thought: .thought
         case .assistant: ChatMessageKind.isNotice(message.text) ? .notice : .assistant
         }
     }
 
     /// Takes the model's messages as they are now. Rows whose message changed are
-    /// reconfigured in place; a row whose kind changed is rebuilt.
+    /// reconfigured in place; a row whose kind changed is rebuilt. A subagent's row is
+    /// reconfigured too when what is under it changes, since it counts and names its steps.
     func update(messages newMessages: [ChatMessage], isWorking working: Bool, isStopping stopping: Bool = false) {
         var seen = Set<UUID>()
         let retained = newMessages.filter { seen.insert($0.id).inserted }
-        var changed: [Item] = []
-        var rebuilt: [Item] = []
+        var changed: [UUID] = []
+        var rebuilt: [UUID] = []
         var nextMessages: [UUID: ChatMessage] = [:]
         var nextKinds: [UUID: ChatMessageKind] = [:]
         for message in retained {
@@ -182,30 +198,49 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
             nextMessages[message.id] = message
             nextKinds[message.id] = kind
             guard let old = messages[message.id] else { continue }
-            if kinds[message.id] != kind { rebuilt.append(.message(message.id)) }
-            else if old != message { changed.append(.message(message.id)) }
+            if kinds[message.id] != kind { rebuilt.append(message.id) }
+            else if old != message { changed.append(message.id) }
         }
-        let nextOrder = retained.map(\.id)
         let stoppingChanged = working && stopping != isStopping
         isStopping = stopping
-        guard nextOrder != order || working != isWorking || stoppingChanged || !changed.isEmpty || !rebuilt.isEmpty else { return }
-        let inserted = nextOrder.count > order.count
+        guard retained.map(\.id) != arrival.map(\.id) || working != isWorking || stoppingChanged || !changed.isEmpty
+            || !rebuilt.isEmpty else { return }
         messages = nextMessages
         kinds = nextKinds
-        order = nextOrder
+        arrival = retained
         isWorking = working
         expanded.formIntersection(seen)
         cache.keep(seen)
+        apply(changed: changed, rebuilt: rebuilt, stoppingChanged: stoppingChanged, animate: .insertions)
+    }
+
+    private enum Animation { case insertions, always }
+
+    /// Shows the rows `TranscriptOutline` gives for the messages and what is expanded.
+    private func apply(changed: [UUID], rebuilt: [UUID] = [], stoppingChanged: Bool = false, animate: Animation) {
+        let outline = TranscriptOutline(arrival, expanded: expanded)
+        // A row whose place or summary changed is drawn again, though its message did not.
+        let moved = outline.rows.filter { id in rowInfo[id].map { $0 != outline.info[id] } ?? false }
+        let inserted = Set(outline.rows).subtracting(order).isEmpty == false
+        order = outline.rows
+        rowInfo = outline.info
+        if let id = opening, outline.info[id] == nil { opening = nil }
         var snapshot = NSDiffableDataSourceSnapshot<Int, Item>()
         snapshot.appendSections([0])
-        snapshot.appendItems(nextOrder.map(Item.message))
-        if working { snapshot.appendItems([.working]) }
+        snapshot.appendItems(order.map(Item.message))
+        if isWorking { snapshot.appendItems([.working]) }
         let existing = Set(dataSource.snapshot().itemIdentifiers)
-        snapshot.reconfigureItems(changed.filter(existing.contains) + (stoppingChanged && existing.contains(.working) ? [.working] : []))
-        snapshot.reloadItems(rebuilt.filter(existing.contains))
-        // New rows fade in; a streaming update never animates.
-        let animate = inserted && !UIAccessibility.isReduceMotionEnabled && collectionView.window != nil && !existing.isEmpty
-        dataSource.apply(snapshot, animatingDifferences: animate) { [weak self] in
+        // Only rows in both snapshots can be drawn again: one that has just gone under a folded
+        // subagent is in the old one alone, and naming it to the new snapshot is fatal.
+        let kept = existing.intersection(snapshot.itemIdentifiers)
+        let rebuiltItems = Set(rebuilt.map(Item.message)).intersection(kept)
+        let reconfigured = Set((changed + moved).map(Item.message)).intersection(kept).subtracting(rebuiltItems)
+        snapshot.reconfigureItems(Array(reconfigured) + (stoppingChanged && existing.contains(.working) ? [.working] : []))
+        snapshot.reloadItems(Array(rebuiltItems))
+        // New rows fade in, and rows open and close; a streaming update never animates.
+        let animated = (animate == .always || inserted) && !UIAccessibility.isReduceMotionEnabled
+            && collectionView.window != nil && !existing.isEmpty
+        dataSource.apply(snapshot, animatingDifferences: animated) { [weak self] in
             self?.keepPinned()
             self?.onScroll?()
         }
@@ -217,11 +252,12 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
         dataSource.apply(snapshot, animatingDifferences: false)
     }
 
-    private func toggle(_ id: UUID) {
-        if expanded.remove(id) == nil { expanded.insert(id) }
-        var snapshot = dataSource.snapshot()
-        snapshot.reconfigureItems([.message(id)])
-        dataSource.apply(snapshot, animatingDifferences: !UIAccessibility.isReduceMotionEnabled)
+    /// Opens or closes a row: a tool call's details, a thought, or a subagent with its steps.
+    func toggle(_ id: UUID) {
+        let opens = expanded.insert(id).inserted
+        if !opens { expanded.remove(id) }
+        if opens, isPinned { opening = id } else if opening == id { opening = nil }
+        apply(changed: [id], animate: .always)
     }
 
     // MARK: Following the end
@@ -240,6 +276,12 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
     private func keepPinned() {
         guard isPinned, !collectionView.isTracking, !collectionView.isDecelerating, !readerIsElsewhere else { return }
         let target = bottomOffset
+        if let id = opening, let path = dataSource.indexPath(for: .message(id)),
+           let row = collectionView.layoutAttributesForItem(at: path)?.frame,
+           target + collectionView.adjustedContentInset.top > row.minY {
+            // Following the end would scroll away the row the reader opened to read.
+            return setPinned(false)
+        }
         if abs(collectionView.contentOffset.y - target) > 0.5 {
             autoScroll { collectionView.setContentOffset(CGPoint(x: collectionView.contentOffset.x, y: target), animated: false) }
         }
@@ -267,6 +309,7 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
     }
 
     func scrollToBottom(animated: Bool) {
+        opening = nil
         setPinned(true)
         collectionView.layoutIfNeeded()
         autoScroll {
@@ -277,6 +320,7 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
     private func setPinned(_ pinned: Bool) {
         guard pinned != isPinned else { return }
         isPinned = pinned
+        opening = nil
         onScroll?()
     }
 
@@ -365,7 +409,7 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
                 + (codeItems.isEmpty ? [] : [UIMenu(options: .displayInline, children: codeItems)])
                 + (linkItems.isEmpty ? [] : [UIMenu(options: .displayInline, children: linkItems)]))
         case .tool:
-            let tool = ToolCallPresentation(text: message.text)
+            let tool = ToolCallPresentation(message)
             var items: [UIMenuElement] = [
                 UIAction(title: tool.isCommand ? "Copy Command" : "Copy Title", image: copy) { [weak self] _ in
                     self?.pasteboard.string = tool.displayTitle
@@ -376,6 +420,10 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
                     self?.pasteboard.string = ToolCallPresentation.displayedDetails(tool.details)
                 })
             }
+            return UIMenu(children: items)
+        case .thought:
+            var items: [UIMenuElement] = [UIAction(title: "Copy", image: copy) { [weak self] _ in self?.pasteboard.string = message.text }]
+            if expanded.contains(message.id) { items.append(select) }
             return UIMenu(children: items)
         case .notice:
             return nil
@@ -407,8 +455,8 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
             view = reply.markdown
             parameters.backgroundColor = .systemBackground
             parameters.visiblePath = UIBezierPath(roundedRect: view.bounds.insetBy(dx: -10, dy: -8), cornerRadius: 12)
-        case let tool as ToolCallCell:
-            view = tool.header
+        case let row as DisclosureCell:
+            view = row.header
             parameters.backgroundColor = .systemBackground
             parameters.visiblePath = UIBezierPath(roundedRect: view.bounds.insetBy(dx: -8, dy: 0), cornerRadius: 12)
         default:
@@ -450,12 +498,14 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
 
     // MARK: VoiceOver rotors
 
-    /// Turn by turn through a long conversation: the user's messages, the agent's replies, its
-    /// tool calls, and replies with code.
+    /// Turn by turn through a long conversation: the user's messages, the agent's replies, what
+    /// it thought, its tool calls, and replies with code. Rows under a collapsed subagent are
+    /// passed over, as they are on screen.
     private func makeRotors() -> [UIAccessibilityCustomRotor] {
         let rotors: [(String, (ChatMessage, ChatMessageKind) -> Bool)] = [
             ("Your Messages", { _, kind in kind == .user }),
             ("Replies", { _, kind in kind == .assistant }),
+            ("Thinking", { _, kind in kind == .thought }),
             ("Tool Calls", { _, kind in kind == .tool }),
             ("Code", { message, kind in kind == .assistant && message.text.contains("```") }),
         ]
@@ -490,7 +540,7 @@ final class TranscriptController: NSObject, UICollectionViewDelegate {
                 collectionView.layoutIfNeeded()
             }
             guard let cell = collectionView.cellForItem(at: path) else { return nil }
-            let target: NSObject = (cell as? ToolCallCell)?.header ?? cell
+            let target: NSObject = (cell as? DisclosureCell)?.header ?? cell
             return UIAccessibilityCustomRotorItemResult(targetElement: target, targetRange: nil)
         }
         return nil

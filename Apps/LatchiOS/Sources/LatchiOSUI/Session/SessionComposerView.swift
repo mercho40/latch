@@ -1,8 +1,10 @@
+import LatchACP
 import UIKit
 
 /// The field at the bottom of a session: a growing text view with the photos to send above
 /// it, an Add Photos button before it, and one button after it that sends, or stops the turn
-/// that is running. It holds the draft; the session decides what each state allows.
+/// that is running. Over it all, while the agent has one, the agent's plan. It holds the
+/// draft; the session decides what each state allows.
 final class SessionComposerView: UIView, UITextViewDelegate {
     enum Action: Equatable {
         case send(enabled: Bool)
@@ -16,6 +18,7 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     let placeholderLabel = UILabel()
     let attachButton = UIButton(type: .system)
     let actionButton = UIButton(type: .system)
+    let planView = SessionPlanView()
     private let field = UIView()
     private let fieldBackground: UIView
     private let strip = UIScrollView()
@@ -145,10 +148,11 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             view.translatesAutoresizingMaskIntoConstraints = false
             field.addSubview(view)
         }
-        for view in [attachButton, field] {
+        for view in [planView, attachButton, field] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
+        planView.onLayoutChange = { [weak self] in self?.planChanged() }
         let stripHeight = strip.heightAnchor.constraint(equalToConstant: 72)
         let collapsedStrip = strip.heightAnchor.constraint(equalToConstant: 0)
         self.stripHeight = stripHeight
@@ -161,8 +165,11 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             attachButton.heightAnchor.constraint(equalToConstant: 44),
             field.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 8),
             field.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
-            field.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor),
             field.bottomAnchor.constraint(equalTo: layoutMarginsGuide.bottomAnchor),
+            fieldUnderMargin,
+            planView.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
+            planView.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
+            planView.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor),
             fieldBackground.leadingAnchor.constraint(equalTo: field.leadingAnchor),
             fieldBackground.trailingAnchor.constraint(equalTo: field.trailingAnchor),
             fieldBackground.topAnchor.constraint(equalTo: field.topAnchor),
@@ -202,6 +209,8 @@ final class SessionComposerView: UIView, UITextViewDelegate {
 
     private var stripHeight: NSLayoutConstraint?
     private var collapsedStrip: NSLayoutConstraint?
+    private lazy var fieldUnderMargin = field.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor)
+    private lazy var fieldUnderPlan = field.topAnchor.constraint(equalTo: planView.bottomAnchor, constant: 8)
     private lazy var placeholderBaseline = placeholderLabel.firstBaselineAnchor.constraint(equalTo: textView.topAnchor)
 
     // MARK: State
@@ -270,6 +279,24 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         actionButton.accessibilityLabel = title
         actionButton.largeContentTitle = title
         actionButton.largeContentImage = configuration.image
+    }
+
+    /// The agent's plan, as it last listed it; empty when it has none.
+    func setPlan(_ plan: [ACPPlanEntry]) {
+        planView.show(plan)
+    }
+
+    private func planChanged() {
+        let showing = !planView.plan.isEmpty
+        // The one in use goes before the other comes, so the two never conflict.
+        if showing, !fieldUnderPlan.isActive {
+            fieldUnderMargin.isActive = false
+            fieldUnderPlan.isActive = true
+        } else if !showing, fieldUnderPlan.isActive {
+            fieldUnderPlan.isActive = false
+            fieldUnderMargin.isActive = true
+        }
+        onHeightChange?()
     }
 
     func setAttachments(_ attachments: [ComposerImage]) {

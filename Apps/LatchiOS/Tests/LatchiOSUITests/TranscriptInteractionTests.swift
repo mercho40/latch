@@ -14,11 +14,12 @@ final class TranscriptInteractionTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func shown(_ messages: [ChatMessage] = SampleConversation.messages) async -> SessionScreenFixture {
+    /// `rows` when not every message is shown, as with collapsed subagents.
+    private func shown(_ messages: [ChatMessage] = SampleConversation.messages, rows: Int? = nil) async -> SessionScreenFixture {
         let fixture = SessionScreenFixture()
         windows.append(Snapshot.host(fixture.screen, appearance: .light))
         await fixture.resume(messages)
-        await waitUntil("the transcript") { fixture.transcript.order.count == messages.count }
+        await waitUntil("the transcript") { fixture.transcript.order.count == rows ?? messages.count }
         return fixture
     }
 
@@ -151,7 +152,7 @@ final class TranscriptInteractionTests: XCTestCase {
     func testTheTranscriptHasRotorsForEachKindOfMessage() async {
         let fixture = await shown()
         XCTAssertEqual(fixture.transcript.collectionView.accessibilityCustomRotors?.map(\.name),
-                       ["Your Messages", "Replies", "Tool Calls", "Code"])
+                       ["Your Messages", "Replies", "Thinking", "Tool Calls", "Code"])
     }
 
     func testCodeIsSpokenSymbolBySymbolAndTablesByColumn() async throws {
@@ -199,6 +200,167 @@ final class TranscriptInteractionTests: XCTestCase {
         let working = try XCTUnwrap(collection.visibleCells.compactMap { $0 as? WorkingCell }.first)
         XCTAssertEqual(working.accessibilityLabel, "Stopping")
         fixture.client.endTurn()
+    }
+
+    // MARK: Thinking and subagents
+
+    /// A thought is one line, "Thinking" and its first words, until it is opened to the whole
+    /// thought in the secondary colour, which can then be selected as well as copied.
+    func testAThoughtFoldsToALineAndOpensToTheWholeThought() async throws {
+        let fixture = await shown(SampleSubagents.messages, rows: 4)
+        let transcript = fixture.transcript
+        let pasteboard = UIPasteboard.withUniqueName()
+        defer { UIPasteboard.remove(withName: pasteboard.name) }
+        transcript.pasteboard = pasteboard
+        let thought = SampleSubagents.thought
+        var cell = try XCTUnwrap(fixture.cell(for: thought.id, as: ThoughtCell.self))
+        XCTAssertFalse(cell.isExpanded)
+        XCTAssertEqual(cell.header.accessibilityLabel, "Thinking")
+        XCTAssertTrue(cell.header.accessibilityValue?.hasPrefix("Splitting the work The failure is either") ?? false,
+                      cell.header.accessibilityValue ?? "")
+        XCTAssertTrue(cell.textViews.isEmpty, "Folded")
+        XCTAssertEqual(titles(transcript.menu(for: thought)), ["Copy"])
+
+        cell.header.sendActions(for: .primaryActionTriggered)
+        await waitUntil("the thought to open") { fixture.cell(for: thought.id, as: ThoughtCell.self)?.isExpanded == true }
+        cell = try XCTUnwrap(fixture.cell(for: thought.id, as: ThoughtCell.self))
+        XCTAssertEqual(cell.textView.attributedText.string, thought.text)
+        XCTAssertEqual(cell.textView.attributedText.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor,
+                       .secondaryLabel)
+        XCTAssertEqual(cell.header.accessibilityExpandedStatus, .expanded)
+        let menu = transcript.menu(for: thought)
+        XCTAssertEqual(titles(menu), ["Copy", "Select Text"])
+        perform("Copy", in: menu)
+        XCTAssertEqual(pasteboard.string, thought.text)
+    }
+
+    /// A subagent's row stands for everything it did: collapsed, it counts its steps and names
+    /// the latest while it runs; open, its steps, words and thinking follow it, one step in,
+    /// before whatever came after it at the top.
+    func testASubagentsStepsShowUnderItsRow() async throws {
+        let fixture = SessionScreenFixture()
+        windows.append(Snapshot.host(fixture.screen, appearance: .light))
+        await fixture.connect()
+        fixture.type("Find the flaky test")
+        fixture.screen.send()
+        await waitUntil("the turn") { fixture.client.hasOpenTurn }
+        let client = fixture.client
+        client.thought("Two places to look.")
+        client.tool("a", title: "Read the server", status: "in_progress", kind: "think", toolName: "Agent", subagent: true)
+        client.tool("b", title: "Read the client", status: "in_progress", kind: "think", toolName: "Agent", subagent: true)
+        client.tool("a1", title: "Read Server.swift", status: "completed", kind: "read", parent: "a")
+        client.tool("b1", title: "Search for backoff", status: "in_progress", kind: "search", parent: "b")
+        client.chunk("The server binds a new port.", parent: "a")
+        client.tool("a2", title: "`swift test`", status: "in_progress", kind: "execute", parent: "a")
+        await waitUntil("every row") { fixture.model.messages.count == 8 }
+        let ids = fixture.model.messages.map(\.id)
+        let (prompt, thought, a, b, a1, b1, words, a2) = (ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7])
+        let transcript = fixture.transcript
+        await waitUntil("the subagents alone") { transcript.order == [prompt, thought, a, b] }
+        let header = try XCTUnwrap(fixture.cell(for: a, as: ToolCallCell.self)?.header)
+        XCTAssertEqual(header.accessibilityLabel, "Subagent: Read the server, 2 steps, Running")
+        XCTAssertEqual(header.accessibilityValue, "Latest step: swift test")
+        XCTAssertEqual(fixture.cell(for: b, as: ToolCallCell.self)?.header.accessibilityLabel,
+                       "Subagent: Read the client, 1 step, Running")
+
+        header.sendActions(for: .primaryActionTriggered)
+        await waitUntil("its steps") { transcript.order == [prompt, thought, a, a1, words, a2, b] }
+        XCTAssertEqual(fixture.cell(for: a1, as: ToolCallCell.self)?.indent, TranscriptCell.indentWidth)
+        XCTAssertEqual(fixture.cell(for: words, as: AssistantMessageCell.self)?.indent, TranscriptCell.indentWidth)
+        XCTAssertEqual(fixture.cell(for: b, as: ToolCallCell.self)?.indent, 0)
+        XCTAssertFalse(transcript.order.contains(b1), "The other subagent stays collapsed")
+
+        client.tool("a2", title: "`swift test`", status: "completed", kind: "execute", parent: "a")
+        client.tool("a", title: "Read the server", status: "completed", kind: "think", toolName: "Agent", subagent: true)
+        await waitUntil("the subagent to finish") {
+            fixture.cell(for: a, as: ToolCallCell.self)?.header.accessibilityLabel == "Subagent: Read the server, 2 steps, Done"
+        }
+        XCTAssertNil(fixture.cell(for: a, as: ToolCallCell.self)?.header.accessibilityValue, "No latest step once done")
+
+        fixture.cell(for: a, as: ToolCallCell.self)?.header.sendActions(for: .primaryActionTriggered)
+        await waitUntil("its steps folded away") { transcript.order == [prompt, thought, a, b] }
+        client.endTurn()
+    }
+
+    /// A call shown at the top that a later update places under a folded subagent goes under
+    /// it, rather than being drawn again where it no longer is.
+    func testACallThatLaterNamesAFoldedSubagentGoesUnderIt() async throws {
+        let fixture = SessionScreenFixture()
+        windows.append(Snapshot.host(fixture.screen, appearance: .light))
+        await fixture.connect()
+        fixture.type("Find it")
+        fixture.screen.send()
+        await waitUntil("the turn") { fixture.client.hasOpenTurn }
+        let client = fixture.client
+        client.tool("a", title: "Explore", status: "in_progress", kind: "think", toolName: "Agent", subagent: true)
+        client.tool("a1", title: "Read Server.swift", status: "in_progress", kind: "read")
+        await waitUntil("both at the top") { fixture.transcript.order.count == 3 }
+        client.tool("a1", title: "Read Server.swift", status: "completed", kind: "read", parent: "a")
+        await waitUntil("the call under the folded subagent") { fixture.transcript.order.count == 2 }
+        client.endTurn()
+    }
+
+    /// Opening a subagent with a long run of steps while the transcript follows its end keeps
+    /// the subagent's row in sight, rather than following the end past it.
+    func testOpeningALongSubagentAtTheEndKeepsItInView() async throws {
+        let agent = ChatMessage(role: .tool, text: "Explore the code · completed",
+                                tool: ToolSummary(callID: "agent", status: "completed", runsSubagent: true))
+        let history = (0..<8).flatMap { index in
+            [ChatMessage(role: .user, text: "Question \(index)"),
+             ChatMessage(role: .assistant, text: String(repeating: "A line of the answer that wraps. ", count: 6))]
+        } + [agent] + (0..<30).map { index in
+            ChatMessage(role: .tool, text: "Read File\(index).swift · completed",
+                        tool: ToolSummary(callID: "read\(index)", kind: "read", status: "completed"), parentID: agent.id)
+        }
+        let fixture = await shown(history, rows: 17)
+        let transcript = fixture.transcript
+        let collection = transcript.collectionView
+        await waitUntil("the end") {
+            collection.layoutIfNeeded()
+            return abs(transcript.distanceFromBottom) < 1
+        }
+        XCTAssertTrue(transcript.isPinned)
+        transcript.toggle(agent.id)
+        await waitUntil("its steps") { transcript.order.count == 47 }
+        try await Task.sleep(for: .milliseconds(400))
+        collection.layoutIfNeeded()
+        XCTAssertFalse(transcript.isPinned, "The reader is reading what they opened")
+        let row = try XCTUnwrap(transcript.order.firstIndex(of: agent.id))
+        let frame = try XCTUnwrap(collection.layoutAttributesForItem(at: IndexPath(item: row, section: 0))?.frame)
+        XCTAssertGreaterThanOrEqual(frame.minY, collection.contentOffset.y + collection.adjustedContentInset.top - 1)
+        XCTAssertLessThan(frame.maxY, collection.contentOffset.y + collection.bounds.height - collection.adjustedContentInset.bottom)
+        await waitUntil("Jump to Latest") { !fixture.screen.jumpButton.isHidden }
+    }
+
+    // MARK: Plan
+
+    /// The agent's plan sits over the composer while it has one, and the conversation makes
+    /// room for it.
+    func testThePlanSitsOverTheComposerWhileThereIsOne() async throws {
+        let fixture = SessionScreenFixture()
+        windows.append(Snapshot.host(fixture.screen, appearance: .light))
+        await fixture.connect()
+        let plan = fixture.screen.composer.planView
+        XCTAssertTrue(plan.isHidden)
+        fixture.screen.view.layoutIfNeeded()
+        let inset = fixture.transcript.collectionView.contentInset.bottom
+        fixture.client.plan(SampleSubagents.plan)
+        await waitUntil("the plan") { !plan.isHidden }
+        XCTAssertEqual(plan.header.accessibilityLabel, "Plan, 1 of 4 done, now: Read the client's reconnect backoff")
+        XCTAssertEqual(plan.header.accessibilityExpandedStatus, .collapsed)
+        fixture.screen.view.layoutIfNeeded()
+        XCTAssertGreaterThan(fixture.transcript.collectionView.contentInset.bottom, inset + 30)
+        let field = fixture.screen.composer.textView.convert(fixture.screen.composer.textView.bounds, to: fixture.screen.composer)
+        XCTAssertLessThanOrEqual(plan.frame.maxY, field.minY, "Over the field")
+
+        plan.header.sendActions(for: .primaryActionTriggered)
+        XCTAssertTrue(plan.isExpanded)
+        XCTAssertEqual(plan.header.accessibilityExpandedStatus, .expanded)
+        fixture.screen.view.layoutIfNeeded()
+        XCTAssertLessThanOrEqual(plan.frame.height, fixture.screen.view.bounds.height / 2, "The conversation keeps most of the screen")
+
+        fixture.client.plan([])
+        await waitUntil("the plan gone") { plan.isHidden }
     }
 
     // MARK: Photos

@@ -425,6 +425,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     var canStop: Bool { model.phase == .prompting && !model.cancellationRequested }
 
     private func refreshComposer() {
+        composer.setPlan(model.plan)
         composer.isEditable = !isReadOnly
         // Nothing else on the screen names the agent, so the placeholder does at every size.
         composer.placeholder = isReadOnly ? "This conversation is read-only" : "Ask \(context.agentTitle)…"

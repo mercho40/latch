@@ -59,6 +59,33 @@ final class SessionSnapshotTests: XCTestCase {
         }
     }
 
+    /// A turn that thought, then ran two subagents side by side, with its plan over the
+    /// composer: everything folded, then one subagent and its thought open, then the plan open.
+    func testSubagentsThinkingAndPlan() async throws {
+        for (name, open) in [("subagents", false), ("subagent-expanded", true)] {
+            try await render(name, appearances: Snapshot.Appearance.all + (open ? [.largest] : [])) { fixture in
+                await fixture.resume(SampleSubagents.messages)
+                fixture.client.plan(SampleSubagents.plan)
+                await waitUntil { fixture.transcript.order.count == 4 && fixture.model.plan.count == SampleSubagents.plan.count }
+                if open {
+                    fixture.transcript.toggle(SampleSubagents.server.id)
+                    fixture.transcript.toggle(SampleSubagents.serverThought.id)
+                    await waitUntil { fixture.transcript.order.count == 8 }
+                }
+                try await Task.sleep(for: .milliseconds(300))
+                fixture.transcript.scrollToBottom(animated: false)
+            }
+        }
+        try await render("plan-expanded") { fixture in
+            await fixture.resume(SampleSubagents.messages)
+            fixture.client.plan(SampleSubagents.plan)
+            await waitUntil { fixture.model.plan.count == SampleSubagents.plan.count }
+            fixture.screen.composer.planView.toggle()
+            try await Task.sleep(for: .milliseconds(300))
+            fixture.transcript.scrollToBottom(animated: false)
+        }
+    }
+
     func testStreamingTurn() async throws {
         try await render("streaming", appearances: Snapshot.Appearance.all + [.largest]) { fixture in
             await fixture.resume([SampleConversation.prompt, SampleConversation.read])

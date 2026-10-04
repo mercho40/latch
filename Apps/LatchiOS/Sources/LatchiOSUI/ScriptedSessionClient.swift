@@ -134,19 +134,52 @@ final class ScriptedSessionClient: AgentServiceClient {
             sessionId: Self.sessionID, update: .object(fields))), sequence: nil))
     }
 
-    func chunk(_ text: String) {
-        update(["sessionUpdate": .string("agent_message_chunk"),
-                "content": .object(["type": .string("text"), "text": .string(text)])])
+    /// What Claude Code adds to an update: the subagent's call it belongs to, the tool's own
+    /// name, and whether the call runs a subagent.
+    private static func meta(parent: String?, toolName: String? = nil, subagent: Bool = false) -> ACPJSONValue? {
+        var fields: [String: ACPJSONValue] = [:]
+        if let parent { fields["parentToolUseId"] = .string(parent) }
+        if let toolName { fields["toolName"] = .string(toolName) }
+        if subagent { fields["subagent"] = .bool(true) }
+        return fields.isEmpty ? nil : .object(["claudeCode": .object(fields)])
     }
 
-    func tool(_ id: String, title: String, status: String, content: String? = nil) {
+    /// The agent's words, or with `parent` a subagent's, under that call.
+    func chunk(_ text: String, parent: String? = nil) {
+        var fields: [String: ACPJSONValue] = ["sessionUpdate": .string("agent_message_chunk"),
+                                              "content": .object(["type": .string("text"), "text": .string(text)])]
+        fields["_meta"] = Self.meta(parent: parent)
+        update(fields)
+    }
+
+    /// What the agent, or with `parent` a subagent, thought.
+    func thought(_ text: String, parent: String? = nil) {
+        var fields: [String: ACPJSONValue] = ["sessionUpdate": .string("agent_thought_chunk"),
+                                              "content": .object(["type": .string("text"), "text": .string(text)])]
+        fields["_meta"] = Self.meta(parent: parent)
+        update(fields)
+    }
+
+    /// A tool call, or an update to one. With `subagent` the call runs a subagent; with
+    /// `parent` a subagent made it.
+    func tool(_ id: String, title: String, status: String, content: String? = nil, kind: String? = nil,
+              toolName: String? = nil, subagent: Bool = false, parent: String? = nil) {
         var fields: [String: ACPJSONValue] = ["sessionUpdate": .string("tool_call"), "toolCallId": .string(id),
                                               "title": .string(title), "status": .string(status)]
         if let content {
             fields["content"] = .array([.object(["type": .string("content"),
                                                  "content": .object(["type": .string("text"), "text": .string(content)])])])
         }
+        if let kind { fields["kind"] = .string(kind) }
+        fields["_meta"] = Self.meta(parent: parent, toolName: toolName, subagent: subagent)
         update(fields)
+    }
+
+    /// The agent's plan, whole: each step's words and `pending`, `in_progress` or `completed`.
+    func plan(_ steps: [(String, String)]) {
+        update(["sessionUpdate": .string("plan"),
+                "entries": .array(steps.map { .object(["content": .string($0.0), "status": .string($0.1),
+                                                        "priority": .string("medium")]) })])
     }
 
     func availableCommands(_ commands: [(String, String)]) {
@@ -263,5 +296,63 @@ enum SampleConversation {
                                       attachments: [ChatAttachment(kind: .image, name: "ci-log.jpg", path: nil)])
 
     static let messages = [prompt, read, run, answer, followUp]
+}
+
+/// A turn that thought first, then ran two subagents side by side, whose rows arrived
+/// interleaved: one has finished, the other is still reading. With the plan the agent keeps.
+enum SampleSubagents {
+    static let prompt = ChatMessage(role: .user, text: "Find out why the reconnect test is flaky, and fix it.")
+    static let thought = ChatMessage(role: .thought, text: """
+        **Splitting the work**
+
+        The failure is either in the server's restart or in the client's backoff. I'll send one agent \
+        through each and compare what they find before changing anything.
+        """)
+    static let server = ChatMessage(role: .tool, text: """
+        Read the server's restart path · completed
+
+        Input:
+        {
+          "description": "Read the server's restart path",
+          "subagent_type": "Explore"
+        }
+        """, tool: ToolSummary(callID: "server", kind: "think", status: "completed", toolName: "Agent", runsSubagent: true))
+    static let client = ChatMessage(role: .tool, text: "Read the client's reconnect backoff · in_progress",
+                                    tool: ToolSummary(callID: "client", kind: "think", status: "in_progress", toolName: "Agent",
+                                                      runsSubagent: true))
+    static let serverRead = ChatMessage(role: .tool, text: "Read Sources/LatchAgentServer/RemoteServer.swift · completed",
+                                        tool: ToolSummary(callID: "s1", kind: "read", status: "completed", toolName: "Read"),
+                                        parentID: server.id)
+    static let clientSearch = ChatMessage(role: .tool, text: "grep -n backoff Sources/LatchRemoteClient · completed",
+                                          tool: ToolSummary(callID: "c1", kind: "search", status: "completed", toolName: "Grep"),
+                                          parentID: client.id)
+    static let serverThought = ChatMessage(role: .thought, text: """
+        The restart closes the listener and binds again without SO_REUSEADDR, so on Linux the old port \
+        sits in TIME_WAIT.
+        """, parentID: server.id)
+    static let serverRun = ChatMessage(role: .tool, text: """
+        `swift test --filter RemoteServerTests` · completed
+
+        Output:
+        Test Suite 'RemoteServerTests' passed.
+        """, tool: ToolSummary(callID: "s2", kind: "execute", status: "completed", toolName: "Bash"), parentID: server.id)
+    static let clientRead = ChatMessage(role: .tool, text: "Read Sources/LatchRemoteClient/Backoff.swift · in_progress",
+                                        tool: ToolSummary(callID: "c2", kind: "read", status: "in_progress", toolName: "Read"),
+                                        parentID: client.id)
+    static let serverWords = ChatMessage(role: .assistant, text: """
+        The listener is bound again on a **new** port after a restart, because the old one is still in \
+        `TIME_WAIT`. Setting `SO_REUSEADDR` before `bind` keeps it.
+        """, parentID: server.id)
+
+    /// In the order they arrived.
+    static let messages = [prompt, thought, server, client, serverRead, clientSearch, serverThought, serverRun,
+                           clientRead, serverWords]
+
+    static let plan: [(String, String)] = [
+        ("Read the server's restart path", "completed"),
+        ("Read the client's reconnect backoff", "in_progress"),
+        ("Keep the port across a restart", "pending"),
+        ("Run the reconnect test fifty times", "pending"),
+    ]
 }
 #endif

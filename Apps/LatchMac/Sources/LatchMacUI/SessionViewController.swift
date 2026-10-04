@@ -219,6 +219,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// A session with nothing in it yet opens on its workspace, not on an empty page.
     private let emptyHeading = NSTextField(labelWithString: "")
     private let commandMenu = SlashCommandMenu()
+    /// The agent's plan, over the composer while it has one.
+    private let planPanel = PlanPanel()
     /// Pasted or dropped into the composer, sent with the next prompt, then cleared with it.
     /// Not saved with the draft: an image's bytes would bloat the session library.
     private(set) var attachments: [ComposerAttachment] = []
@@ -528,6 +530,17 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             emptyHeading.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: ChatTranscriptView.horizontalInset),
         ])
 
+        // Like the command menu, over the transcript and attached to the composer; the menu,
+        // while open, takes its place.
+        planPanel.isHidden = true
+        planPanel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(planPanel, positioned: .above, relativeTo: composerContainer)
+        NSLayoutConstraint.activate([
+            planPanel.leadingAnchor.constraint(equalTo: composerBox.leadingAnchor, constant: 12),
+            planPanel.trailingAnchor.constraint(equalTo: composerBox.trailingAnchor, constant: -12),
+            planPanel.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -8),
+        ])
+
         // Over the transcript and the heading, attached to the composer it belongs to.
         commandMenu.isHidden = true
         commandMenu.translatesAutoresizingMaskIntoConstraints = false
@@ -542,7 +555,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Tells the transcript how much of its end the composer covers, which changes as a draft grows.
     override func viewDidLayout() {
         super.viewDidLayout()
-        let composerTop = composerContainer.frame.maxY
+        // The plan, when shown, covers the transcript's end too.
+        let composerTop = planPanel.isHidden ? composerContainer.frame.maxY : max(composerContainer.frame.maxY, planPanel.frame.maxY)
         let transcriptBottom = conversation.convert(conversation.bounds, to: view).minY
         conversation.bottomOverlay = max(0, composerTop - transcriptBottom + 12)
     }
@@ -919,6 +933,16 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let chosen = draft.hasPrefix("/") && draft.hasSuffix(" ") && draft.dropFirst().dropLast().allSatisfy { !$0.isWhitespace }
             ? model.commands.first { "/\($0.name) " == draft } : nil
         prompt.inputHint = chosen?.inputHint
+        refreshPlan()
+    }
+
+    /// The plan shows while the agent has one, except under an open command menu.
+    private func refreshPlan() {
+        planPanel.show(model.plan)
+        let hidden = model.plan.isEmpty || !commandMenu.isHidden
+        guard planPanel.isHidden != hidden else { return }
+        planPanel.isHidden = hidden
+        view.needsLayout = true
     }
 
     private func handleCommandMenuKey(_ key: ChatInputView.MenuKey) -> Bool {

@@ -636,7 +636,10 @@ public actor RemoteRuntimeHub {
             if let sequence = notification.localSequence {
                 runtimes[id]!.updatesThrough = max(runtimes[id]!.updatesThrough, sequence)
             }
-            runtimes[id]!.remember(notification)
+            // A load's history replays old plans: what a returning client takes as the plan in
+            // hand is the latest the agent sent outside it.
+            let isPlan = notification.update.sessionUpdateKind == "plan"
+            if !isPlan { runtimes[id]!.remember(notification) }
             if case .binding(.load, _, _) = runtimes[id]!.binding {
                 // Most likely history the load is replaying; `bindingResult` decides.
                 let encoded = Self.encodedReplay(of: notification)
@@ -647,6 +650,7 @@ public actor RemoteRuntimeHub {
             let sequence = notification.localSequence
             let loadedThrough = runtimes[id]!.loadedThrough
             let isHistory = sequence.flatMap { sequence in loadedThrough.map { sequence <= $0 } } ?? false
+            if isPlan, !isHistory { runtimes[id]!.remember(notification) }
             // History that reached the hub after the load's reply did.
             if isHistory { publishReplayed(notification, for: id) }
             if let sequence, runtimes[id]!.replayDrain?.isComplete(through: sequence) == true { endReplayDrain(id) }
@@ -998,7 +1002,7 @@ private struct RuntimeState {
     }
 
     static let stateKinds: Set<String> = [
-        "config_option_update", "current_mode_update", "current_model_update", "available_commands_update",
+        "config_option_update", "current_mode_update", "current_model_update", "available_commands_update", "plan",
     ]
 
     mutating func remember(_ notification: ACPSessionNotification) {
@@ -1109,4 +1113,12 @@ extension LatchRemoteError {
     static let permissionRequestNotFound = LatchRemoteError(
         code: .permissionRequestNotFound, message: "Permission request not found."
     )
+}
+
+private extension ACPJSONValue {
+    /// An update's `sessionUpdate`, such as `plan`.
+    var sessionUpdateKind: String? {
+        guard case let .object(update) = self, case let .string(kind)? = update["sessionUpdate"] else { return nil }
+        return kind
+    }
 }

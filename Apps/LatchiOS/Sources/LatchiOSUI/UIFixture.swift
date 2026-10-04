@@ -17,9 +17,10 @@ enum UIFixture {
     /// A conversation from its end, and from its reply's start; a turn streaming, with Stop;
     /// the composer with photos, and suggesting slash commands; a permission request; the
     /// link lost mid-turn; a server that cannot be reached; a new session with nothing in it
-    /// yet; and on iPad, the split view with the list beside the session.
+    /// yet; a turn with thinking, two subagents and a plan, one subagent open, and with the
+    /// plan open instead; and on iPad, the split view with the list beside the session.
     static let sessionScreens = ["conversation", "markdown", "streaming", "photos", "slash", "permission",
-                                 "reconnecting", "error", "empty", "split"]
+                                 "reconnecting", "error", "empty", "subagents", "plan", "split"]
 
     static var requestedScreen: String? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -160,6 +161,7 @@ enum UIFixture {
         case "empty", "photos", "slash": []
         case "streaming", "reconnecting": [SampleConversation.prompt, SampleConversation.read]
         case "permission": [SampleConversation.prompt]
+        case "subagents", "plan": SampleSubagents.messages
         default: SampleConversation.messages
         }
         let saved = SavedSession(id: UUID(), workspacePath: "/home/simon/latch",
@@ -222,6 +224,16 @@ enum UIFixture {
             await until { model.commands.count == 4 }
             screenController.composer.textView.becomeFirstResponder()
             type("/", in: screenController)
+        case "subagents", "plan":
+            client.plan(SampleSubagents.plan)
+            await until { model.plan.count == SampleSubagents.plan.count }
+            if screen == "plan" {
+                screenController.composer.planView.toggle()
+            } else {
+                screenController.transcript.toggle(SampleSubagents.server.id)
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+            screenController.transcript.scrollToBottom(animated: false)
         case "permission":
             type("Clean the build folder and rebuild", in: screenController)
             screenController.send()

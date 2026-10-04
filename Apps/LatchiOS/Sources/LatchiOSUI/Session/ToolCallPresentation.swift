@@ -3,26 +3,53 @@ import UIKit
 
 /// A tool message as the transcript shows it. The history keeps a tool call as
 /// "title · status", a blank line, then the details `ToolCallDetails` wrote; this reads it back.
+/// A row saved since the history kept a summary of the call beside it also has the call's
+/// kind, and whether it runs a subagent; one saved before has only its text.
 struct ToolCallPresentation: Equatable {
     let title: String
     /// As the agent reported it, such as `in_progress`.
-    let status: String
+    private(set) var status: String
     let details: String
+    /// ACP's kind of tool, such as `read` or `execute`, when the row has a summary.
+    var kind: String?
+    /// The call runs a subagent, whose rows are nested under this one.
+    var runsSubagent = false
 
     init(text: String) {
-        let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-        if let separator = firstLine.range(of: " · ", options: .backwards) {
-            title = String(firstLine[..<separator.lowerBound])
-            status = String(firstLine[separator.upperBound...])
-        } else {
-            title = firstLine
-            status = ""
-        }
+        let line = Self.firstLine(of: text)
+        title = line.title
+        status = line.status
         if let lineEnd = text.firstIndex(where: \.isNewline) {
             details = String(text[lineEnd...].drop(while: \.isNewline))
         } else {
             details = ""
         }
+    }
+
+    /// The row's text, with what its summary says where it has one.
+    init(_ message: ChatMessage) {
+        self.init(text: message.text)
+        guard let tool = message.tool else { return }
+        if let status = tool.status, !status.isEmpty { self.status = status }
+        kind = tool.kind
+        runsSubagent = tool.runsSubagent
+    }
+
+    private init(title: String, status: String, details: String) {
+        self.title = title
+        self.status = status
+        self.details = details
+    }
+
+    private static func firstLine(of text: String) -> (title: String, status: String) {
+        let firstLine = text.prefix { !$0.isNewline }
+        guard let separator = firstLine.range(of: " · ", options: .backwards) else { return (String(firstLine), "") }
+        return (String(firstLine[..<separator.lowerBound]), String(firstLine[separator.upperBound...]))
+    }
+
+    /// The title as shown, read from the first line alone, without copying the details.
+    static func displayTitle(of text: String) -> String {
+        ToolCallPresentation(title: firstLine(of: text).title, status: "", details: "").displayTitle
     }
 
     /// A command the agent ran: the history writes it in backticks, as Markdown code.
@@ -68,8 +95,25 @@ struct ToolCallPresentation: Equatable {
         }
     }
 
-    /// Guessed from the title's first word: the history keeps no kind.
+    /// From the call's kind, as the Mac picks it, or for a row saved without one, or of kind
+    /// `other`, guessed from the title's first word.
     var symbolName: String {
+        if runsSubagent { return "person.2" }
+        switch kind {
+        case "read": return "doc.text"
+        case "edit": return "pencil"
+        case "delete": return "trash"
+        case "move": return "arrow.left.arrow.right"
+        case "search": return "magnifyingglass"
+        case "execute": return "terminal"
+        case "think": return "lightbulb"
+        case "fetch": return "globe"
+        case "switch_mode": return "arrow.triangle.branch"
+        default: return guessedSymbolName
+        }
+    }
+
+    private var guessedSymbolName: String {
         let word = title.lowercased().split(whereSeparator: { !$0.isLetter }).first.map(String.init) ?? ""
         switch word {
         case "read", "view", "open", "cat": return "doc.text"
@@ -137,9 +181,36 @@ extension ToolCallPresentation {
     }
 }
 
+/// What the agent thought on the way, as its folded row shows it.
+enum ThoughtPresentation {
+    /// The thought on one line, to show beside "Thinking" while it is folded: its first words,
+    /// with each run of white space as one space and without Markdown's bold markers, which a
+    /// line of plain text would show as they are. Only the start is read, as it streams.
+    static func preview(_ text: String, limit: Int = 160) -> String {
+        var result = ""
+        var count = 0
+        var space = false
+        for character in text.prefix(limit * 2).replacingOccurrences(of: "**", with: "") {
+            if character.isWhitespace {
+                space = !result.isEmpty
+                continue
+            }
+            guard count + (space ? 2 : 1) <= limit else { return result + "…" }
+            if space {
+                result.append(" ")
+                count += 1
+                space = false
+            }
+            result.append(character)
+            count += 1
+        }
+        return text.dropFirst(limit * 2).isEmpty ? result : result + "…"
+    }
+}
+
 /// How the transcript draws a message.
 enum ChatMessageKind: Equatable {
-    case user, assistant, tool, notice
+    case user, assistant, tool, thought, notice
 }
 
 extension ChatMessageKind {

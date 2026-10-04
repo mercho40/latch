@@ -208,6 +208,9 @@ public final class SessionModel {
     private var pendingStateUpdates: [ACPSessionNotification] = []
     /// The agent's slash commands, replaced whole by each update. Empty until it sends some.
     public private(set) var commands: [ACPAvailableCommand] = []
+    /// The agent's plan for the work in hand, as it last listed it; empty when it has none.
+    public private(set) var plan: [ACPPlanEntry] = []
+    private var planSequence: UInt64 = 0
     /// Unlike the configuration's, this starts from zero rather than the session reply's
     /// position: the reply carries no commands, so a list sent just before it is still the newest.
     private var commandsSequence: UInt64 = 0
@@ -1175,9 +1178,12 @@ public final class SessionModel {
                       notification.localSequence.map { $0 <= boundary } ?? false
                   } ?? false) else { return }
             switch notification.event {
-            case let .messageChunk(chunk) where chunk.role == .agent:
+            case let .messageChunk(chunk) where chunk.role != .user:
                 if let text = chunk.text {
-                    history.appendAssistant(text)
+                    // A subagent's words and thinking go under its call.
+                    let parentID = chunk.parentToolCallID.flatMap(history.messageID(forToolCall:))
+                    if chunk.role == .thought { history.appendThought(text, parentID: parentID) }
+                    else { history.appendAssistant(text, parentID: parentID) }
                     publishHistory()
                 }
             case let .toolCall(tool, _):
@@ -1346,7 +1352,7 @@ public final class SessionModel {
     private func showReplayed(_ notification: ACPSessionNotification) {
         guard notification.sessionId == sessionID else { return }
         switch notification.event {
-        case let .messageChunk(chunk) where chunk.role != .thought:
+        case let .messageChunk(chunk):
             guard let text = chunk.text else {
                 replayEndedMessage = true
                 return
@@ -1355,11 +1361,11 @@ public final class SessionModel {
             // did not, begins it.
             let named = chunk.messageID != replayedMessageID
             replayedMessageID = chunk.messageID
-            if chunk.role == .user {
-                history.appendUserChunk(text, newMessage: named || replayEndedMessage)
-            } else {
-                // As live, a thought between two chunks of the agent's does not part them.
-                history.appendAssistant(text, newMessage: named)
+            let parentID = chunk.parentToolCallID.flatMap(history.messageID(forToolCall:))
+            switch chunk.role {
+            case .user: history.appendUserChunk(text, newMessage: named || replayEndedMessage)
+            case .thought: history.appendThought(text, newMessage: named, parentID: parentID)
+            case .agent: history.appendAssistant(text, newMessage: named, parentID: parentID)
             }
             replayEndedMessage = false
         case let .toolCall(tool, _):
@@ -1380,6 +1386,8 @@ public final class SessionModel {
         isChangingConfiguration = false
         commands = []
         commandsSequence = 0
+        plan = []
+        planSequence = 0
         acceptsImages = false
     }
 
@@ -1394,6 +1402,17 @@ public final class SessionModel {
             guard notification.localSequence.map({ $0 > commandsSequence }) ?? true else { return }
             commandsSequence = notification.localSequence ?? commandsSequence
             commands = list
+            onChange?()
+            return
+        }
+        if case let .plan(entries) = notification.event {
+            // A load replays every plan the conversation had; the plan in hand is the one the
+            // agent sends live, which it sends again while there is work open.
+            guard phase != .connecting,
+                  !(loadedThroughSequence.map { boundary in notification.localSequence.map { $0 <= boundary } ?? false } ?? false),
+                  notification.localSequence.map({ $0 > planSequence }) ?? true else { return }
+            planSequence = notification.localSequence ?? planSequence
+            plan = entries
             onChange?()
             return
         }

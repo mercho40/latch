@@ -80,8 +80,10 @@ public struct SavedSessionLibrary: Codable, Equatable, Sendable {
     /// Version 2 marks a library holding a remote session. A build that predates remote
     /// sessions ignores `serverID`, so it would reopen a server's path as a folder on this
     /// Mac; the bump makes it refuse the file instead. A library without one stays at 1,
-    /// so it remains readable by that build.
-    public static let supportedVersions = 1...2
+    /// so it remains readable by that build. Version 3 marks one holding the agent's thinking,
+    /// a kind of message no earlier build can read: it then says the version is unsupported
+    /// rather than that the file is corrupt.
+    public static let supportedVersions = 1...3
 
     public var version: Int
     public var sessions: [SavedSession]
@@ -95,7 +97,8 @@ public struct SavedSessionLibrary: Codable, Equatable, Sendable {
 
     /// The oldest version able to hold these sessions.
     public static func requiredVersion(for sessions: [SavedSession]) -> Int {
-        sessions.contains { $0.serverID != nil } ? 2 : 1
+        if sessions.contains(where: { $0.messages.contains { $0.role == .thought } }) { return 3 }
+        return sessions.contains { $0.serverID != nil } ? 2 : 1
     }
 }
 

@@ -41,7 +41,7 @@ public actor AgentRuntimeRegistry {
         id: AgentRuntimeID,
         configuration: ACPProcessConfiguration,
         clientInfo: ACPImplementation,
-        clientCapabilities: ACPClientCapabilities = ACPClientCapabilities()
+        clientCapabilities: ACPClientCapabilities = .latch
     ) async throws -> ACPInitializeResponse {
         guard runtimes[id] == nil else {
             throw AgentRuntimeRegistryError.duplicateRuntime(id)
@@ -277,3 +277,9 @@ public actor AgentRuntimeRegistry {
     }
 }
 #endif
+
+extension ACPClientCapabilities {
+    /// What Latch tells every agent it starts. Claude Code forwards a subagent's own words and
+    /// thinking only to a client that says it shows them under the subagent's call.
+    public static let latch = ACPClientCapabilities(meta: .object(["subagent-transcript": .bool(true)]))
+}

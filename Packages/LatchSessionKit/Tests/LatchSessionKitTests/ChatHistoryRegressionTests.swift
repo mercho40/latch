@@ -191,6 +191,7 @@ private struct ReferenceHistory: Sendable {
             case .user: label = "You"
             case .assistant: label = "Agent"
             case .tool: label = "Tool"
+            case .thought: label = "Thinking"
             }
             return "\(label)\n\(message.text)"
         }.joined(separator: "\n\n")

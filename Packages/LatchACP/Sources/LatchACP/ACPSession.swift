@@ -95,6 +95,11 @@ public struct ACPMessageChunk: Equatable, Sendable {
     public let role: ACPMessageRole
     public let messageID: String?
     public let content: ACPJSONValue
+    /// The update's own `_meta`.
+    public let meta: ACPJSONValue?
+
+    /// A subagent's words: the tool call that runs the subagent, as Claude Code marks them.
+    public var parentToolCallID: String? { ACPClaudeCodeMeta(meta).parentToolCallID }
 
     public var text: String? {
         guard
@@ -116,6 +121,56 @@ public struct ACPToolCallEvent: Equatable, Sendable {
     public let locations: [ACPJSONValue]?
     public let rawInput: ACPJSONValue?
     public let rawOutput: ACPJSONValue?
+    /// The update's own `_meta`.
+    public let meta: ACPJSONValue?
+
+    /// The tool call of the subagent that made this one, as Claude Code marks it.
+    public var parentToolCallID: String? { ACPClaudeCodeMeta(meta).parentToolCallID }
+    /// The agent's own name for the tool, such as `Bash` or `Agent`, where it gives one.
+    public var toolName: String? { ACPClaudeCodeMeta(meta).string("toolName") }
+    /// This call runs a subagent, whose own calls name it as their parent.
+    public var runsSubagent: Bool { ACPClaudeCodeMeta(meta).bool("subagent") }
+}
+
+/// What Claude Code adds under `_meta.claudeCode`; other agents send none of it.
+struct ACPClaudeCodeMeta {
+    private let fields: [String: ACPJSONValue]
+
+    init(_ meta: ACPJSONValue?) {
+        guard case let .object(meta)? = meta, case let .object(fields)? = meta["claudeCode"] else {
+            self.fields = [:]
+            return
+        }
+        self.fields = fields
+    }
+
+    var parentToolCallID: String? { string("parentToolUseId") }
+
+    func string(_ key: String) -> String? {
+        guard case let .string(value)? = fields[key], !value.isEmpty else { return nil }
+        return value
+    }
+
+    func bool(_ key: String) -> Bool {
+        guard case let .bool(value)? = fields[key] else { return false }
+        return value
+    }
+}
+
+/// One step of an agent's plan, as its `plan` update lists them.
+public struct ACPPlanEntry: Codable, Equatable, Sendable {
+    public enum Status: String, Codable, Equatable, Sendable { case pending, inProgress = "in_progress", completed }
+
+    public let content: String
+    public let status: Status
+    /// `high`, `medium` or `low`, as the agent ranks it.
+    public let priority: String?
+
+    public init(content: String, status: Status, priority: String? = nil) {
+        self.content = content
+        self.status = status
+        self.priority = priority
+    }
 }
 
 /// A slash command the agent accepts, invoked by starting a prompt with `/name`.
@@ -137,7 +192,8 @@ public struct ACPAvailableCommand: Equatable, Sendable {
 public enum ACPSessionEvent: Equatable, Sendable {
     case messageChunk(ACPMessageChunk)
     case toolCall(ACPToolCallEvent, initial: Bool)
-    case plan(ACPJSONValue)
+    /// The whole plan; each update replaces the last, and an empty one clears it.
+    case plan([ACPPlanEntry])
     case usage(ACPJSONValue)
     /// The whole current list; each update replaces the last.
     case availableCommands([ACPAvailableCommand])
@@ -171,7 +227,7 @@ extension ACPSessionNotification {
                 messageID = nil
             }
             return .messageChunk(
-                ACPMessageChunk(role: role, messageID: messageID, content: content)
+                ACPMessageChunk(role: role, messageID: messageID, content: content, meta: object["_meta"])
             )
         case "tool_call", "tool_call_update":
             guard case let .string(toolCallID)? = object["toolCallId"] else {
@@ -186,12 +242,21 @@ extension ACPSessionNotification {
                     content: object.array(forKey: "content"),
                     locations: object.array(forKey: "locations"),
                     rawInput: object["rawInput"],
-                    rawOutput: object["rawOutput"]
+                    rawOutput: object["rawOutput"],
+                    meta: object["_meta"]
                 ),
                 initial: kind == "tool_call"
             )
         case "plan":
-            return .plan(update)
+            guard let entries = object.array(forKey: "entries") else {
+                return .other(kind: kind, payload: update)
+            }
+            // One malformed entry drops only itself; an unknown status reads as pending.
+            return .plan(entries.compactMap { entry in
+                guard case let .object(step) = entry, let content = step.string(forKey: "content") else { return nil }
+                let status = step.string(forKey: "status").flatMap(ACPPlanEntry.Status.init(rawValue:)) ?? .pending
+                return ACPPlanEntry(content: content, status: status, priority: step.string(forKey: "priority"))
+            })
         case "usage_update":
             return .usage(update)
         case "available_commands_update":

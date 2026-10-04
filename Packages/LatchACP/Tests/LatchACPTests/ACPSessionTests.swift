@@ -95,6 +95,54 @@ final class ACPSessionTests: XCTestCase {
         ])
     }
 
+    /// Claude Code marks a subagent's calls and words with the call that runs the subagent.
+    func testProjectsClaudeCodeSubagentMetadata() {
+        let call = ACPSessionNotification(sessionId: "session-1", update: .object([
+            "sessionUpdate": .string("tool_call"), "toolCallId": .string("agent-1"), "kind": .string("think"),
+            "_meta": .object(["claudeCode": .object(["toolName": .string("Agent"), "subagent": .bool(true)])]),
+        ]))
+        let child = ACPSessionNotification(sessionId: "session-1", update: .object([
+            "sessionUpdate": .string("tool_call"), "toolCallId": .string("read-1"),
+            "_meta": .object(["claudeCode": .object(["toolName": .string("Read"), "parentToolUseId": .string("agent-1")])]),
+        ]))
+        let words = ACPSessionNotification(sessionId: "session-1", update: .object([
+            "sessionUpdate": .string("agent_thought_chunk"), "content": .object(["type": .string("text"), "text": .string("hmm")]),
+            "_meta": .object(["claudeCode": .object(["parentToolUseId": .string("agent-1")])]),
+        ]))
+        guard case let .toolCall(agent, _) = call.event, case let .toolCall(read, _) = child.event,
+              case let .messageChunk(thought) = words.event else { return XCTFail("Unexpected events") }
+        XCTAssertTrue(agent.runsSubagent)
+        XCTAssertEqual(agent.toolName, "Agent")
+        XCTAssertNil(agent.parentToolCallID)
+        XCTAssertFalse(read.runsSubagent)
+        XCTAssertEqual(read.toolName, "Read")
+        XCTAssertEqual(read.parentToolCallID, "agent-1")
+        XCTAssertEqual(thought.role, .thought)
+        XCTAssertEqual(thought.parentToolCallID, "agent-1")
+    }
+
+    /// A plan replaces the last; a malformed step drops only itself, and an unknown status reads as pending.
+    func testProjectsPlanEntries() {
+        let plan = ACPSessionNotification(sessionId: "session-1", update: .object([
+            "sessionUpdate": .string("plan"),
+            "entries": .array([
+                .object(["content": .string("Read the code"), "status": .string("completed"), "priority": .string("high")]),
+                .object(["content": .string("Write the fix"), "status": .string("in_progress")]),
+                .object(["status": .string("pending")]),
+                .object(["content": .string("Ship it"), "status": .string("someday")]),
+            ]),
+        ]))
+        XCTAssertEqual(plan.event, .plan([
+            ACPPlanEntry(content: "Read the code", status: .completed, priority: "high"),
+            ACPPlanEntry(content: "Write the fix", status: .inProgress),
+            ACPPlanEntry(content: "Ship it", status: .pending),
+        ]))
+        let cleared = ACPSessionNotification(sessionId: "session-1", update: .object([
+            "sessionUpdate": .string("plan"), "entries": .array([]),
+        ]))
+        XCTAssertEqual(cleared.event, .plan([]))
+    }
+
     func testPromptBlocksEncodeAsACPContent() {
         XCTAssertEqual(ACPPromptBlock.text("Look").content,
                        .object(["type": .string("text"), "text": .string("Look")]))

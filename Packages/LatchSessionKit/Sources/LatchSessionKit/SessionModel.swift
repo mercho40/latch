@@ -135,8 +135,8 @@ public final class SessionModel {
     /// `finishTurn`. The step that takes in the last of them ends it.
     private var endingTurn: (turn: UUID, result: Result<LatchAgentResponse, any Error>, through: UInt64,
                              resume: CheckedContinuation<Void, Never>)?
-    /// For tests: a turn's outcome is in and its last events are not.
-    var turnEndIsWaiting: Bool { endingTurn != nil }
+    /// For tests and smokes: a turn's outcome is in and its last events are not.
+    public var turnEndIsWaiting: Bool { endingTurn != nil }
     /// Where the transcript stood when the running turn began; see `remoteBinding`.
     private var turnBoundary: SavedSession.RemoteBinding?
     /// Turns whose prompts the transcript already shows, so their `turnStarted` is not shown

@@ -49,7 +49,7 @@ enum RemoteSmoke {
                     root: RootViewController, servers: KeychainServerStore, connector: ChannelRemoteSessionConnector) {
         let watchdog = Task {
             try await Task.sleep(for: .seconds(150))
-            fail("timed out", window: window, root: root)
+            fail("timed out", window: window, root: root, workspace: request.workspace)
         }
         Task {
             do {
@@ -59,18 +59,26 @@ enum RemoteSmoke {
                 watchdog.cancel()
                 exit(0)
             } catch {
-                fail("\(error)", window: window, root: root)
+                fail("\(error)", window: window, root: root, workspace: request.workspace)
             }
         }
     }
 
-    private static func fail(_ problem: String, window: UIWindow, root: RootViewController) -> Never {
+    private static func fail(_ problem: String, window: UIWindow, root: RootViewController, workspace: URL) -> Never {
         var state = ""
         if let session = root.shown?.session {
             let model = session.model
             state = "\n  session “\(session.title)”: \(model.phase), \(model.status), link \(model.linkState), "
+                + "applied through \(model.appliedSequence), turn end waiting for events: \(model.turnEndIsWaiting), "
+                + "queued \(model.queuedPrompts.map(\.text)), "
                 + "messages \(model.messages.map { "\($0.role): \($0.text)" })"
         }
+        // What reached the agent, which says whether a prompt got there at all.
+        let logs = ["prompts", "tools", "slow", "decisions", "answers", "loads"].map { name in
+            let text = (try? String(contentsOf: workspace.appendingPathComponent("\(name).log"), encoding: .utf8)) ?? ""
+            return "\(name).log \(text.split(separator: "\n").count)"
+        }
+        state += "\n  agent: \(logs.joined(separator: ", "))"
         FileHandle.standardError.write(Data(
             "IOS SMOKE REMOTE: FAIL — \(problem)\n  on screen: \(onScreen(window))\(state)\n".utf8))
         exit(1)

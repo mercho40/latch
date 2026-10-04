@@ -436,6 +436,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         transcript.update(messages: model.messages, isWorking: model.phase == .prompting,
                           isStopping: model.cancellationRequested)
         refreshEmptyState()
+        // Whether the session holds a conversation decides Resume and Fork, and history the agent
+        // replays can arrive after the last change to anything else.
+        refreshMenu()
     }
 
     /// The photos sent go with the first prompt after the send whose attachments they are,

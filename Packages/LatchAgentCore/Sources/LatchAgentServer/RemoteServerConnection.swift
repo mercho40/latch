@@ -118,6 +118,10 @@ final class RemoteServerConnection: Sendable {
                     close("closed by the client")
                 } else if errno == EAGAIN || errno == EWOULDBLOCK {
                     close("nothing received for \(server.configuration.silenceTimeout)")
+                } else if errno == ECONNRESET {
+                    // The client went without closing, as an app does that lets go of a
+                    // connection with an answer still unread: its doing, not a failure here.
+                    close("reset by the client")
                 } else {
                     close("read failed: \(String(cString: strerror(errno)))")
                 }

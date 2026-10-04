@@ -72,7 +72,8 @@ jobs:
     name: iOS app build, tests and smoke
     # The app compiles Latch.icon, which needs actool from Xcode 27: the xcode-27 image.
     runs-on: xcode-27
-    timeout-minutes: 30
+    # A run takes about a quarter of an hour, and a slow runner has taken twice that.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - run: |

@@ -1,4 +1,5 @@
 import AppKit
+import LatchACP
 import XCTest
 @testable import LatchMacUI
 
@@ -16,6 +17,21 @@ final class SessionStatusTests: XCTestCase {
         XCTAssertNil(SessionViewController.adoptedTitle(current: "CI flake", agentTitle: "CI flake", firstPrompt: nil, adoptedBefore: nil))
         XCTAssertEqual(SessionViewController.adoptedTitle(current: "New Session", agentTitle: String(repeating: "x", count: 90),
                                                           firstPrompt: nil, adoptedBefore: nil)?.count, 60)
+    }
+
+    /// The agent's conversations newest first by the moment each changed, offsets counted;
+    /// undated ones last, and each with its title and date.
+    func testConversationsAreListedNewestFirst() {
+        let conversations = [
+            ACPSessionSummary(sessionId: "undated", cwd: "/srv", title: nil, updatedAt: nil),
+            ACPSessionSummary(sessionId: "utc", cwd: "/srv", title: "Noon in London", updatedAt: "2026-10-01T12:00:00.000Z"),
+            // An hour before the UTC one, though its clock reads later.
+            ACPSessionSummary(sessionId: "berlin", cwd: "/srv", title: "One in Berlin", updatedAt: "2026-10-01T13:00:00+02:00"),
+            ACPSessionSummary(sessionId: "later", cwd: "/srv", title: "Later", updatedAt: "2026-10-02T09:30:00Z"),
+        ]
+        XCTAssertEqual(SessionViewController.newestFirst(conversations).map(\.sessionId), ["later", "utc", "berlin", "undated"])
+        XCTAssertEqual(SessionViewController.menuTitle(for: conversations[0]), "Untitled conversation")
+        XCTAssertTrue(SessionViewController.menuTitle(for: conversations[3]).hasPrefix("Later — "))
     }
 
     /// The context note sits before the buttons when the row has room for it, and is left out

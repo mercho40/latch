@@ -397,4 +397,17 @@ final class ACPSessionTests: XCTestCase {
             ])
         }
     }
+
+    /// Of the `_meta` an agent sends with `initialize`, Latch keeps only whether it steers: the
+    /// rest can be anything, and the response travels in records a server sends.
+    func testInitializeKeepsOnlyWhetherTheAgentSteers() throws {
+        let claude = Data(#"{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"_meta":{"steering":{"supported":true},"goal":{"version":1,"actions":["set","clear"]},"air":{"x":[1,2,3]}}}"#.utf8)
+        let steering = try JSONDecoder().decode(ACPInitializeResponse.self, from: claude)
+        XCTAssertTrue(steering.supportsSteering)
+        XCTAssertEqual(steering.meta, .object(["steering": .object(["supported": .bool(true)])]))
+        XCTAssertEqual(try JSONDecoder().decode(ACPInitializeResponse.self, from: JSONEncoder().encode(steering)), steering)
+        let plain = try JSONDecoder().decode(ACPInitializeResponse.self, from: Data(#"{"protocolVersion":1,"agentCapabilities":{},"_meta":{"steering":"yes"}}"#.utf8))
+        XCTAssertFalse(plain.supportsSteering)
+        XCTAssertNil(plain.meta)
+    }
 }

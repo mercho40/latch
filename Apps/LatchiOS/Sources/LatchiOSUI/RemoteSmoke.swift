@@ -118,7 +118,9 @@ enum RemoteSmoke {
             let server = try await addServer()
             let session = try await newSession(on: server)
             let screen = try await screenShowing(session)
+            try await listConversations(in: screen)
             try await converse(in: screen, session: session)
+            try await queueWhileWorking(in: screen, session: session)
             let adopted = try await adoptRuntimeStartedElsewhere(on: server)
             try await backgroundAndForeground([session, adopted])
             try servers.remove(id: server.id)
@@ -193,6 +195,31 @@ enum RemoteSmoke {
             }
             try await until("the session screen's title") { screen.context.serverName == "smoke" }
             return screen
+        }
+
+        // MARK: The agent's conversations
+
+        /// The new session offers the agent's saved conversations, listed by the server, in a
+        /// sheet that comes and goes; the session stays as it was, so no other agent starts.
+        func listConversations(in screen: SessionDetailViewController) async throws {
+            guard screen.canResumeConversation else {
+                throw Failure("a new session of an agent that lists its conversations did not offer Resume Conversation…")
+            }
+            screen.resumeConversation()
+            var picker: ConversationPickerViewController?
+            try await until("the list of conversations") {
+                picker = screen.conversationPicker
+                return picker?.viewIfLoaded?.window != nil && picker?.navigationController?.isBeingPresented == false
+            }
+            guard let picker, picker.conversations.map(\.title) == ["An older conversation"] else {
+                throw Failure("the list did not show the agent's older conversation: \(screen.conversationPicker?.conversations ?? [])")
+            }
+            picker.onCancel?()
+            try await until("the list to go") { screen.presentedViewController == nil && picker.view.window == nil }
+            guard screen.model.messages.isEmpty, screen.model.phase == .ready else {
+                throw Failure("cancelling the list changed the session: \(screen.model.status)")
+            }
+            pass("\(device): Resume Conversation… listed the agent's saved conversation over the server, and Cancel left the session as it was")
         }
 
         // MARK: Conversation
@@ -274,6 +301,44 @@ enum RemoteSmoke {
             pass("\(device): link dropped mid-turn, reconnecting shown, turn completed once with no duplicates")
         }
 
+        /// Written while the agent works, a message waits over the composer and goes when the
+        /// turn ends; Edit gives another back to the composer. Fork is offered once there is a
+        /// conversation, but not taken, so no other agent starts.
+        func queueWhileWorking(in screen: SessionDetailViewController, session: PhoneSession) async throws {
+            let model = session.model
+            try await send("tools please", in: screen)
+            try await until("the turn to hold") { model.phase == .prompting && model.messages.contains { $0.text == "reading" } }
+            for text in ["Then say hello", "And this one I will edit"] {
+                screen.composer.textView.text = text
+                screen.composer.textViewDidChange(screen.composer.textView)
+                guard case .sendWhileWorking(steers: false, canStop: true) = screen.composer.action else {
+                    throw Failure("the composer did not offer Send with Stop beside it while the agent worked: \(screen.composer.action)")
+                }
+                screen.composer.actionButton.sendActions(for: .primaryActionTriggered)
+            }
+            let queue = screen.composer.queueView
+            try await until("both to wait") {
+                !queue.isHidden && queue.rows.map(\.label.text) == ["Then say hello", "And this one I will edit"]
+            }
+            queue.rows[1].edit.sendActions(for: .primaryActionTriggered)
+            guard screen.composer.text == "And this one I will edit", model.queuedPrompts.map(\.text) == ["Then say hello"] else {
+                throw Failure("Edit did not give the message back to the composer: “\(screen.composer.text)”")
+            }
+            FileManager.default.createFile(atPath: request.workspace.appendingPathComponent("go").path, contents: nil)
+            try await until("the waiting message to go after the turn") {
+                model.phase == .ready && model.queuedPrompts.isEmpty && model.messages.suffix(2).map(\.text) == ["Then say hello", "onetwothree"]
+            }
+            try await until("the queue to go") { queue.isHidden }
+            guard lines(in: "prompts.log") == 6, lines(in: "tools.log") == 1, screen.composer.text == "And this one I will edit" else {
+                throw Failure("the queue did not send exactly once after the turn: \(lines(in: "prompts.log")) prompts, "
+                    + "composer “\(screen.composer.text)”")
+            }
+            guard screen.canForkConversation else { throw Failure("Fork Conversation was not offered for the conversation") }
+            screen.composer.textView.text = ""
+            screen.composer.textViewDidChange(screen.composer.textView)
+            pass("\(device): a message written while the agent worked waited over the composer and went when the turn ended; Edit gave one back")
+        }
+
         func send(_ text: String, in screen: SessionDetailViewController) async throws {
             screen.composer.textView.text = text
             screen.composer.textViewDidChange(screen.composer.textView)
@@ -309,7 +374,7 @@ enum RemoteSmoke {
             _ = try await connection.request(.newSession(runtimeID: runtimeID), timeout: .seconds(20))
             _ = try await connection.request(.prompt(runtimeID: runtimeID, turnID: UUID(), blocks: [.text("Outside hello")]),
                                              timeout: .seconds(20))
-            try await until("the other runtime's turn to reach its agent") { lines(in: "prompts.log") == 5 }
+            try await until("the other runtime's turn to reach its agent") { lines(in: "prompts.log") == 7 }
 
             // On iPhone the list is under the session; back to it, as the back button goes.
             if root.isCollapsed { root.show(.primary) }

@@ -86,6 +86,47 @@ final class RemoteSessionLiveTests: XCTestCase {
         }
     }
 
+    /// Claude Code's steering: written while the agent works, a message goes into its turn and
+    /// shows where it went in, and the turn goes on with it; nothing waits for the turn to end.
+    func testAMessageWrittenWhileTheAgentWorksSteersItsTurn() async throws {
+        try await LoopbackServer.run { server in
+            FileManager.default.createFile(atPath: server.workspace.appendingPathComponent("steers").path, contents: nil)
+            let model = try await connectedModel(server, connector(server))
+            XCTAssertTrue(model.steersPrompts)
+            let turn = Task { await model.send("steerable please") }
+            try await eventually("the turn working") { self.texts(model).last == "working" }
+            await model.send("also this")
+            XCTAssertTrue(model.queuedPrompts.isEmpty, "It went into the turn")
+            await turn.value
+            try await eventually("the reply") { self.texts(model) == ["steerable please", "working", "also this", "heard"] }
+            XCTAssertEqual(server.lines(in: "prompts.log"), 1)
+            XCTAssertEqual(server.lines(in: "steers.log"), 1)
+        }
+    }
+
+    /// Through the server: the agent's own conversations listed, a fork made once, and a new
+    /// session taking up an older conversation with the history the agent replays for it.
+    func testANewSessionTakesUpAnAgentsConversationOnTheServer() async throws {
+        try await LoopbackServer.run { server in
+            let model = try await connectedModel(server, connector(server))
+            XCTAssertTrue(model.listsAgentSessions && model.forksAgentSessions)
+            let sessions = try await model.agentSessions()
+            XCTAssertEqual(sessions.map(\.sessionId), ["older-1"])
+            XCTAssertEqual(sessions.first?.title, "An older conversation")
+            let forked = try await model.forkAgentSession()
+            XCTAssertEqual(forked, "forked-1")
+            XCTAssertEqual(server.lines(in: "forks.log"), 1)
+
+            await model.switchToAgentSession("older-1")
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(model.savedAgentSessionID, "older-1")
+            try await eventually("the conversation's history") {
+                self.texts(model) == ["earlier question", "earlier answer", "Read history · completed"]
+            }
+            XCTAssertEqual(model.remoteBinding?.showsReplayedHistory, true, "A relaunch goes on showing it")
+        }
+    }
+
     /// Stop withdraws a question still showing, and the agent hears it refused.
     func testStoppingATurnWithdrawsItsQuestion() async throws {
         try await LoopbackServer.run { server in
@@ -185,6 +226,9 @@ final class RemoteSessionLiveTests: XCTestCase {
             try await eventually("the request shown here too") { model.permissions.current != nil }
             await model.send("mine")
             XCTAssertEqual(server.lines(in: "prompts.log"), 1, "Nothing is sent while another client's turn runs")
+            XCTAssertEqual(model.queuedPrompts.map(\.text), ["mine"], "It waits for that turn to end")
+            let mine = try XCTUnwrap(model.queuedPrompts.first?.id)
+            XCTAssertEqual(model.unqueue(mine)?.text, "mine")
             // Give it time to answer, which it must not do unasked.
             try await Task.sleep(for: .milliseconds(300))
             let pending = try await server.summary(id)?.pendingPermissionCount

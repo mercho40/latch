@@ -4,13 +4,17 @@ import UIKit
 
 /// The field at the bottom of a session: a growing text view with the photos to send above
 /// it, an Add Photos button before it, and one button after it that sends, or stops the turn
-/// that is running. Before that button, once the agent says, how much of its context is in
-/// use. Over it all, while the agent has one, the agent's plan. It holds the draft; the
-/// session decides what each state allows.
+/// that is running; while the agent works and the draft has something in it, Send, with Stop
+/// beside it. Before them, once the agent says, how much of its context is in use. Over it
+/// all, while the agent has one, the agent's plan, and under that the messages waiting for the
+/// turn to end. It holds the draft; the session decides what each state allows.
 final class SessionComposerView: UIView, UITextViewDelegate {
     enum Action: Equatable {
         case send(enabled: Bool)
         case stop(enabled: Bool)
+        /// The agent works, and the draft can go: into its turn when it `steers`, else once the
+        /// turn ends. Stop sits before Send.
+        case sendWhileWorking(steers: Bool, canStop: Bool)
     }
 
     /// Keys a hardware keyboard sends that the session may take before the text does.
@@ -20,10 +24,15 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     let placeholderLabel = UILabel()
     let attachButton = UIButton(type: .system)
     let actionButton = UIButton(type: .system)
+    /// Stop, beside Send while the agent works and there is a draft to send.
+    let stopButton = UIButton(type: .system)
     /// "25%" of the context in use; its menu has the tokens and the cost.
     let usageButton = UIButton(type: .system)
     private(set) var usage: ContextUsageSummary?
     let planView = SessionPlanView()
+    let queueView = SessionQueueView()
+    /// The plan over the queue, over the field.
+    private let panels = UIStackView()
     private let field = UIView()
     private let fieldBackground: UIView
     private let strip = UIScrollView()
@@ -129,10 +138,13 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         actionButton.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             switch action {
-            case .send: onSend?()
+            case .send, .sendWhileWorking: onSend?()
             case .stop: onStop?()
             }
         }, for: .primaryActionTriggered)
+        stopButton.isPointerInteractionEnabled = true
+        stopButton.showsLargeContentViewer = true
+        stopButton.addAction(UIAction { [weak self] _ in self?.onStop?() }, for: .primaryActionTriggered)
         configureActionButton()
 
         strip.showsHorizontalScrollIndicator = false
@@ -159,15 +171,20 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         // Never squeezed by the text, but gone entirely while there is nothing to show.
         usageButton.setContentHuggingPriority(.required, for: .horizontal)
         usageButton.setContentCompressionResistancePriority(.defaultHigh + 10, for: .horizontal)
-        for view in [fieldBackground, dropHighlight, strip, textView, placeholderLabel, usageButton, actionButton] {
+        for view in [fieldBackground, dropHighlight, strip, textView, placeholderLabel, usageButton, stopButton, actionButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             field.addSubview(view)
         }
-        for view in [planView, attachButton, field] {
+        panels.axis = .vertical
+        panels.spacing = 6
+        panels.addArrangedSubview(planView)
+        panels.addArrangedSubview(queueView)
+        for view in [panels, attachButton, field] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        planView.onLayoutChange = { [weak self] in self?.planChanged() }
+        planView.onLayoutChange = { [weak self] in self?.panelsChanged() }
+        queueView.onLayoutChange = { [weak self] in self?.panelsChanged() }
         let stripHeight = strip.heightAnchor.constraint(equalToConstant: 72)
         let collapsedStrip = strip.heightAnchor.constraint(equalToConstant: 0)
         self.stripHeight = stripHeight
@@ -182,9 +199,9 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             field.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
             field.bottomAnchor.constraint(equalTo: layoutMarginsGuide.bottomAnchor),
             fieldUnderMargin,
-            planView.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
-            planView.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
-            planView.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor),
+            panels.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
+            panels.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
+            panels.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor),
             fieldBackground.leadingAnchor.constraint(equalTo: field.leadingAnchor),
             fieldBackground.trailingAnchor.constraint(equalTo: field.trailingAnchor),
             fieldBackground.topAnchor.constraint(equalTo: field.topAnchor),
@@ -203,10 +220,14 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             stripStack.heightAnchor.constraint(equalTo: strip.frameLayoutGuide.heightAnchor, constant: -4),
             textView.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: 16),
             textView.trailingAnchor.constraint(equalTo: usageButton.leadingAnchor),
-            usageButton.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor),
+            usageButton.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor),
             usageButton.centerYAnchor.constraint(equalTo: actionButton.centerYAnchor),
             usageButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
             usageHidden,
+            stopButton.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor),
+            stopButton.bottomAnchor.constraint(equalTo: field.bottomAnchor),
+            stopButton.heightAnchor.constraint(equalToConstant: 44),
+            stopWidth,
             textView.topAnchor.constraint(equalTo: strip.bottomAnchor),
             textView.bottomAnchor.constraint(equalTo: field.bottomAnchor),
             textHeight,
@@ -230,10 +251,12 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     private var stripHeight: NSLayoutConstraint?
     private var collapsedStrip: NSLayoutConstraint?
     private lazy var fieldUnderMargin = field.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor)
-    private lazy var fieldUnderPlan = field.topAnchor.constraint(equalTo: planView.bottomAnchor, constant: 8)
+    private lazy var fieldUnderPanels = field.topAnchor.constraint(equalTo: panels.bottomAnchor, constant: 8)
     private lazy var placeholderBaseline = placeholderLabel.firstBaselineAnchor.constraint(equalTo: textView.topAnchor)
     /// No usage yet: the text runs to the action button.
     private lazy var usageHidden = usageButton.widthAnchor.constraint(equalToConstant: 0)
+    /// Nothing but the action button, unless Stop is beside Send.
+    private lazy var stopWidth = stopButton.widthAnchor.constraint(equalToConstant: 0)
 
     // MARK: State
 
@@ -272,8 +295,14 @@ final class SessionComposerView: UIView, UITextViewDelegate {
 
     func setAction(_ action: Action) {
         guard action != self.action else { return }
+        let hadStop = !stopButton.isHidden
         self.action = action
         configureActionButton()
+        // Stop beside Send narrows the text, or gives it back: measured again once laid out.
+        if hadStop == stopButton.isHidden {
+            layoutIfNeeded()
+            textChanged(notify: false)
+        }
     }
 
     private func configureActionButton() {
@@ -281,6 +310,8 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         configuration.contentInsets = .zero
         configuration.preferredSymbolConfigurationForImage = .init(pointSize: 30, weight: .regular)
         let title: String
+        var hint: String?
+        var stop: Bool?
         switch action {
         case let .send(enabled):
             configuration.image = UIImage(systemName: "arrow.up.circle.fill")
@@ -290,6 +321,12 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             configuration.image = UIImage(systemName: "stop.circle.fill")
             title = "Stop"
             actionButton.isEnabled = enabled
+        case let .sendWhileWorking(steers, canStop):
+            configuration.image = UIImage(systemName: "arrow.up.circle.fill")
+            title = "Send"
+            hint = steers ? "The agent takes it at its next step." : "Sends when the agent finishes."
+            actionButton.isEnabled = true
+            stop = canStop
         }
         configuration.baseForegroundColor = LatchPalette.tint
         actionButton.configuration = configuration
@@ -299,8 +336,32 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             button.configuration = updated
         }
         actionButton.accessibilityLabel = title
+        actionButton.accessibilityHint = hint
         actionButton.largeContentTitle = title
         actionButton.largeContentImage = configuration.image
+        configureStopButton(stop)
+    }
+
+    /// Stop beside Send is the quieter of the two, so the message just written goes with Send.
+    private func configureStopButton(_ enabled: Bool?) {
+        stopButton.isHidden = enabled == nil
+        stopWidth.constant = enabled == nil ? 0 : 44
+        guard let enabled else { return }
+        var configuration = UIButton.Configuration.plain()
+        configuration.contentInsets = .zero
+        configuration.image = UIImage(systemName: "stop.circle.fill")
+        configuration.preferredSymbolConfigurationForImage = .init(pointSize: 30, weight: .regular)
+        configuration.baseForegroundColor = .secondaryLabel
+        stopButton.configuration = configuration
+        stopButton.isEnabled = enabled
+        stopButton.configurationUpdateHandler = { button in
+            var updated = button.configuration
+            updated?.baseForegroundColor = button.isEnabled ? .secondaryLabel : .tertiaryLabel
+            button.configuration = updated
+        }
+        stopButton.accessibilityLabel = "Stop"
+        stopButton.largeContentTitle = "Stop"
+        stopButton.largeContentImage = configuration.image
     }
 
     /// How much of its context the agent has used, as it last said: "25%" before the action
@@ -346,14 +407,19 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         planView.show(plan)
     }
 
-    private func planChanged() {
-        let showing = !planView.plan.isEmpty
+    /// The messages waiting for the turn to end, in order; empty when there are none.
+    func setQueue(_ prompts: [QueuedPrompt]) {
+        queueView.show(prompts)
+    }
+
+    private func panelsChanged() {
+        let showing = !planView.plan.isEmpty || !queueView.prompts.isEmpty
         // The one in use goes before the other comes, so the two never conflict.
-        if showing, !fieldUnderPlan.isActive {
+        if showing, !fieldUnderPanels.isActive {
             fieldUnderMargin.isActive = false
-            fieldUnderPlan.isActive = true
-        } else if !showing, fieldUnderPlan.isActive {
-            fieldUnderPlan.isActive = false
+            fieldUnderPanels.isActive = true
+        } else if !showing, fieldUnderPanels.isActive {
+            fieldUnderPanels.isActive = false
             fieldUnderMargin.isActive = true
         }
         onHeightChange?()

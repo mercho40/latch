@@ -79,11 +79,27 @@ public struct ToolCallDetails: Sendable {
         // SDK 1.4.0: ToolCallContent -> Content.content -> ContentBlock/TextContent.
         switch type {
         case "content":
-            guard case let .object(nested)? = fields["content"],
-                  string(nested["type"]) == "text", let text = string(nested["text"]) else {
-                return "[Unsupported or malformed content block]"
+            guard case let .object(nested)? = fields["content"], let kind = string(nested["type"]) else {
+                return "[Malformed content block]"
             }
-            return clipped(text, bytes: 8_000)
+            switch kind {
+            case "text":
+                guard let text = string(nested["text"]) else { return "[Malformed content block]" }
+                return clipped(unfenced(text), bytes: 8_000)
+            case "image":
+                // The pixels stay out of a text snapshot; what they were does not.
+                let type = string(nested["mimeType"]).map { clipped($0, bytes: 64, lines: 1) } ?? "unknown type"
+                let size = string(nested["data"]).map { " · " + ByteCountFormatter.string(fromByteCount: Int64($0.utf8.count / 4 * 3), countStyle: .file) } ?? ""
+                return "[Image: \(type)\(size)]"
+            case "resource_link", "resource":
+                let resource: [String: ACPJSONValue]
+                if case let .object(inner)? = nested["resource"] { resource = inner } else { resource = nested }
+                guard let uri = string(resource["uri"]) else { return "[Malformed resource]" }
+                let name = string(nested["name"]).map { clipped($0, bytes: 256, lines: 1) + ": " } ?? ""
+                return "[Resource: " + name + clipped(uri, bytes: 1_024, lines: 2) + "]"
+            default:
+                return "[Unsupported content block]"
+            }
         case "diff":
             guard let path = string(fields["path"]), let newText = string(fields["newText"]) else {
                 return "[Malformed diff block]"
@@ -97,6 +113,20 @@ public struct ToolCallDetails: Sendable {
         default:
             return "[Unsupported content block]"
         }
+    }
+
+    /// Output an agent fenced as one Markdown code block, such as Claude Code's Bash output in
+    /// ```` ```console ````, without the fence: details are shown as plain text already.
+    static func unfenced(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("```"), trimmed.hasSuffix("```"), trimmed.count >= 6,
+              let open = trimmed.firstIndex(of: "\n") else { return text }
+        let info = trimmed[trimmed.index(trimmed.startIndex, offsetBy: 3)..<open]
+        guard !info.contains("`") else { return text }
+        let body = trimmed[trimmed.index(after: open)..<trimmed.index(trimmed.endIndex, offsetBy: -3)]
+        // A fence inside means this was not one block.
+        guard !body.contains("\n```") else { return text }
+        return String(body.hasSuffix("\n") ? body.dropLast() : body)
     }
 
     private static func location(_ value: ACPJSONValue) -> String {

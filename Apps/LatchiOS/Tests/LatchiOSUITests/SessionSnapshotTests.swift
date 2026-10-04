@@ -1,3 +1,4 @@
+import LatchACP
 import LatchSessionKit
 import UIKit
 import XCTest
@@ -14,11 +15,12 @@ final class SessionSnapshotTests: XCTestCase {
         try Snapshot.skipUnlessEnabled()
     }
 
-    private func render(_ name: String, holdLaunch: Bool = false, appearances: [Snapshot.Appearance] = Snapshot.Appearance.all,
+    private func render(_ name: String, holdLaunch: Bool = false, conversations: [ACPSessionSummary]? = nil,
+                        appearances: [Snapshot.Appearance] = Snapshot.Appearance.all,
                         _ scene: (SessionScreenFixture) async throws -> Void) async throws {
         for appearance in appearances {
             let fixture = SessionScreenFixture(client: ScriptedSessionClient(configOptions: ScriptedConfiguration.options,
-                                                                             holdLaunch: holdLaunch))
+                                                                             holdLaunch: holdLaunch, conversations: conversations))
             let window = Snapshot.host(fixture.screen, appearance: appearance)
             try await scene(fixture)
             try await Snapshot.write(window, task: Self.task, name: name, appearance: appearance)
@@ -209,6 +211,58 @@ final class SessionSnapshotTests: XCTestCase {
     func testReadyAndEmpty() async throws {
         try await render("empty") { fixture in
             await fixture.connect()
+        }
+    }
+
+    /// Messages waiting for the turn to end, under the plan, one with a photo, and another
+    /// being written, with Stop beside Send.
+    func testQueuedMessages() async throws {
+        try await render("queue", appearances: Snapshot.Appearance.all + [.largest]) { fixture in
+            await fixture.resume([SampleConversation.prompt, SampleConversation.read])
+            fixture.client.plan(SampleSubagents.plan)
+            fixture.type("Now fix it, and run the test ten times to be sure.")
+            fixture.screen.send()
+            await waitUntil { fixture.client.hasOpenTurn }
+            fixture.client.chunk("I changed the restart to keep its port. Running the test ten times now; so far **7 of 10** passed.")
+            fixture.type("Then commit it, with a message that says why the port has to stay\nand what the test checks")
+            fixture.screen.send()
+            fixture.screen.add([ComposerImage.make(from: SessionDetailViewControllerTests.pngData(width: 400, height: 300),
+                                                   name: "CI log")].compactMap { $0 })
+            fixture.type("And compare with this run")
+            fixture.screen.send()
+            fixture.type("Also check the Linux runner")
+            await waitUntil { fixture.model.plan.count == SampleSubagents.plan.count && fixture.model.queuedPrompts.count == 2 }
+            try await Task.sleep(for: .milliseconds(200))
+            fixture.transcript.scrollToBottom(animated: false)
+        }
+    }
+
+    /// A new session of an agent that lists its saved conversations: the empty page offers
+    /// them, and the list they are chosen from.
+    func testResumeConversation() async throws {
+        let conversations = [
+            ACPSessionSummary(sessionId: "a", cwd: "/home/simon/latch", title: "Fix the flaky reconnect test",
+                              updatedAt: "2026-10-03T16:42:00Z"),
+            ACPSessionSummary(sessionId: "b", cwd: "/home/simon/latch",
+                              title: "Keep the listener's port across a restart of the loopback server, and check it fifty times on Linux",
+                              updatedAt: "2026-09-28T09:15:00Z"),
+            ACPSessionSummary(sessionId: "c", cwd: "/home/simon/latch", title: "Update the release notes for 0.2",
+                              updatedAt: "2026-09-21T11:03:00Z"),
+            ACPSessionSummary(sessionId: "d", cwd: "/home/simon/latch"),
+        ]
+        try await render("resume-empty", conversations: conversations) { fixture in
+            await fixture.connect()
+        }
+        for appearance in Snapshot.Appearance.all + [.largest] {
+            let fixture = SessionScreenFixture(client: ScriptedSessionClient(conversations: conversations))
+            let window = Snapshot.host(fixture.screen, appearance: appearance)
+            await fixture.connect()
+            fixture.screen.resumeConversation()
+            await waitUntil { fixture.screen.conversationPicker != nil }
+            let sheet = try XCTUnwrap(fixture.screen.conversationPicker?.navigationController)
+            try await Snapshot.writeSheet(sheet, over: window, as: Snapshot.deviceName == "ipad" ? .form : .page(medium: false),
+                                          task: Self.task, name: "resume-list", appearance: appearance)
+            Snapshot.tearDown(window)
         }
     }
 }

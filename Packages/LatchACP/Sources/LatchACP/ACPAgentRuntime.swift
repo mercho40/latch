@@ -130,6 +130,24 @@ public actor ACPAgentRuntime {
         await client?.setPermissionHandler(handler)
     }
 
+    public func steer(_ blocks: [ACPPromptBlock]) async throws -> ACPSteerOutcome {
+        try requireReady()
+        guard let client else { throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState) }
+        return try await client.steer(blocks)
+    }
+
+    public func listSessions(cwd: String?) async throws -> [ACPSessionSummary] {
+        try requireReady()
+        guard let client else { throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState) }
+        return try await client.listSessions(cwd: cwd)
+    }
+
+    public func forkSession(sessionID: String, cwd: String) async throws -> String {
+        try requireReady()
+        guard let client else { throw ACPAgentRuntimeError.invalidState(expected: .ready, actual: currentState) }
+        return try await client.forkSession(sessionID: sessionID, cwd: cwd)
+    }
+
     public func setElicitationHandler(
         _ handler: (@Sendable (ACPElicitationRequest) async -> ACPElicitationResponse)?
     ) async throws {

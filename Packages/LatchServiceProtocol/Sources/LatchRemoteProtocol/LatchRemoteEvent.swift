@@ -84,6 +84,8 @@ public enum LatchRemoteEvent: Equatable, Sendable {
     case elicitationRequested(requestID: UUID, request: ACPElicitationRequest)
     case elicitationClosed(requestID: UUID)
     case turnStarted(turnID: UUID, text: String, attachments: [LatchRemoteAttachmentSummary])
+    /// A message a client sent into the running turn `turnID`, under the ID it was sent with.
+    case promptSteered(turnID: UUID, steerID: UUID, text: String, attachments: [LatchRemoteAttachmentSummary])
     /// Follows every `sessionUpdate` the agent sent before it answered the prompt, unless it
     /// answered with an error, which says nothing of where they end. That, and older servers,
     /// can leave the last few after it, so clients keep appending after it.
@@ -103,6 +105,7 @@ public enum LatchRemoteEvent: Equatable, Sendable {
         case .elicitationRequested: "elicitationRequested"
         case .elicitationClosed: "elicitationClosed"
         case .turnStarted: "turnStarted"
+        case .promptSteered: "promptSteered"
         case .turnEnded: "turnEnded"
         case .configurationSet: "configurationSet"
         case .exited: "exited"
@@ -114,7 +117,7 @@ public enum LatchRemoteEvent: Equatable, Sendable {
 
 extension LatchRemoteEvent: Codable {
     private enum CodingKeys: String, CodingKey {
-        case kind, notification, replay, requestID, request, turnID, text, attachments, stopReason, error
+        case kind, notification, replay, requestID, request, turnID, text, attachments, stopReason, error, steerID
         case originalKind, byteCount
     }
 
@@ -159,6 +162,13 @@ extension LatchRemoteEvent: Codable {
                 text: try container.decode(String.self, forKey: .text),
                 attachments: try container.decode([LatchRemoteAttachmentSummary].self, forKey: .attachments)
             )
+        case "promptSteered":
+            return .promptSteered(
+                turnID: try container.decode(UUID.self, forKey: .turnID),
+                steerID: try container.decode(UUID.self, forKey: .steerID),
+                text: try container.decode(String.self, forKey: .text),
+                attachments: try container.decode([LatchRemoteAttachmentSummary].self, forKey: .attachments)
+            )
         case "turnEnded":
             return .turnEnded(
                 turnID: try container.decode(UUID.self, forKey: .turnID),
@@ -200,6 +210,11 @@ extension LatchRemoteEvent: Codable {
             try container.encode(requestID, forKey: .requestID)
         case let .turnStarted(turnID, text, attachments):
             try container.encode(turnID, forKey: .turnID)
+            try container.encode(text, forKey: .text)
+            try container.encode(attachments, forKey: .attachments)
+        case let .promptSteered(turnID, steerID, text, attachments):
+            try container.encode(turnID, forKey: .turnID)
+            try container.encode(steerID, forKey: .steerID)
             try container.encode(text, forKey: .text)
             try container.encode(attachments, forKey: .attachments)
         case let .turnEnded(turnID, stopReason, error):

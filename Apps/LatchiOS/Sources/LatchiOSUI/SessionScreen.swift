@@ -32,7 +32,19 @@ extension SessionDetailViewController {
         // Setting the draft schedules the library's save.
         context.onDraftChange = { [weak session] draft in session?.draft = draft }
         context.canStopAgent = { [weak session] in session?.canStop ?? false }
+        context.onResumeConversation = { [weak session] conversation in session?.resume(conversation) }
+        // The copy opens beside this session, through the library as a new one does.
+        context.onForkConversation = { [weak session, weak root] forked in
+            guard let session, let root, root.library.session(id: session.id) === session else { return }
+            root.show(root.library.fork(session, agentSessionID: forked))
+        }
+        context.returnedAttachments = session.takeReturnedAttachments()
         let screen = SessionDetailViewController(model: session.model, context: context)
+        session.takesBackQueue = { [weak screen] prompts in
+            guard let screen else { return false }
+            screen.takeBack(prompts)
+            return true
+        }
         session.observe(screen, change: { [weak screen, weak session, weak root] in
             guard let screen, let session, let root else { return }
             screen.follow(session, in: root)

@@ -104,6 +104,17 @@ public actor LatchAgentService {
             try await registry.resolvePermission(runtimeID: runtimeID, requestID: requestID, outcome: outcome)
             return .permissionResolved(runtimeID: runtimeID, requestID: requestID)
 
+        case let .steerPrompt(runtimeID, blocks):
+            let outcome = try await registry.runtime(for: runtimeID).steer(blocks)
+            return .promptSteered(runtimeID: runtimeID, injected: outcome != .promptRequired)
+
+        case let .listSessions(runtimeID, cwd):
+            return .sessionsListed(runtimeID: runtimeID, sessions: try await registry.runtime(for: runtimeID).listSessions(cwd: cwd))
+
+        case let .forkSession(runtimeID, sessionID, cwd):
+            return .sessionForked(runtimeID: runtimeID,
+                                  sessionID: try await registry.runtime(for: runtimeID).forkSession(sessionID: sessionID, cwd: cwd))
+
         case let .resolveElicitation(runtimeID, requestID, response):
             try await registry.resolveElicitation(runtimeID: runtimeID, requestID: requestID, response: response)
             return .elicitationResolved(runtimeID: runtimeID, requestID: requestID)

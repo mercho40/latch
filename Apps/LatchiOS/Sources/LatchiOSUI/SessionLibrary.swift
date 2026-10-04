@@ -158,6 +158,25 @@ final class SessionLibrary {
         return session
     }
 
+    /// A session beside `session` that goes on with the agent's copy of its conversation: the
+    /// transcript so far, saved under the copy's ID, which it loads when it first opens. Titled
+    /// as a fork; the agent's later titles do not replace that.
+    @discardableResult
+    func fork(_ session: PhoneSession, agentSessionID: String) -> PhoneSession {
+        var saved = session.savedSession
+        saved.id = UUID()
+        saved.title = String(session.title.prefix(60)) + " (fork)"
+        saved.adoptedAgentTitle = nil
+        saved.draft = ""
+        saved.agentSessionID = agentSessionID
+        // Not the runtime the conversation runs in now: the fork starts one of its own.
+        saved.remote = nil
+        saved.lastActiveAt = now()
+        let fork = PhoneSession(saved: saved, connector: connector)
+        add(fork)
+        return fork
+    }
+
     /// Adds a session made elsewhere, such as by a test.
     func add(_ session: PhoneSession) {
         sessions.append(session)

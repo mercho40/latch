@@ -39,6 +39,8 @@ public enum RemoteServiceEvent: Sendable {
     case configurationSet(runtimeID: AgentRuntimeID, LatchRemoteConfigurationSet, sequence: UInt64)
     /// A turn began, from this client or another; `text` and `attachments` are its prompt.
     case turnStarted(runtimeID: AgentRuntimeID, turnID: UUID, text: String, attachments: [ChatAttachment], sequence: UInt64)
+    /// A message a client sent into the running turn, where it went in.
+    case promptSteered(runtimeID: AgentRuntimeID, turnID: UUID, text: String, attachments: [ChatAttachment], sequence: UInt64)
     case turnEnded(runtimeID: AgentRuntimeID, turnID: UUID, sequence: UInt64)
     /// Output that cannot be shown: evicted before this client read it, or too large to send.
     case outputLost(runtimeID: AgentRuntimeID, sequence: UInt64?)

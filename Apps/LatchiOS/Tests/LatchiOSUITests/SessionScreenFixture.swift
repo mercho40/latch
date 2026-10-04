@@ -1,4 +1,5 @@
 import Foundation
+import LatchACP
 import LatchSessionKit
 import UIKit
 @testable import LatchiOSUI
@@ -14,7 +15,10 @@ final class SessionScreenFixture {
     private(set) var stops = 0
     private(set) var serverSettings = 0
     private(set) var drafts: [String] = []
-    /// Permission sheets the screen put up and took down, in order.
+    /// Conversations the screen asked to take up, and forks it asked to open.
+    private(set) var resumed: [ACPSessionSummary] = []
+    private(set) var forks: [String] = []
+    /// Sheets and alerts the screen put up and took down, in order.
     private(set) var presentedSheets: [UIViewController] = []
     private(set) var dismissedSheets: [UIViewController] = []
 
@@ -32,6 +36,13 @@ final class SessionScreenFixture {
         screen.context.onStopAgent = { [weak self] in self?.stops += 1 }
         screen.context.onServerSettings = { [weak self] in self?.serverSettings += 1 }
         screen.context.onDraftChange = { [weak self] in self?.drafts.append($0) }
+        // As the session does: the same agent starts again on the conversation chosen.
+        screen.context.onResumeConversation = { [weak self] conversation in
+            guard let self else { return }
+            resumed.append(conversation)
+            Task { await self.model.switchToAgentSession(conversation.sessionId) }
+        }
+        screen.context.onForkConversation = { [weak self] in self?.forks.append($0) }
         // The test host never finishes a sheet's transition, so these finish at once.
         screen.presentSheet = { [weak self] sheet, done in
             self?.presentedSheets.append(sheet)
@@ -43,6 +54,7 @@ final class SessionScreenFixture {
         }
         model.onChange = { [weak screen] in screen?.modelDidChange() }
         model.onTranscriptChange = { [weak screen] in screen?.transcriptDidChange() }
+        model.onQueueReturned = { [weak screen] in screen?.takeBack($0) }
     }
 
     func connect() async {

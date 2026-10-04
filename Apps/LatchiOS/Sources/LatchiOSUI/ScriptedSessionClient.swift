@@ -9,8 +9,9 @@ import Synchronization
 /// A server as the session screen sees it, scripted by a test or a `--ui-fixture` screen: it
 /// launches at once (or when released), holds each prompt until the script ends the turn, and
 /// records every prompt and command. It raises permission requests and asks questions when
-/// told, and takes their answers. Events reach the model as a remote channel's would.
-/// Debug builds only.
+/// told, and takes their answers. As Claude Code does when told to, it steers a message into
+/// the running turn, lists its saved conversations, forks one, and replays a conversation's
+/// history as it loads it. Events reach the model as a remote channel's would. Debug builds only.
 final class ScriptedSessionClient: AgentServiceClient {
     let events: AsyncStream<LatchAgentEvent>
     let remoteEvents: AsyncStream<RemoteServiceEvent>?
@@ -21,7 +22,14 @@ final class ScriptedSessionClient: AgentServiceClient {
 
     let acceptsImages: Bool
     let configOptions: [ACPJSONValue]?
+    /// Advertised as `_session/steering`: a message sent while a turn runs goes into it.
+    let steers: Bool
+    /// The saved conversations it lists, or nil for an agent that lists none.
+    let conversations: [ACPSessionSummary]?
+    /// Advertised as `session/fork`; a fork is `forkedSessionID`.
+    let forks: Bool
     static let sessionID = "scripted-session"
+    static let forkedSessionID = "scripted-fork"
 
     private struct State {
         var runtimeID: AgentRuntimeID?
@@ -31,12 +39,24 @@ final class ScriptedSessionClient: AgentServiceClient {
         var holdLaunch = false
         var launchWaiter: CheckedContinuation<Void, Never>?
         var launchFailure: (any Error & Sendable)?
+        var steered: [[ACPPromptBlock]] = []
+        var declinesSteers = false
+        var finishesOnCancel = true
+        var listFailure: (any Error & Sendable)?
+        var history: [(kind: String, text: String)] = []
+        var sequence: UInt64 = 0
+        /// The conversation its updates belong to: a new one's, or the one it last loaded.
+        var sessionID = ScriptedSessionClient.sessionID
     }
     private let state = Mutex(State())
 
-    init(acceptsImages: Bool = true, configOptions: [ACPJSONValue]? = nil, holdLaunch: Bool = false) {
+    init(acceptsImages: Bool = true, configOptions: [ACPJSONValue]? = nil, holdLaunch: Bool = false,
+         steers: Bool = false, conversations: [ACPSessionSummary]? = nil, forks: Bool = false) {
         self.acceptsImages = acceptsImages
         self.configOptions = configOptions
+        self.steers = steers
+        self.conversations = conversations
+        self.forks = forks
         (events, local) = AsyncStream.makeStream()
         let (stream, continuation) = AsyncStream<RemoteServiceEvent>.makeStream()
         remoteEvents = stream
@@ -48,8 +68,32 @@ final class ScriptedSessionClient: AgentServiceClient {
     var commands: [LatchAgentCommand] { state.withLock { $0.commands } }
     var runtimeID: AgentRuntimeID? { state.withLock { $0.runtimeID } }
 
+    /// The messages steered into a turn, in order.
+    var steered: [[ACPPromptBlock]] { state.withLock { $0.steered } }
+
     func failNextLaunch(with error: any Error & Sendable) {
         state.withLock { $0.launchFailure = error }
+    }
+
+    /// Steers find no turn to take them, as when it ended on the way, so the client queues them.
+    func declineSteers() { state.withLock { $0.declinesSteers = true } }
+
+    func failListing(with error: any Error & Sendable) { state.withLock { $0.listFailure = error } }
+
+    /// A cancel reaches the agent, and the turn runs on until the script ends it, as an agent
+    /// finishing its step does.
+    func finishLateOnCancel() { state.withLock { $0.finishesOnCancel = false } }
+
+    /// What a load replays, as the conversation's history: `user_message_chunk` or
+    /// `agent_message_chunk`, and its words.
+    func replayOnLoad(_ history: [(kind: String, text: String)]) { state.withLock { $0.history = history } }
+
+    /// The next position in the journal, for events that carry one.
+    private func nextSequence() -> UInt64 {
+        state.withLock { state in
+            state.sequence += 1
+            return state.sequence
+        }
     }
 
     func releaseLaunch() {
@@ -74,19 +118,52 @@ final class ScriptedSessionClient: AgentServiceClient {
         if let failure = state.withLock({ state in defer { state.launchFailure = nil }; return state.launchFailure }) {
             throw failure
         }
+        var sessions: [String: ACPJSONValue] = [:]
+        if conversations != nil { sessions["list"] = .object([:]) }
+        if forks { sessions["fork"] = .object([:]) }
         return .runtimeStarted(runtimeID: id, initialization: ACPInitializeResponse(
             protocolVersion: 1,
-            agentCapabilities: ACPAgentCapabilities(loadSession: true, promptCapabilities: .object(["image": .bool(acceptsImages)])),
-            agentInfo: ACPImplementation(name: "claude-code", title: "Claude Code", version: "1.0")))
+            agentCapabilities: ACPAgentCapabilities(loadSession: true, promptCapabilities: .object(["image": .bool(acceptsImages)]),
+                                                    sessionCapabilities: .object(sessions)),
+            agentInfo: ACPImplementation(name: "claude-code", title: "Claude Code", version: "1.0"),
+            meta: steers ? .object(["steering": .object(["supported": .bool(true)])]) : nil))
     }
 
     func execute(_ command: LatchAgentCommand) async throws -> LatchAgentResponse {
         state.withLock { $0.commands.append(command) }
         switch command {
         case let .newSession(id, _):
+            state.withLock { $0.sessionID = Self.sessionID }
             return .sessionCreated(runtimeID: id, session: ACPNewSessionResponse(sessionId: Self.sessionID, configOptions: configOptions))
-        case let .loadSession(id, _, _):
+        case let .loadSession(id, sessionID, _):
+            let history = state.withLock { state in
+                state.sessionID = sessionID
+                return state.history
+            }
+            for (kind, text) in history {
+                emit(.replayed(runtimeID: id, ACPSessionNotification(sessionId: sessionID, update: .object([
+                    "sessionUpdate": .string(kind), "content": .object(["type": .string("text"), "text": .string(text)]),
+                ])), sequence: nextSequence()))
+            }
             return .sessionLoaded(runtimeID: id, response: ACPLoadSessionResponse(configOptions: configOptions))
+        case let .steerPrompt(id, blocks):
+            let taken = state.withLock { state in
+                state.steered.append(blocks)
+                return state.turn != nil && !state.declinesSteers
+            }
+            // A server journals what went in, and every client shows it from there.
+            if taken {
+                let text = blocks.compactMap { if case let .text(text) = $0 { text } else { nil } }.joined(separator: "\n")
+                emit(.promptSteered(runtimeID: id, turnID: UUID(), text: text, attachments: [], sequence: nextSequence()))
+            }
+            return .promptSteered(runtimeID: id, injected: taken)
+        case let .listSessions(id, _):
+            if let failure = state.withLock({ state in defer { state.listFailure = nil }; return state.listFailure }) {
+                throw failure
+            }
+            return .sessionsListed(runtimeID: id, sessions: conversations ?? [])
+        case let .forkSession(id, _, _):
+            return .sessionForked(runtimeID: id, sessionID: Self.forkedSessionID)
         case let .setSessionConfigOption(id, configID, value):
             let options = (configOptions ?? []).map { option -> ACPJSONValue in
                 guard case var .object(fields) = option, fields["id"] == .string(configID) else { return option }
@@ -99,7 +176,7 @@ final class ScriptedSessionClient: AgentServiceClient {
         case let .resolveElicitation(id, requestID, _):
             return .elicitationResolved(runtimeID: id, requestID: requestID)
         case let .cancelPrompt(id):
-            endTurn(stopReason: "cancelled")
+            if state.withLock({ $0.finishesOnCancel }) { endTurn(stopReason: "cancelled") }
             return .promptCancellationRequested(runtimeID: id)
         case let .stopRuntime(id):
             return .runtimeStopped(runtimeID: id)
@@ -134,7 +211,7 @@ final class ScriptedSessionClient: AgentServiceClient {
     private func update(_ fields: [String: ACPJSONValue]) {
         guard let id = runtimeID else { return }
         emit(.agent(.sessionUpdate(runtimeID: id, notification: ACPSessionNotification(
-            sessionId: Self.sessionID, update: .object(fields))), sequence: nil))
+            sessionId: state.withLock { $0.sessionID }, update: .object(fields))), sequence: nil))
     }
 
     /// What Claude Code adds to an update: the subagent's call it belongs to, the tool's own
@@ -164,14 +241,14 @@ final class ScriptedSessionClient: AgentServiceClient {
     }
 
     /// A tool call, or an update to one. With `subagent` the call runs a subagent; with
-    /// `parent` a subagent made it.
-    func tool(_ id: String, title: String, status: String, content: String? = nil, kind: String? = nil,
-              toolName: String? = nil, subagent: Bool = false, parent: String? = nil) {
+    /// `parent` a subagent made it. `blocks` are what it returned besides text, such as an image.
+    func tool(_ id: String, title: String, status: String, content: String? = nil, blocks: [ACPJSONValue] = [],
+              kind: String? = nil, toolName: String? = nil, subagent: Bool = false, parent: String? = nil) {
         var fields: [String: ACPJSONValue] = ["sessionUpdate": .string("tool_call"), "toolCallId": .string(id),
                                               "title": .string(title), "status": .string(status)]
-        if let content {
-            fields["content"] = .array([.object(["type": .string("content"),
-                                                 "content": .object(["type": .string("text"), "text": .string(content)])])])
+        let returned = (content.map { [ACPJSONValue.object(["type": .string("text"), "text": .string($0)])] } ?? []) + blocks
+        if !returned.isEmpty {
+            fields["content"] = .array(returned.map { .object(["type": .string("content"), "content": $0]) })
         }
         if let kind { fields["kind"] = .string(kind) }
         fields["_meta"] = Self.meta(parent: parent, toolName: toolName, subagent: subagent)

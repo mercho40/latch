@@ -1,4 +1,5 @@
 import Foundation
+import LatchACP
 import LatchAgentCore
 import LatchRemoteProtocol
 import LatchServiceProtocol
@@ -44,6 +45,11 @@ final class PhoneSession {
     private(set) var hasStarted = false
     /// Tests and snapshots state a row's status directly instead of driving a model there.
     var stubbedStatus: SessionRowStatus.Input?
+    /// The screen showing the session takes back the messages Stop gives back, into its
+    /// composer; false when there is none. See `queueReturned(_:)`.
+    var takesBackQueue: (([QueuedPrompt]) -> Bool)?
+    /// Photos of messages given back while no screen showed the session, for the next one.
+    private(set) var returnedAttachments: [PromptAttachment] = []
 
     private var observers: [Observer] = []
     private var connectTask: Task<Void, Never>?
@@ -78,6 +84,7 @@ final class PhoneSession {
         }
         model.onChange = { [weak self] in self?.modelChanged() }
         model.onTranscriptChange = { [weak self] in self?.transcriptChanged() }
+        model.onQueueReturned = { [weak self] in self?.queueReturned($0) }
     }
 
     convenience init(saved: SavedSession, connector: any RemoteSessionConnector) {
@@ -86,10 +93,13 @@ final class PhoneSession {
                   saved: saved, connector: connector)
     }
 
-    /// Exactly what the Mac's session saves, so a library means the same on both.
+    /// Exactly what the Mac's session saves, so a library means the same on both. Messages
+    /// waiting for the turn to end are saved in the draft, before it: should iOS end the app
+    /// while it is suspended, they come back in the composer rather than being lost. Until
+    /// then they wait, and go, as before.
     var savedSession: SavedSession {
-        SavedSession(id: id, workspacePath: path, title: title, agentID: agent.rawValue,
-                     customCommand: customCommand, draft: draft, messages: model.messages,
+        SavedSession(id: id, workspacePath: path, title: title, agentID: agent.rawValue, customCommand: customCommand,
+                     draft: SessionQueueView.draft(returning: model.queuedPrompts.map(\.text), before: draft), messages: model.messages,
                      agentSessionID: model.savedAgentSessionID, lastActiveAt: model.lastActiveAt,
                      serverID: serverID, remote: model.remoteBinding, agentName: agentName,
                      adoptedAgentTitle: adoptedAgentTitle == title ? adoptedAgentTitle : nil)
@@ -156,6 +166,24 @@ final class PhoneSession {
     }
 
     func rowStatus(now: Date) -> SessionRowStatus { SessionRowStatus.make(statusInput, now: now) }
+
+    // MARK: Waiting messages
+
+    /// Messages written while the agent worked, given back by Stop or by losing the session,
+    /// go back in the composer of the screen showing it; with none, their text goes before the
+    /// saved draft, and their photos wait for the next screen. Nothing written is lost.
+    private func queueReturned(_ prompts: [QueuedPrompt]) {
+        guard !prompts.isEmpty else { return }
+        if takesBackQueue?(prompts) == true { return }
+        draft = SessionQueueView.draft(returning: prompts.map(\.text), before: draft)
+        returnedAttachments = Array((prompts.flatMap(\.attachments) + returnedAttachments).prefix(ComposerImage.maximumCount))
+    }
+
+    /// The photos given back while no screen showed the session, for the screen now showing it.
+    func takeReturnedAttachments() -> [PromptAttachment] {
+        defer { returnedAttachments = [] }
+        return returnedAttachments
+    }
 
     // MARK: Observing
 
@@ -331,6 +359,27 @@ final class PhoneSession {
     /// Leaves the runtime running on the server, as backgrounding and removing do.
     func detach() async {
         await model.detach()
+    }
+
+    /// Takes up one of the agent's saved conversations in this session, which holds none yet:
+    /// the same agent starts again on it and shows its history. Titled as the agent titled it,
+    /// and the agent's own later title replaces that, as one it gave.
+    func resume(_ conversation: ACPSessionSummary) {
+        guard model.phase == .ready, model.messages.isEmpty else { return }
+        title = Self.title(resuming: conversation)
+        adoptedAgentTitle = title
+        notify(transcript: false)
+        let previous = connectTask
+        connectTask = Task { [model] in
+            await previous?.value
+            await model.switchToAgentSession(conversation.sessionId)
+        }
+    }
+
+    /// The conversation's title, on one line and at most 60 characters, or "Resumed Conversation".
+    static func title(resuming conversation: ACPSessionSummary) -> String {
+        let line = conversation.title?.split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        return line.isEmpty ? "Resumed Conversation" : String(line.prefix(60))
     }
 
     /// Waits for a connect or adopt in flight, for tests.

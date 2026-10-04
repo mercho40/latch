@@ -33,6 +33,9 @@ final class LatchAgentMessagesTests: XCTestCase {
                 action: .accept, content: ["question_0": .string("SQLite"), "question_1": .array([.string("a"), .string("b")])]
             )),
             .resolveElicitation(runtimeID: id, requestID: UUID(), response: .cancelled),
+            .steerPrompt(runtimeID: id, blocks: [.text("Also this")]),
+            .listSessions(runtimeID: id, cwd: "/srv"),
+            .forkSession(runtimeID: id, sessionID: "session-1", cwd: "/srv"),
         ]
 
         for command in commands {
@@ -81,6 +84,9 @@ final class LatchAgentMessagesTests: XCTestCase {
             .sessionModeSet(runtimeID: id, sequence: 5),
             .permissionResolved(runtimeID: id, requestID: UUID()),
             .elicitationResolved(runtimeID: id, requestID: UUID()),
+            .sessionsListed(runtimeID: id, sessions: [ACPSessionSummary(sessionId: "s-2", cwd: "/srv", title: nil, updatedAt: nil)]),
+            .promptSteered(runtimeID: id, injected: false),
+            .sessionForked(runtimeID: id, sessionID: "s-3"),
         ]
 
         for response in responses {

@@ -133,9 +133,10 @@ struct ToolCallPresentation: Equatable {
         }
     }
 
-    /// The details as plain monospaced text: section headings in semibold, and a diff's added
-    /// and removed lines in green and red on a faint wash, as on the Mac. Nothing in them is
-    /// interpreted as Markdown or made a link.
+    /// The details as plain monospaced text: section headings in semibold, a diff's added and
+    /// removed lines in green and red on a faint wash, as on the Mac, and what stands for an
+    /// image or a resource the call returned in grey. Nothing in them is interpreted as Markdown
+    /// or made a link.
     static func styledDetails(_ text: String, font: UIFont, boldFont: UIFont) -> NSAttributedString {
         let text = displayedDetails(text)
         let paragraph = NSMutableParagraphStyle()
@@ -165,6 +166,8 @@ struct ToolCallPresentation: Equatable {
                 result.addAttributes([.foregroundColor: color, .backgroundColor: color.withAlphaComponent(0.1)], range: range)
             } else if ["Content:", "Locations:", "Input:", "Output:"].contains(line) || line.hasPrefix("Diff: ") {
                 result.addAttribute(.font, value: boldFont, range: range)
+            } else if Self.isPlaceholder(line) {
+                result.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: range)
             }
             position = end
         }
@@ -177,6 +180,13 @@ extension ToolCallPresentation {
     /// lines omitted]" or "[No text changes]".
     static func isDiffAside(_ line: String) -> Bool {
         line.hasPrefix("[") && line.hasSuffix("]") && (line.hasSuffix(" unchanged lines omitted]") || line.hasSuffix(" changes]"))
+    }
+
+    /// A line that stands for what the call returned and text cannot show, such as
+    /// "[Image: image/png · 3 KB]" or "[Resource: notes: file:///srv/notes.md]": Latch's words,
+    /// not the tool's output.
+    static func isPlaceholder(_ line: String) -> Bool {
+        line.hasSuffix("]") && (line.hasPrefix("[Image: ") || line.hasPrefix("[Resource: "))
     }
 
     /// The details as shown here: the shared history's headings for the agent's raw input and

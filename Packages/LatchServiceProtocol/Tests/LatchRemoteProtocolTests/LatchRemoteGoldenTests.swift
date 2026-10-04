@@ -74,6 +74,10 @@ final class LatchRemoteGoldenTests: XCTestCase {
                 action: .accept, content: ["question_0": .string("A")]
             )), #"{"kind":"resolveElicitation","requestID":"00000000-0000-0000-0000-00000000000B","response":{"action":"accept","content":{"question_0":"A"}},"runtimeID":"rt-1"}"#),
             (.resolveElicitation(runtimeID: id, requestID: Sample.requestID, response: .cancelled), #"{"kind":"resolveElicitation","requestID":"00000000-0000-0000-0000-00000000000B","response":{"action":"cancel"},"runtimeID":"rt-1"}"#),
+            (.steer(runtimeID: id, steerID: Sample.requestID, blocks: [.text("Also this")]),
+             #"{"blocks":[{"text":"Also this","type":"text"}],"kind":"steer","runtimeID":"rt-1","steerID":"00000000-0000-0000-0000-00000000000B"}"#),
+            (.listSessions(runtimeID: id), #"{"kind":"listSessions","runtimeID":"rt-1"}"#),
+            (.forkSession(runtimeID: id, sessionID: "session-1", forkID: Sample.requestID), #"{"forkID":"00000000-0000-0000-0000-00000000000B","kind":"forkSession","runtimeID":"rt-1","sessionID":"session-1"}"#),
             (.attach(runtimeID: id, after: 0), #"{"after":0,"kind":"attach","runtimeID":"rt-1"}"#),
             (.detach(runtimeID: id), #"{"kind":"detach","runtimeID":"rt-1"}"#),
             (.stopRuntime(runtimeID: id), #"{"kind":"stopRuntime","runtimeID":"rt-1"}"#),
@@ -96,6 +100,10 @@ final class LatchRemoteGoldenTests: XCTestCase {
             (.cancelRequested, #"{"kind":"cancelRequested"}"#),
             (.permissionResolved, #"{"kind":"permissionResolved"}"#),
             (.elicitationResolved, #"{"kind":"elicitationResolved"}"#),
+            (.sessions([ACPSessionSummary(sessionId: "s-2", cwd: "/srv", title: "Older", updatedAt: "2026-10-01T10:00:00.000Z")]),
+             #"{"kind":"sessions","sessions":[{"cwd":"/srv","sessionId":"s-2","title":"Older","updatedAt":"2026-10-01T10:00:00.000Z"}]}"#),
+            (.sessionForked(sessionID: "s-3"), #"{"kind":"sessionForked","sessionID":"s-3"}"#),
+            (.steered(injected: true), #"{"injected":true,"kind":"steered"}"#),
             (.attached(record: Sample.record, backlogFrom: 5, truncated: false), #"{"backlogFrom":5,"kind":"attached","record":{"activeTurnID":"00000000-0000-0000-0000-00000000000A","agent":{"preset":"claudeCode"},"agentTitle":"Claude Code","configurationSets":[{"acpSequence":7,"configID":"effort","configOptions":[{"currentValue":"high","id":"effort"}],"route":"config","value":"high"}],"initialization":{"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}},"agentInfo":{"name":"mock-agent","version":"1.0.0"},"protocolVersion":1},"lastSequence":12,"lifecycle":"ready","pendingPermissions":[{"request":{"options":[{"kind":"allow_once","name":"Allow","optionId":"allow-once"}],"sessionId":"session-1","toolCall":{"title":"Read file","toolCallId":"call-1"}},"requestID":"00000000-0000-0000-0000-00000000000B"}],"runtimeID":"rt-1","session":{"kind":"new","response":{"localSequence":2,"modes":{"currentModeId":"ask"},"sessionId":"session-1"}},"sessionID":"session-1","state":[{"localSequence":6,"sessionId":"session-1","update":{"currentModeId":"code","sessionUpdate":"current_mode_update"}}],"turns":[{"state":"running","turnID":"00000000-0000-0000-0000-00000000000A"}],"workspace":"/home/me/project"},"truncated":false}"#),
             (.attached(record: Sample.exitedRecord, backlogFrom: 31, truncated: true), #"{"backlogFrom":31,"kind":"attached","record":{"agent":{"custom":"my-agent --acp"},"agentTitle":"my-agent","configurationSets":[],"exit":{"status":3,"stopped":false},"lastSequence":40,"lifecycle":"exited","loadedThrough":9,"pendingPermissions":[],"runtimeID":"rt-1","session":{"kind":"load","response":{"localSequence":9,"models":{"currentModelId":"model-b"}}},"sessionID":"session-2","state":[],"turns":[{"error":{"code":"runtimeExited","message":"The agent exited."},"state":"ended","turnID":"00000000-0000-0000-0000-00000000000A"}],"workspace":"/srv/work"},"truncated":true}"#),
             (.detached, #"{"kind":"detached"}"#),
@@ -138,6 +146,8 @@ final class LatchRemoteGoldenTests: XCTestCase {
                 LatchRemoteAttachmentSummary(kind: "image", mimeType: "image/png", byteCount: 2048),
                 LatchRemoteAttachmentSummary(kind: "resourceLink", name: "a.txt", byteCount: 0),
             ]), #"{"attachments":[{"byteCount":2048,"kind":"image","mimeType":"image/png"},{"byteCount":0,"kind":"resourceLink","name":"a.txt"}],"kind":"turnStarted","text":"Look at this","turnID":"00000000-0000-0000-0000-00000000000A"}"#),
+            (.promptSteered(turnID: Sample.turnID, steerID: Sample.requestID, text: "Also this", attachments: []),
+             #"{"attachments":[],"kind":"promptSteered","steerID":"00000000-0000-0000-0000-00000000000B","text":"Also this","turnID":"00000000-0000-0000-0000-00000000000A"}"#),
             (.turnEnded(turnID: Sample.turnID, stopReason: "end_turn", error: nil), #"{"kind":"turnEnded","stopReason":"end_turn","turnID":"00000000-0000-0000-0000-00000000000A"}"#),
             (.turnEnded(turnID: Sample.turnID, stopReason: nil, error: LatchRemoteError(
                 code: .runtimeExited, message: "The agent exited."

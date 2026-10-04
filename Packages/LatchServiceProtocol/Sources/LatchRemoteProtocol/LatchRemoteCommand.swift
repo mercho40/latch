@@ -52,6 +52,14 @@ public enum LatchRemoteCommand: Equatable, Sendable {
     case prompt(runtimeID: AgentRuntimeID, turnID: UUID, blocks: [ACPPromptBlock])
     case cancelPrompt(runtimeID: AgentRuntimeID)
     case resolvePermission(runtimeID: AgentRuntimeID, requestID: UUID, outcome: ACPPermissionOutcome)
+    /// A message into the running turn, for an agent that steers. `steerID` makes it safe to
+    /// send again: the server answers a known one with what became of it.
+    case steer(runtimeID: AgentRuntimeID, steerID: UUID, blocks: [ACPPromptBlock])
+    /// The agent's saved sessions in the runtime's workspace.
+    case listSessions(runtimeID: AgentRuntimeID)
+    /// A copy of a session under a new ID. `forkID` makes it safe to send again: the server
+    /// answers a known one with the fork it made, rather than making another.
+    case forkSession(runtimeID: AgentRuntimeID, sessionID: String, forkID: UUID)
     /// Answers an `elicitationRequested` event; one answered already, or withdrawn, fails.
     case resolveElicitation(runtimeID: AgentRuntimeID, requestID: UUID, response: ACPElicitationResponse)
     /// Streams the runtime's events with a sequence above `after`; 0 is from the start.
@@ -73,6 +81,9 @@ public enum LatchRemoteCommand: Equatable, Sendable {
         case .cancelPrompt: "cancelPrompt"
         case .resolvePermission: "resolvePermission"
         case .resolveElicitation: "resolveElicitation"
+        case .steer: "steer"
+        case .listSessions: "listSessions"
+        case .forkSession: "forkSession"
         case .attach: "attach"
         case .detach: "detach"
         case .stopRuntime: "stopRuntime"
@@ -85,7 +96,7 @@ public enum LatchRemoteCommand: Equatable, Sendable {
 extension LatchRemoteCommand: Codable {
     private enum CodingKeys: String, CodingKey {
         case kind, runtimeID, agent, workspace, sessionID, configID, value, modelID, modeID
-        case turnID, blocks, requestID, outcome, after, response
+        case turnID, blocks, requestID, outcome, after, response, forkID, steerID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -125,6 +136,14 @@ extension LatchRemoteCommand: Codable {
                 requestID: try container.decode(UUID.self, forKey: .requestID),
                 outcome: try container.decode(ACPPermissionOutcome.self, forKey: .outcome)
             )
+        case "steer":
+            self = .steer(runtimeID: try runtimeID(), steerID: try container.decode(UUID.self, forKey: .steerID),
+                          blocks: try container.decode([LatchRemotePromptBlockCoding].self, forKey: .blocks).map(\.block))
+        case "listSessions":
+            self = .listSessions(runtimeID: try runtimeID())
+        case "forkSession":
+            self = .forkSession(runtimeID: try runtimeID(), sessionID: try string(.sessionID),
+                                forkID: try container.decode(UUID.self, forKey: .forkID))
         case "resolveElicitation":
             self = .resolveElicitation(
                 runtimeID: try runtimeID(),
@@ -176,6 +195,16 @@ extension LatchRemoteCommand: Codable {
             try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
             try container.encode(requestID, forKey: .requestID)
             try container.encode(outcome, forKey: .outcome)
+        case let .steer(runtimeID, steerID, blocks):
+            try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
+            try container.encode(steerID, forKey: .steerID)
+            try container.encode(blocks.map(LatchRemotePromptBlockCoding.init), forKey: .blocks)
+        case let .listSessions(runtimeID):
+            try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
+        case let .forkSession(runtimeID, sessionID, forkID):
+            try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
+            try container.encode(sessionID, forKey: .sessionID)
+            try container.encode(forkID, forKey: .forkID)
         case let .resolveElicitation(runtimeID, requestID, response):
             try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
             try container.encode(requestID, forKey: .requestID)
@@ -240,6 +269,10 @@ public enum LatchRemoteResponse: Equatable, Sendable {
     case cancelRequested
     case permissionResolved
     case elicitationResolved
+    /// False when no turn was running to take it: send it as a prompt.
+    case steered(injected: Bool)
+    case sessions([ACPSessionSummary])
+    case sessionForked(sessionID: String)
     /// Events with a sequence from `backlogFrom` follow this reply. `truncated` means some
     /// after the requested cursor were already evicted.
     case attached(record: LatchRemoteRuntimeRecord, backlogFrom: UInt64, truncated: Bool)
@@ -260,6 +293,9 @@ public enum LatchRemoteResponse: Equatable, Sendable {
         case .cancelRequested: "cancelRequested"
         case .permissionResolved: "permissionResolved"
         case .elicitationResolved: "elicitationResolved"
+        case .steered: "steered"
+        case .sessions: "sessions"
+        case .sessionForked: "sessionForked"
         case .attached: "attached"
         case .detached: "detached"
         case .stopped: "stopped"
@@ -271,7 +307,7 @@ public enum LatchRemoteResponse: Equatable, Sendable {
 
 extension LatchRemoteResponse: Codable {
     private enum CodingKeys: String, CodingKey {
-        case kind, initialization, response, sequence, turnID, record, backlogFrom, truncated, runtimes
+        case kind, initialization, response, sequence, turnID, record, backlogFrom, truncated, runtimes, sessions, sessionID, injected
     }
 
     public init(from decoder: any Decoder) throws {
@@ -299,6 +335,12 @@ extension LatchRemoteResponse: Codable {
             self = .permissionResolved
         case "elicitationResolved":
             self = .elicitationResolved
+        case "steered":
+            self = .steered(injected: try container.decode(Bool.self, forKey: .injected))
+        case "sessions":
+            self = .sessions(try container.decode([ACPSessionSummary].self, forKey: .sessions))
+        case "sessionForked":
+            self = .sessionForked(sessionID: try container.decode(String.self, forKey: .sessionID))
         case "attached":
             self = .attached(
                 record: try container.decode(LatchRemoteRuntimeRecord.self, forKey: .record),
@@ -339,6 +381,12 @@ extension LatchRemoteResponse: Codable {
             try container.encode(truncated, forKey: .truncated)
         case let .runtimes(runtimes):
             try container.encode(runtimes, forKey: .runtimes)
+        case let .steered(injected):
+            try container.encode(injected, forKey: .injected)
+        case let .sessions(sessions):
+            try container.encode(sessions, forKey: .sessions)
+        case let .sessionForked(sessionID):
+            try container.encode(sessionID, forKey: .sessionID)
         case .cancelRequested, .permissionResolved, .elicitationResolved, .detached, .stopped, .unknown:
             break
         }

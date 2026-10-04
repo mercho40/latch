@@ -218,6 +218,23 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         case let .resolvePermission(id, requestID, outcome):
             _ = try await send(.resolvePermission(runtimeID: id, requestID: requestID, outcome: outcome), to: id)
             return .permissionResolved(runtimeID: id, requestID: requestID)
+        case let .steerPrompt(id, blocks):
+            // One ID for the steer, however often the channel has to send it.
+            guard case let .steered(injected) = try await send(.steer(runtimeID: id, steerID: UUID(), blocks: blocks), to: id) else {
+                throw LatchAgentFailure(code: .commandFailed, message: "The server answered the steer with something else.")
+            }
+            return .promptSteered(runtimeID: id, injected: injected)
+        case let .listSessions(id, _):
+            guard case let .sessions(sessions) = try await send(.listSessions(runtimeID: id), to: id) else {
+                throw LatchAgentFailure(code: .commandFailed, message: "The server answered the list of sessions with something else.")
+            }
+            return .sessionsListed(runtimeID: id, sessions: sessions)
+        case let .forkSession(id, sessionID, _):
+            // One ID for the fork, however often the channel has to send it.
+            guard case let .sessionForked(forked) = try await send(.forkSession(runtimeID: id, sessionID: sessionID, forkID: UUID()), to: id) else {
+                throw LatchAgentFailure(code: .commandFailed, message: "The server answered the fork with something else.")
+            }
+            return .sessionForked(runtimeID: id, sessionID: forked)
         case let .resolveElicitation(id, requestID, response):
             _ = try await send(.resolveElicitation(runtimeID: id, requestID: requestID, response: response), to: id)
             return .elicitationResolved(runtimeID: id, requestID: requestID)
@@ -509,6 +526,9 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
             case let .turnStarted(turnID, text, attachments):
                 return [.turnStarted(runtimeID: id, turnID: turnID, text: text,
                                      attachments: attachments.map(ChatAttachment.init), sequence: sequence)]
+            case let .promptSteered(turnID, _, text, attachments):
+                return [.promptSteered(runtimeID: id, turnID: turnID, text: text,
+                                       attachments: attachments.map(ChatAttachment.init), sequence: sequence)]
             case let .turnEnded(turnID, _, _):
                 return [.turnEnded(runtimeID: id, turnID: turnID, sequence: sequence)]
             case let .configurationSet(configuration):
@@ -565,6 +585,8 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
             return try await body()
         } catch let error as LatchRemoteError where error.code == .workspaceNotFound {
             throw RemoteWorkspaceNotFound(message: error.message)
+        } catch let error as LatchRemoteError where error.code == .unsupportedCommand {
+            throw RemoteCommandUnsupported()
         } catch let error as LatchRemoteError {
             throw Self.agentFailure(error)
         } catch let error as LatchRemoteClientError {
@@ -647,6 +669,12 @@ struct RemoteServerFailure: RemoteConnectionFailure, LocalizedError, Equatable {
 struct RemoteWorkspaceNotFound: LocalizedError, Equatable {
     let message: String
     var errorDescription: String? { message }
+}
+
+/// A server older than this client, which has no such command, such as listing or forking
+/// the agent's conversations.
+public struct RemoteCommandUnsupported: LocalizedError, Equatable {
+    public var errorDescription: String? { "The server runs an older latch-server, which can’t do this. Update it to match Latch." }
 }
 
 /// A turn whose channel failed for good while it was awaited. Not the turn's end: the client

@@ -304,7 +304,7 @@ fi
 if [[ -n "$screenshots" && "$configuration" == Debug ]]; then
     mkdir -p "$screenshots"
     shell_screens='onboarding sessions new-session servers server-add server-edit banner'
-    session_screens='conversation markdown streaming photos slash permission question plan-approval reconnecting error empty subagents plan'
+    session_screens='conversation markdown streaming photos slash permission question plan-approval reconnecting error empty subagents plan queue resume'
     large_screens='sessions conversation streaming permission question new-session'
     large_size=accessibility-extra-large
     # The largest size, where a sheet's controls are likeliest to fall out of sight.

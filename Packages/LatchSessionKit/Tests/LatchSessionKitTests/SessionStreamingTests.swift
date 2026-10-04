@@ -171,6 +171,117 @@ final class SessionStreamingTests: XCTestCase {
         XCTAssertNil(model.usage)
     }
 
+    /// A message written while the agent works waits its turn and goes out when it ends; Stop
+    /// gives what is still waiting back to the composer rather than sending it.
+    @MainActor func testMessagesWrittenWhileTheAgentWorksWaitTheirTurn() async throws {
+        let client = StreamingClient()
+        let model = await connected(client)
+        var returned: [String] = []
+        model.onQueueReturned = { returned += $0.map(\.text) }
+        let first = Task { await model.send("First") }
+        try await eventually("the first prompt") { await client.hasPendingPrompt }
+        await model.send("Second")
+        await model.send("Third")
+        XCTAssertEqual(model.queuedPrompts.map(\.text), ["Second", "Third"])
+        let third = try XCTUnwrap(model.queuedPrompts.last?.id)
+        XCTAssertEqual(model.unqueue(third)?.text, "Third")
+        await client.completePrompt()
+        await first.value
+        try await eventually("the queued prompt") { await client.prompts == ["First", "Second"] }
+        XCTAssertTrue(model.queuedPrompts.isEmpty)
+        try await eventually("the second turn") { await client.hasPendingPrompt }
+
+        await model.send("Never sent")
+        await model.cancel()
+        XCTAssertEqual(returned, ["Never sent"])
+        XCTAssertTrue(model.queuedPrompts.isEmpty)
+        await client.completePrompt(reason: "cancelled")
+        try await eventually("the turn's end") { model.phase == .ready }
+        let prompts = await client.prompts
+        XCTAssertEqual(prompts, ["First", "Second"])
+        await model.disconnect()
+    }
+
+    /// With an agent that steers, a message written while it works goes into the turn and shows
+    /// once the agent has it; one that finds the turn over goes as a prompt of its own.
+    @MainActor func testAMessageWrittenWhileTheAgentWorksSteersALocalTurn() async throws {
+        let client = StreamingClient(steers: true)
+        let model = await connected(client)
+        XCTAssertTrue(model.steersPrompts)
+        let first = Task { await model.send("First") }
+        try await eventually("the first prompt") { await client.hasPendingPrompt }
+        await model.send("Also this")
+        let steered = await client.steered
+        XCTAssertEqual(steered, ["Also this"])
+        XCTAssertEqual(model.messages.map(\.text), ["First", "Also this"])
+        XCTAssertTrue(model.queuedPrompts.isEmpty)
+        await client.completePrompt()
+        await first.value
+        let prompts = await client.prompts
+        XCTAssertEqual(prompts, ["First"], "Nothing more was sent as a prompt")
+
+        // Into a turn being stopped, nothing is steered: what is written then waits for its end.
+        let second = Task { await model.send("Second") }
+        try await eventually("the second prompt") { await client.hasPendingPrompt }
+        await model.cancel()
+        await model.send("After Stop")
+        let steeredAfterStop = await client.steered
+        XCTAssertEqual(steeredAfterStop, ["Also this"])
+        XCTAssertEqual(model.queuedPrompts.map(\.text), ["After Stop"])
+        await client.completePrompt(reason: "cancelled")
+        await second.value
+        try await eventually("the message written after Stop") { await client.prompts == ["First", "Second", "After Stop"] }
+        await model.disconnect()
+    }
+
+    /// A server older than Latch cannot list or fork the agent's conversations; the session
+    /// stops offering to.
+    @MainActor func testAnOlderServerTurnsListingOff() async throws {
+        let client = StreamingClient(refusesSessions: true)
+        let model = await connected(client)
+        XCTAssertTrue(model.listsAgentSessions && model.forksAgentSessions)
+        do {
+            _ = try await model.agentSessions()
+            XCTFail("An older server refuses")
+        } catch {
+            XCTAssertTrue(error is RemoteCommandUnsupported)
+        }
+        XCTAssertFalse(model.listsAgentSessions)
+        do {
+            _ = try await model.forkAgentSession()
+            XCTFail("An older server refuses")
+        } catch {
+            XCTAssertTrue(error is RemoteCommandUnsupported)
+        }
+        XCTAssertFalse(model.forksAgentSessions)
+        await model.disconnect()
+    }
+
+    /// A new session takes up one of the agent's own conversations and shows its history, which
+    /// only the agent had; it can also fork its conversation.
+    @MainActor func testANewSessionTakesUpAnAgentsConversationWithItsHistory() async throws {
+        let client = StreamingClient()
+        let model = await connected(client)
+        XCTAssertTrue(model.listsAgentSessions && model.forksAgentSessions)
+        let sessions = try await model.agentSessions()
+        XCTAssertEqual(sessions.map(\.sessionId), ["older"], "Not the conversation the session holds")
+        let forked = try await model.forkAgentSession()
+        XCTAssertEqual(forked, StreamingClient.session + "-fork")
+
+        await model.switchToAgentSession("older")
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.savedAgentSessionID, "older")
+        let runtimeValue = await client.runtime
+        let runtime = try XCTUnwrap(runtimeValue)
+        await client.update(runtime, session: "older", value: .object(["sessionUpdate": .string("user_message_chunk"),
+                                                                       "content": .object(["type": .string("text"), "text": .string("Earlier question")])]),
+                            sequence: 8)
+        await client.text(runtime, "Earlier answer", session: "older", sequence: 9)
+        await drain(client, runtime: runtime)
+        XCTAssertEqual(model.messages.map(\.text), ["Earlier question", "Earlier answer"])
+        await model.disconnect()
+    }
+
     /// Disconnecting while a local turn's reply waits for its last update lets go of it.
     @MainActor func testDisconnectingLetsGoOfALocalReplyWaitingForItsLastUpdate() async throws {
         let started = expectation(description: "Prompt started")
@@ -331,6 +442,12 @@ final class SessionStreamingTests: XCTestCase {
 private actor StreamingClient: AgentServiceClient {
     static let session = "streaming-session"
     nonisolated let transportDescription = "deterministic streaming mock"
+    /// What every prompt said, in order, and every message steered into a turn.
+    private(set) var prompts: [String] = []
+    private(set) var steered: [String] = []
+    private let steers: Bool
+    private let refusesSessions: Bool
+    var hasPendingPrompt: Bool { pendingPrompt != nil }
     nonisolated let events: AsyncStream<LatchAgentEvent>
     private nonisolated let continuation: AsyncStream<LatchAgentEvent>.Continuation
     private let promptStarted: XCTestExpectation?
@@ -340,7 +457,10 @@ private actor StreamingClient: AgentServiceClient {
     private var barriers: [UUID: XCTestExpectation] = [:]
     private(set) var runtime: AgentRuntimeID?
 
-    init(promptStarted: XCTestExpectation? = nil, selectionStarted: XCTestExpectation? = nil) {
+    init(promptStarted: XCTestExpectation? = nil, selectionStarted: XCTestExpectation? = nil, steers: Bool = false,
+         refusesSessions: Bool = false) {
+        self.steers = steers
+        self.refusesSessions = refusesSessions
         self.promptStarted = promptStarted
         self.selectionStarted = selectionStarted
         let pair = AsyncStream<LatchAgentEvent>.makeStream()
@@ -355,12 +475,27 @@ private actor StreamingClient: AgentServiceClient {
         case let .startRuntime(id, _):
             runtime = id
             return .runtimeStarted(runtimeID: id, initialization: ACPInitializeResponse(
-                protocolVersion: 1, agentCapabilities: .init(loadSession: true)))
+                protocolVersion: 1, agentCapabilities: .init(loadSession: true, sessionCapabilities: .object([
+                    "list": .object([:]), "fork": .object([:]),
+                ])), meta: steers ? .object(["steering": .object(["supported": .bool(true)])]) : nil))
+        case let .steerPrompt(id, blocks):
+            steered += blocks.compactMap { if case let .text(text) = $0 { text } else { nil } }
+            return .promptSteered(runtimeID: id, injected: pendingPrompt != nil)
+        case .listSessions where refusesSessions, .forkSession where refusesSessions:
+            throw RemoteCommandUnsupported()
+        case let .listSessions(id, cwd):
+            return .sessionsListed(runtimeID: id, sessions: [
+                ACPSessionSummary(sessionId: "older", cwd: cwd, title: "An older conversation"),
+                ACPSessionSummary(sessionId: Self.session, cwd: cwd),
+            ])
+        case let .forkSession(id, sessionID, _):
+            return .sessionForked(runtimeID: id, sessionID: sessionID + "-fork")
         case let .newSession(id, _):
             return .sessionCreated(runtimeID: id, session: ACPNewSessionResponse(sessionId: Self.session))
         case let .loadSession(id, _, _):
             return .sessionLoaded(runtimeID: id, response: ACPLoadSessionResponse(localSequence: 10))
-        case .prompt:
+        case let .prompt(_, blocks):
+            prompts += blocks.compactMap { if case let .text(text) = $0 { text } else { nil } }
             return await withCheckedContinuation {
                 pendingPrompt = $0
                 promptStarted?.fulfill()

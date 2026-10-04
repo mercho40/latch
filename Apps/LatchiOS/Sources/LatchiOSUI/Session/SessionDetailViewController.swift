@@ -40,6 +40,15 @@ struct SessionDetailContext {
     var hasServer: () -> Bool = { true }
     /// The user named the session.
     var onRename: ((String) -> Void)?
+    /// Takes up one of the agent's saved conversations in this session, which holds none yet.
+    /// Without it, Resume Conversation… is not offered.
+    var onResumeConversation: ((ACPSessionSummary) -> Void)?
+    /// Opens a session beside this one that goes on with the agent's copy of this conversation,
+    /// under the copy's ID. Without it, Fork Conversation is not offered.
+    var onForkConversation: ((String) -> Void)?
+    /// Photos the composer starts with: those of messages given back while no screen showed
+    /// the session.
+    var returnedAttachments: [PromptAttachment] = []
 
     /// The folder to show: `displayPath`, or the whole path while there is none.
     var shownPath: String { displayPath.isEmpty ? folderPath : displayPath }
@@ -49,11 +58,13 @@ struct SessionDetailContext {
 /// link and failures, the agent's permission requests and questions as sheets, and a menu
 /// for the agent's settings. It drops into the split view's secondary column.
 ///
-/// The host owns `model.onChange` and `model.onTranscriptChange`, because it needs them
-/// while no session screen is open, and passes each on to the screen that shows the model:
+/// The host owns `model.onChange`, `model.onTranscriptChange` and `model.onQueueReturned`,
+/// because it needs them while no session screen is open, and passes each on to the screen
+/// that shows the model:
 ///
 ///     model.onChange = { [weak screen] in screen?.modelDidChange() }
 ///     model.onTranscriptChange = { [weak screen] in screen?.transcriptDidChange() }
+///     model.onQueueReturned = { [weak screen] in screen?.takeBack($0) }
 final class SessionDetailViewController: UIViewController, PHPickerViewControllerDelegate, UINavigationItemRenameDelegate,
     UIDropInteractionDelegate {
     let model: SessionModel
@@ -86,8 +97,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     private var sheetRetry: Task<Void, Never>?
     /// How much of the page's end the composer covers.
     private var composerOverlap: CGFloat = 0
-    /// How the permission and question sheets come and go, each calling back when its transition ends.
-    /// Tests replace them: a test host never finishes a sheet's transition.
+    /// How sheets and alerts come and go, each calling back when its transition ends: the
+    /// permission and question sheets, the list of conversations to resume, and what went wrong
+    /// with it or with a fork. Tests replace them: a test host never finishes a sheet's transition.
     lazy var presentSheet: (UIViewController, @escaping () -> Void) -> Void = { [weak self] sheet, done in
         self?.topPresenter.present(sheet, animated: true, completion: done)
     }
@@ -98,8 +110,24 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     var pasteboard = UIPasteboard.general
     /// Keeps the photos sent from here, so a prompt shows them rather than their names.
     var sentImages = SentImageCache.shared
-    /// Thumbnails of the last prompt sent, until the transcript shows the message they went with.
-    private var pendingThumbnails: (names: [String], images: [UIImage?], after: Set<UUID>)?
+    /// Thumbnails of prompts sent, steered or queued, in order, each until the transcript shows
+    /// the message it went with.
+    private var pendingThumbnails: [PendingThumbnails] = []
+    private struct PendingThumbnails {
+        let names: [String]
+        let images: [UIImage?]
+        /// Messages that were there already, or that an earlier prompt's thumbnails went with.
+        var after: Set<UUID>
+        let attachments: Set<UUID>
+    }
+    /// The thumbnails of photos in queued messages, should a message come back to the composer.
+    private var queuedThumbnails: [UUID: UIImage] = [:]
+    /// The agent's conversations are being listed, for Resume Conversation….
+    private(set) var listingConversations = false
+    /// The list of conversations to resume, while it is on screen.
+    private(set) weak var conversationPicker: ConversationPickerViewController?
+    /// The agent is copying the conversation, for Fork Conversation.
+    private(set) var forking = false
     /// Opened from New Session: the composer takes the keyboard once the screen is up.
     private var focusesComposer = false
     /// The slash suggestions were dismissed with Escape, until the draft changes.
@@ -178,6 +206,14 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         composer.onPasteImages = { [weak self] providers in self?.load(providers) }
         composer.canHandleKey = { [weak self] key in self?.canHandle(key) ?? false }
         composer.onKey = { [weak self] key in self?.handle(key) }
+        composer.queueView.onEdit = { [weak self] id in self?.editQueued(id) }
+        composer.queueView.onRemove = { [weak self] id in self?.removeQueued(id) }
+        if !context.returnedAttachments.isEmpty {
+            attachments = Array(context.returnedAttachments.prefix(ComposerImage.maximumCount)).map {
+                ComposerImage(returning: $0, thumbnail: nil)
+            }
+            composer.setAttachments(attachments)
+        }
         suggestions.onChoose = { [weak self] command in self?.choose(command) }
         suggestions.isHidden = true
         banner.onAction = { [weak self] id in self?.bannerAction(id) }
@@ -402,15 +438,39 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         refreshEmptyState()
     }
 
-    /// The photos just sent go with the first prompt after the send whose attachments they
-    /// are, once the transcript has it.
+    /// The photos sent go with the first prompt after the send whose attachments they are,
+    /// once the transcript has it; a message steered or queued with photos finds its own later.
     private func keepPendingThumbnails() {
-        guard let pending = pendingThumbnails else { return }
-        guard let message = model.messages.first(where: {
-            $0.role == .user && !pending.after.contains($0.id) && $0.attachments.map(\.name) == pending.names
-        }) else { return }
-        pendingThumbnails = nil
-        sentImages.store(pending.images, for: message.id)
+        var index = 0
+        while index < pendingThumbnails.count {
+            let pending = pendingThumbnails[index]
+            guard let message = model.messages.first(where: {
+                $0.role == .user && !pending.after.contains($0.id) && $0.attachments.map(\.name) == pending.names
+            }) else {
+                index += 1
+                continue
+            }
+            pendingThumbnails.remove(at: index)
+            sentImages.store(pending.images, for: message.id)
+            // A later message with photos of the same names is another one.
+            for other in pendingThumbnails.indices { pendingThumbnails[other].after.insert(message.id) }
+        }
+    }
+
+    /// The thumbnails of `images`, for the message they go with once the transcript has it.
+    private func expectThumbnails(of images: [ComposerImage]) {
+        guard !images.isEmpty else { return }
+        pendingThumbnails.append(PendingThumbnails(names: images.map(\.name), images: images.map(\.thumbnail),
+                                                   after: Set(model.messages.map(\.id)), attachments: Set(images.map(\.id))))
+        // One whose message never showed, such as a prompt the agent refused, goes in time.
+        if pendingThumbnails.count > 8 { pendingThumbnails.removeFirst() }
+    }
+
+    /// A queued message's photos will not go with it after all.
+    private func forgetThumbnails(of attachments: [PromptAttachment]) {
+        let ids = Set(attachments.map(\.id))
+        pendingThumbnails.removeAll { !$0.attachments.isDisjoint(with: ids) }
+        for id in ids { queuedThumbnails[id] = nil }
     }
 
     private var isReadOnly: Bool { model.archivedWithoutContext && model.phase == .disconnected }
@@ -419,9 +479,10 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         !composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
     }
 
-    /// Only a ready session takes a prompt, and not while a change of model or mode is on its way.
+    /// A ready session takes a prompt, and one whose agent works takes a message for its turn
+    /// or for after it; neither while a change of model or mode is on its way.
     var canSend: Bool {
-        model.phase == .ready && !model.isChangingConfiguration && hasSomethingToSend
+        (model.phase == .ready || model.phase == .prompting) && !model.isChangingConfiguration && hasSomethingToSend
     }
 
     var canStop: Bool { model.phase == .prompting && !model.cancellationRequested }
@@ -433,8 +494,12 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         // Nothing else on the screen names the agent, so the placeholder does at every size.
         composer.placeholder = isReadOnly ? "This conversation is read-only" : "Ask \(context.agentTitle)…"
         composer.canAttach = !isReadOnly && attachments.count < ComposerImage.maximumCount
+        composer.setQueue(model.queuedPrompts)
+        let queued = Set(model.queuedPrompts.flatMap(\.attachments).map(\.id))
+        queuedThumbnails = queuedThumbnails.filter { queued.contains($0.key) }
         if model.phase == .prompting {
-            composer.setAction(.stop(enabled: canStop))
+            // With a message to send, Send stays, and Stop moves beside it.
+            composer.setAction(canSend ? .sendWhileWorking(steers: steersNext, canStop: canStop) : .stop(enabled: canStop))
         } else {
             composer.setAction(.send(enabled: canSend))
         }
@@ -518,6 +583,18 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             configuration.text = "Ask \(context.agentTitle)"
             configuration.secondaryText = context.shownPath.isEmpty
                 ? "Works on \(serverName)." : "Works in \(context.shownPath) on \(serverName)."
+            // Or it takes up one of the agent's own conversations, as Resume Conversation… does.
+            if offersResume, model.phase == .ready {
+                var button = UIButton.Configuration.gray()
+                button.title = "Resume Conversation…"
+                button.image = UIImage(systemName: "clock.arrow.circlepath")
+                button.imagePadding = 6
+                button.cornerStyle = .capsule
+                button.showsActivityIndicator = listingConversations
+                configuration.button = button
+                configuration.buttonProperties.primaryAction = UIAction { [weak self] _ in self?.resumeConversation() }
+                configuration.buttonProperties.isEnabled = canResumeConversation
+            }
         case .disconnected, .stopping:
             // The banner says what went wrong, and offers what fixes it.
             guard model.errorMessage == nil, !banner.isShowing else {
@@ -699,6 +776,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     private struct MenuState: Equatable {
         let configuration: SessionConfiguration
         let editable: Bool
+        /// Fork Conversation and Resume Conversation…: nil when not offered, else whether they can run now.
+        let fork: Bool?
+        let resume: Bool?
         let canStartAgent: Bool
         let canStopAgent: Bool
         let folderPath: String
@@ -714,6 +794,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         let state = MenuState(
             configuration: model.configuration,
             editable: model.phase == .ready && !model.isChangingConfiguration,
+            fork: offersFork ? canForkConversation : nil, resume: offersResume ? canResumeConversation : nil,
             canStartAgent: canStartAgent, canStopAgent: canStopAgent,
             folderPath: context.folderPath, canRename: context.onRename != nil)
         guard state != renderedMenu else { return }
@@ -758,11 +839,23 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             self?.context.onRetry()
             self?.refresh()
         }
+        // What the agent can do with the conversation itself, where it offers to.
+        var conversation: [UIAction] = []
+        if let fork = state.fork {
+            conversation.append(UIAction(title: "Fork Conversation", subtitle: "A copy that goes on separately",
+                                         image: UIImage(systemName: "arrow.triangle.branch"),
+                                         attributes: fork ? [] : .disabled) { [weak self] _ in self?.forkConversation() })
+        }
+        if let resume = state.resume {
+            conversation.append(UIAction(title: "Resume Conversation…", image: UIImage(systemName: "clock.arrow.circlepath"),
+                                         attributes: resume ? [] : .disabled) { [weak self] _ in self?.resumeConversation() })
+        }
         return UIMenu(children: [
             UIMenu(options: .displayInline, children: settings),
+            conversation.isEmpty ? nil : UIMenu(options: .displayInline, children: conversation),
             UIMenu(options: .displayInline, children: state.canRename ? [rename, copyPath] : [copyPath]),
             UIMenu(options: .displayInline, children: state.canStartAgent ? [start, stop] : [stop]),
-        ])
+        ].compactMap { $0 })
     }
 
     /// The agent's choices in its order and groups, the current one checked. Nothing is
@@ -831,24 +924,193 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             composer.setAttachments(attachments)
             return refuseImages()
         }
+        if model.phase == .prompting { return sendWhileWorking() }
         let draft = composer.text
         let sent = attachments.map(\.prompt)
-        pendingThumbnails = sent.isEmpty ? nil
-            : (sent.map(\.name), attachments.map(\.thumbnail), Set(model.messages.map(\.id)))
+        expectThumbnails(of: attachments)
+        clearComposer()
+        transcript.scrollToBottom(animated: false)
+        Task { await model.send(draft, attachments: sent) }
+        refresh()
+    }
+
+    /// Into the running turn, for an agent that steers as Claude Code does: it takes the
+    /// message at its next step, and the transcript shows it there. Otherwise the message waits
+    /// over the composer and goes when the turn ends.
+    private func sendWhileWorking() {
+        let draft = composer.text
+        let images = attachments
+        let steers = steersNext
+        guard steers || model.enqueue(draft, attachments: images.map(\.prompt)) else { return }
+        for image in images { queuedThumbnails[image.id] = image.thumbnail }
+        expectThumbnails(of: images)
+        clearComposer()
+        if steers {
+            transcript.scrollToBottom(animated: false)
+            // One the turn no longer takes waits with the others, or comes back to the composer.
+            Task { await model.send(draft, attachments: images.map(\.prompt)) }
+        } else {
+            UIAccessibility.post(notification: .announcement, argument: NSAttributedString(
+                string: "Sends when \(context.agentTitle) finishes.", attributes: [.accessibilitySpeechQueueAnnouncement: true]))
+        }
+        refresh()
+    }
+
+    /// Whether a message sent now goes into the turn: only while none waits before it, and not
+    /// into a turn that Stop is ending, where it would go with the turn.
+    private var steersNext: Bool {
+        model.steersPrompts && model.queuedPrompts.isEmpty && !model.cancellationRequested
+    }
+
+    private func clearComposer() {
         composer.text = ""
         attachments = []
         composer.setAttachments([])
         attachmentNotice = nil
         context.onDraftChange("")
-        transcript.scrollToBottom(animated: false)
-        Task { await model.send(draft, attachments: sent) }
-        refresh()
     }
 
     func stop() {
         guard canStop else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         Task { await model.cancel() }
+    }
+
+    // MARK: Waiting messages
+
+    /// Messages given back, by Stop or by losing the session, go back in the composer before
+    /// what it holds, with their photos, so nothing written is lost.
+    func takeBack(_ prompts: [QueuedPrompt]) {
+        restore(prompts, thumbnails: queuedThumbnails)
+    }
+
+    private func restore(_ prompts: [QueuedPrompt], thumbnails: [UUID: UIImage]) {
+        guard !prompts.isEmpty else { return }
+        // Before the screen first shows, so the draft it loads with is this one.
+        loadViewIfNeeded()
+        let returned = prompts.flatMap(\.attachments)
+        forgetThumbnails(of: returned)
+        composer.text = SessionQueueView.draft(returning: prompts.map(\.text), before: composer.text)
+        context.onDraftChange(composer.text)
+        let images = returned.map { ComposerImage(returning: $0, thumbnail: thumbnails[$0.id]) } + attachments
+        attachments = Array(images.prefix(ComposerImage.maximumCount))
+        composer.setAttachments(attachments)
+        attachmentNotice = nil
+        suggestionsDismissed = false
+        if images.count > attachments.count { return refuseMore() }
+        refresh()
+    }
+
+    /// Edit: the message leaves the queue for the composer, where it can change and go again.
+    private func editQueued(_ id: UUID) {
+        // Taking it out prunes the thumbnails of what no longer waits.
+        let thumbnails = queuedThumbnails
+        guard let queued = model.unqueue(id) else { return }
+        restore([queued], thumbnails: thumbnails)
+        if UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .layoutChanged, argument: composer.textView)
+        } else {
+            composer.textView.becomeFirstResponder()
+        }
+    }
+
+    private func removeQueued(_ id: UUID) {
+        guard let removed = model.unqueue(id) else { return }
+        forgetThumbnails(of: removed.attachments)
+        // The row VoiceOver was on is gone; the queue, or the composer once it is empty, follows.
+        UIAccessibility.post(notification: .layoutChanged,
+                             argument: model.queuedPrompts.isEmpty ? composer.textView : composer.queueView.headingLabel)
+    }
+
+    // MARK: The agent's conversations
+
+    /// Resume Conversation… is offered in a session with nothing in it yet, whose agent lists
+    /// its saved conversations, as Claude Code does.
+    private var offersResume: Bool {
+        context.onResumeConversation != nil && model.listsAgentSessions && model.messages.isEmpty && !isReadOnly
+    }
+
+    var canResumeConversation: Bool {
+        offersResume && model.phase == .ready && !model.isChangingConfiguration && !listingConversations
+    }
+
+    /// Fork Conversation is offered once there is a conversation, for an agent that forks one.
+    private var offersFork: Bool {
+        context.onForkConversation != nil && model.forksAgentSessions && !model.messages.isEmpty
+    }
+
+    var canForkConversation: Bool {
+        offersFork && model.phase == .ready && !model.isChangingConfiguration && !forking
+    }
+
+    /// Lists the agent's other conversations in this folder; the one chosen goes on here, with
+    /// the history the agent keeps for it.
+    func resumeConversation() {
+        guard canResumeConversation, presentedViewController == nil else { return }
+        listingConversations = true
+        refresh()
+        Task {
+            let listed: [ACPSessionSummary]
+            do {
+                listed = try await model.agentSessions()
+            } catch {
+                listingConversations = false
+                refresh()
+                return presentFailure("Couldn’t List the Conversations", error)
+            }
+            listingConversations = false
+            refresh()
+            presentConversations(listed)
+        }
+    }
+
+    /// The list to choose from, unless the session moved on while it was asked for.
+    private func presentConversations(_ listed: [ACPSessionSummary]) {
+        guard canResumeConversation, viewIfLoaded?.window != nil, presentedViewController == nil else { return }
+        let picker = ConversationPickerViewController(conversations: listed, agentTitle: context.agentTitle,
+                                                      folder: context.shownPath)
+        let sheet = picker.inSheet(compact: traitCollection.userInterfaceIdiom != .pad,
+                                   accessibilitySize: traitCollection.preferredContentSizeCategory.isAccessibilityCategory)
+        picker.onCancel = { [weak self, weak sheet] in
+            guard let self, let sheet else { return }
+            dismissSheet(sheet) {}
+        }
+        picker.onChoose = { [weak self, weak sheet] chosen in
+            guard let self, let sheet else { return }
+            dismissSheet(sheet) {}
+            guard canResumeConversation else { return }
+            context.onResumeConversation?(chosen)
+            refresh()
+        }
+        conversationPicker = picker
+        presentSheet(sheet) {}
+    }
+
+    /// Opens a session beside this one with the agent's copy of the conversation, which goes on
+    /// separately from here.
+    func forkConversation() {
+        guard canForkConversation else { return }
+        forking = true
+        refresh()
+        Task {
+            defer {
+                forking = false
+                refresh()
+            }
+            do {
+                guard let forked = try await model.forkAgentSession() else { return }
+                context.onForkConversation?(forked)
+            } catch {
+                presentFailure("Couldn’t Fork the Conversation", error)
+            }
+        }
+    }
+
+    private func presentFailure(_ title: String, _ error: any Error) {
+        guard viewIfLoaded?.window != nil else { return }
+        let alert = UIAlertController(title: title, message: Self.iOSWords(error.localizedDescription), preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        presentSheet(alert) {}
     }
 
     // MARK: Menu bar
@@ -868,10 +1130,13 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         refresh()
     }
     @objc func jumpToLatestCommand() { transcript.scrollToBottom(animated: true) }
+    @objc func forkConversationCommand() { forkConversation() }
+    @objc func resumeConversationCommand() { resumeConversation() }
 
     static let menuActions: Set<Selector> = [
         #selector(sendCommand), #selector(stopCommand), #selector(addPhotosCommand), #selector(copyPathCommand),
         #selector(renameCommand), #selector(stopAgentCommand), #selector(startAgentCommand), #selector(jumpToLatestCommand),
+        #selector(forkConversationCommand), #selector(resumeConversationCommand),
     ]
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
@@ -885,6 +1150,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         case #selector(stopAgentCommand): return free && canStopAgent
         case #selector(startAgentCommand): return free && canStartAgent
         case #selector(jumpToLatestCommand): return jumpShown
+        case #selector(forkConversationCommand): return free && canForkConversation
+        case #selector(resumeConversationCommand): return free && canResumeConversation
         default: return super.canPerformAction(action, withSender: sender)
         }
     }

@@ -3,7 +3,9 @@
 /// Latch's encoder orders keys differently in every process. The prompt's text picks the
 /// turn; a load replays `earlier question`, `earlier answer` and a tool row, as a saved
 /// conversation; a `question` turn asks which database, as Claude Code's AskUserQuestion does,
-/// and says what came back; `prompts.log`, `decisions.log`, `answers.log` and `loads.log` count what reached the agent, and
+/// and says what came back; it lists one older conversation and forks to `forked-1`; with a
+/// `steers` file it steers, and a `steerable` turn works until a message is steered into it;
+/// `prompts.log`, `decisions.log`, `answers.log`, `forks.log`, `steers.log` and `loads.log` count what reached the agent, and
 /// `slow.log`, `asked.log`, `tools.log`, `flood.log` and `deluge.log` when a turn got that far. A `fail-new`
 /// file fails session/new. The `tools` and `flood` turns hold after their first output until
 /// a `go` file appears, and exit with status 3 if a `die` file appears first; so does a load,
@@ -16,11 +18,12 @@ public enum RemoteMockAgent {
     public static let script = #"""
     PATH=/usr/bin:/bin:$PATH
     prompt_id=
+    sid=session-1
     reply() { printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$1" "$2"; }
     fail() { printf '{"jsonrpc":"2.0","id":%s,"error":{"code":%s,"message":"%s"}}\n' "$1" "$2" "$3"; }
-    chunk() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1"; }
-    tool() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"%s","toolCallId":"call-7","title":"Read notes","status":"%s"}}}\n' "$1" "$2"; }
-    said() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1"; }
+    chunk() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$sid" "$1"; }
+    tool() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"%s","toolCallId":"call-7","title":"Read notes","status":"%s"}}}\n' "$sid" "$1" "$2"; }
+    said() { printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$sid" "$1"; }
     hold() { n=0; while [ ! -f go ]; do if [ -f die ] || ! kill -0 "$PPID" 2>/dev/null || [ $n -ge 1200 ]; then exit 3; fi; n=$((n+1)); sleep 0.05; done; }
     ask() {
       printf '%s\n' '{"jsonrpc":"2.0","id":900,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1","title":"Edit file"},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
@@ -32,15 +35,31 @@ public enum RemoteMockAgent {
       id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
       case "$line" in
         *\"method\":\"initialize\"*)
-          reply "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"agentInfo":{"name":"mock-agent","version":"1.0.0"}}' ;;
+          if [ -f steers ]; then
+            reply "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"fork":{}}},"agentInfo":{"name":"mock-agent","version":"1.0.0"},"_meta":{"steering":{"supported":true}}}'
+          else
+            reply "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"fork":{}}},"agentInfo":{"name":"mock-agent","version":"1.0.0"}}'
+          fi ;;
+        *\"method\":\"_session*/steering\"*)
+          echo steer >> steers.log
+          reply "$id" '{"outcome":"injected"}'
+          # As a model would, it answers the steered message a moment later, in the same turn.
+          sleep 0.5; chunk heard; reply "$prompt_id" '{"stopReason":"end_turn"}' ;;
+        *\"method\":\"session*/list\"*)
+          reply "$id" '{"sessions":[{"sessionId":"older-1","cwd":"/srv","title":"An older conversation","updatedAt":"2026-10-01T10:00:00Z"}]}' ;;
+        *\"method\":\"session*/fork\"*)
+          echo fork >> forks.log
+          reply "$id" '{"sessionId":"forked-1"}' ;;
         *\"method\":\"session*/new\"*)
           if [ -f fail-new ]; then fail "$id" -32603 "No sessions today"; continue; fi
           reply "$id" '{"sessionId":"session-1","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]},"models":{"currentModelId":"model-a","availableModels":[{"modelId":"model-a","name":"Model A"},{"modelId":"model-b","name":"Model B"}]}}' ;;
         *\"method\":\"session*/load\"*)
           echo load >> loads.log
+          # What it replays belongs to the conversation asked for.
+          case "$line" in *older-1*) sid=older-1 ;; *) sid=session-1 ;; esac
           if [ -f hold-load ]; then hold; fi
           said earlier; said " question"; chunk "earlier answer"
-          printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-h","title":"Read history","status":"completed"}}}'
+          printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"tool_call","toolCallId":"call-h","title":"Read history","status":"completed"}}}\n' "$sid"
           reply "$id" '{"modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]}}' ;;
         *\"method\":\"session*/set_mode\"*)
           reply "$id" '{}' ;;
@@ -67,6 +86,7 @@ public enum RemoteMockAgent {
               while [ $i -lt 40 ]; do chunk "$(printf '%0300d' $i)"; i=$((i+1)); done
               chunk end; echo done >> flood.log; reply "$id" '{"stopReason":"end_turn"}' ;;
             *question*) chunk asking; question ;;
+            *steerable*) chunk working ;;
             *) chunk one; chunk two; chunk three; reply "$id" '{"stopReason":"end_turn"}' ;;
           esac ;;
         *\"id\":901[,}]*)

@@ -1,4 +1,5 @@
 #if DEBUG
+import LatchACP
 import LatchAgentCore
 import LatchRemoteClient
 import LatchRemoteProtocol
@@ -18,10 +19,12 @@ enum UIFixture {
     /// the composer with photos, and suggesting slash commands; a permission request; Claude
     /// Code's questions, and its plan waiting for approval; the link lost mid-turn; a server
     /// that cannot be reached; a new session with nothing in it yet; a turn with thinking, two
-    /// subagents and a plan, one subagent open, and with the plan open instead; and on iPad,
-    /// the split view with the list beside the session.
+    /// subagents and a plan, one subagent open, and with the plan open instead; messages
+    /// waiting for a turn to end, under its plan; the agent's saved conversations, offered to
+    /// a new session; and on iPad, the split view with the list beside the session.
     static let sessionScreens = ["conversation", "markdown", "streaming", "photos", "slash", "permission", "question",
-                                 "plan-approval", "reconnecting", "error", "empty", "subagents", "plan", "split"]
+                                 "plan-approval", "reconnecting", "error", "empty", "subagents", "plan", "queue", "resume",
+                                 "split"]
 
     static var requestedScreen: String? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -159,8 +162,8 @@ enum UIFixture {
     private static func presentSession(_ screen: String, in root: RootViewController) async {
         let library = root.library
         let messages: [ChatMessage] = switch screen {
-        case "empty", "photos", "slash": []
-        case "streaming", "reconnecting": [SampleConversation.prompt, SampleConversation.read]
+        case "empty", "photos", "slash", "resume": []
+        case "streaming", "reconnecting", "queue": [SampleConversation.prompt, SampleConversation.read]
         case "permission", "question", "plan-approval": [SampleConversation.prompt]
         case "subagents", "plan": SampleSubagents.messages
         default: SampleConversation.messages
@@ -170,6 +173,8 @@ enum UIFixture {
                                  agentID: AgentPreset.claudeCode.rawValue, customCommand: "", draft: "", messages: messages,
                                  agentSessionID: messages.isEmpty ? nil : ScriptedSessionClient.sessionID,
                                  lastActiveAt: Date().addingTimeInterval(-10), serverID: vps.id)
+        // Claude Code lists its saved conversations here, as it does in a real folder.
+        (library.connector as? ScriptedConnector)?.conversations = screen == "resume" ? SampleConversations.list : nil
         let session = PhoneSession(saved: saved, connector: library.connector)
         library.add(session)
         // The photo with the last prompt was sent from this device, so its picture is kept.
@@ -229,6 +234,22 @@ enum UIFixture {
             await until { model.commands.count == 4 }
             screenController.composer.textView.becomeFirstResponder()
             type("/", in: screenController)
+        case "queue":
+            client.plan(SampleSubagents.plan)
+            type("Now fix it, and run the test ten times to be sure.", in: screenController)
+            screenController.send()
+            await until { client.hasOpenTurn }
+            client.chunk("I changed the restart to keep its port. Running the test ten times now; so far **7 of 10** passed.")
+            type("Then commit it, with a message that says why the port has to stay", in: screenController)
+            screenController.send()
+            if let image = ComposerImage.make(from: photo(hues: (0.58, 0.62), width: 900, height: 1200), name: "CI log") {
+                screenController.add([image])
+            }
+            type("And compare with this run", in: screenController)
+            screenController.send()
+            type("Also check the Linux runner", in: screenController)
+        case "resume":
+            screenController.resumeConversation()
         case "subagents", "plan":
             client.plan(SampleSubagents.plan)
             await until { model.plan.count == SampleSubagents.plan.count }
@@ -286,11 +307,27 @@ enum UIFixture {
 @MainActor
 final class ScriptedConnector: RemoteSessionConnector {
     private(set) var latest: ScriptedSessionClient?
+    /// What the next clients' agent lists as its saved conversations; nil lists none.
+    var conversations: [ACPSessionSummary]?
 
     func makeClient(serverID: UUID) -> AgentServiceClient {
-        let client = ScriptedSessionClient(configOptions: ScriptedConfiguration.options)
+        let client = ScriptedSessionClient(configOptions: ScriptedConfiguration.options, conversations: conversations)
         latest = client
         return client
     }
+}
+
+/// Claude Code's saved conversations in ~/latch, as `session/list` gives them: titled, and one
+/// not yet, newest first once sorted.
+enum SampleConversations {
+    static let list = [
+        ACPSessionSummary(sessionId: "c1", cwd: "/home/simon/latch", title: "Keep the listener's port across a restart of the loopback server, and check it fifty times on Linux",
+                          updatedAt: "2026-09-28T09:15:00Z"),
+        ACPSessionSummary(sessionId: "c2", cwd: "/home/simon/latch", title: "Fix the flaky reconnect test",
+                          updatedAt: "2026-10-03T16:42:00Z"),
+        ACPSessionSummary(sessionId: "c3", cwd: "/home/simon/latch", title: "Update the release notes for 0.2",
+                          updatedAt: "2026-09-21T11:03:00Z"),
+        ACPSessionSummary(sessionId: "c4", cwd: "/home/simon/latch"),
+    ]
 }
 #endif

@@ -50,6 +50,98 @@ final class RemoteSessionLiveWindowTests: XCTestCase {
         }
     }
 
+    /// Written while the agent works, a message waits over the composer and goes when the turn
+    /// ends; Edit gives one back. Fork then copies the conversation into a new session that goes
+    /// on with the agent's fork of it.
+    func testAQueuedMessageWaitsItsTurnAndForkCopiesTheConversation() async throws {
+        try await LoopbackServer.run { server in
+            try await WindowFixture.run { fixture in
+                let (window, sidebar) = try await fixture.restored(saved(fixture, on: server), servers: server.store,
+                                                                   remoteConnector: connector(server))
+                let session = try XCTUnwrap(sidebar.selectedSession)
+                try await fixture.settle({ session.model.phase == .ready }, timeout: 15)
+                session.submit("tools please")
+                try await fixture.settle({ session.model.phase == .prompting && self.texts(session.model).contains("reading") }, timeout: 10)
+                session.submit("Then say hello")
+                session.submit("And this one I will edit")
+                XCTAssertEqual(session.composerText, "")
+                XCTAssertFalse(session.queuePanel.isHidden)
+                XCTAssertEqual(session.queuePanel.rows.map(\.label.stringValue), ["Then say hello", "And this one I will edit"])
+                session.queuePanel.rows[1].edit.performClick(nil)
+                XCTAssertEqual(session.composerText, "And this one I will edit")
+                XCTAssertEqual(session.queuePanel.rows.count, 1)
+
+                FileManager.default.createFile(atPath: server.workspace.appendingPathComponent("go").path, contents: nil)
+                try await fixture.settle({
+                    session.model.phase == .ready && session.model.queuedPrompts.isEmpty && self.texts(session.model).last == "onetwothree"
+                }, timeout: 10)
+                XCTAssertTrue(session.queuePanel.isHidden)
+                XCTAssertEqual(server.lines(in: "prompts.log"), 2)
+                XCTAssertEqual(session.composerText, "And this one I will edit")
+
+                XCTAssertTrue(session.canFork)
+                window.forkSelectedSession(nil)
+                try await fixture.settle({ sidebar.allSessions.count == 2 }, timeout: 10)
+                let fork = try XCTUnwrap(sidebar.allSessions.first { $0 !== session })
+                XCTAssertEqual(fork.savedSession.agentSessionID, "forked-1")
+                XCTAssertEqual(fork.savedSession.messages.map(\.text), self.texts(session.model))
+                XCTAssertEqual(fork.savedSession.draft, "")
+                XCTAssertEqual(server.lines(in: "forks.log"), 1)
+            }
+        }
+    }
+
+    /// With an agent that steers, Send while it works puts the message into its turn: no queue,
+    /// and the message shows where it went in.
+    func testSendWhileTheAgentWorksSteersItsTurn() async throws {
+        try await LoopbackServer.run { server in
+            FileManager.default.createFile(atPath: server.workspace.appendingPathComponent("steers").path, contents: nil)
+            try await WindowFixture.run { fixture in
+                let (_, sidebar) = try await fixture.restored(saved(fixture, on: server), servers: server.store,
+                                                              remoteConnector: connector(server))
+                let session = try XCTUnwrap(sidebar.selectedSession)
+                try await fixture.settle({ session.model.phase == .ready }, timeout: 15)
+                XCTAssertTrue(session.model.steersPrompts)
+                session.submit("steerable please")
+                try await fixture.settle({ self.texts(session.model).last == "working" }, timeout: 10)
+                session.submit("also this")
+                XCTAssertEqual(session.composerText, "")
+                XCTAssertTrue(session.queuePanel.isHidden)
+                try await fixture.settle({
+                    session.model.phase == .ready && self.texts(session.model) == ["steerable please", "working", "also this", "heard"]
+                }, timeout: 10)
+                XCTAssertEqual(server.lines(in: "prompts.log"), 1)
+                XCTAssertEqual(server.lines(in: "steers.log"), 1)
+            }
+        }
+    }
+
+    /// A new session lists the agent's other conversations, and the one chosen goes on in it
+    /// with its history and title.
+    func testANewSessionResumesOneOfTheAgentsConversations() async throws {
+        try await LoopbackServer.run { server in
+            try await WindowFixture.run { fixture in
+                let (window, sidebar) = try await fixture.restored(saved(fixture, on: server), servers: server.store,
+                                                                   remoteConnector: connector(server))
+                let session = try XCTUnwrap(sidebar.selectedSession)
+                try await fixture.settle({ session.model.phase == .ready }, timeout: 15)
+                XCTAssertTrue(session.canResumeConversation)
+                window.resumeConversation(nil)
+                try await fixture.settle({ session.conversationAlert != nil }, timeout: 10)
+                let (alert, picker) = try XCTUnwrap(session.conversationAlert)
+                XCTAssertEqual(picker.itemTitles.count, 1)
+                XCTAssertTrue(picker.itemTitles[0].hasPrefix("An older conversation — "), picker.itemTitles[0])
+                alert.buttons[0].performClick(nil)
+                try await fixture.settle({
+                    session.model.phase == .ready && self.texts(session.model) == ["earlier question", "earlier answer", "Read history · completed"]
+                }, timeout: 10)
+                XCTAssertEqual(session.savedSession.agentSessionID, "older-1")
+                XCTAssertEqual(session.savedSession.title, "An older conversation")
+                XCTAssertFalse(session.canResumeConversation, "It holds a conversation now")
+            }
+        }
+    }
+
     func testClosingARemoteSessionStopsItsRuntimeOnTheServer() async throws {
         try await LoopbackServer.run { server in
             try await WindowFixture.run { fixture in

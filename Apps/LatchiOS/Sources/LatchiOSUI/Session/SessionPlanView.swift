@@ -55,26 +55,9 @@ final class SessionPlanView: UIView {
     static let radius: CGFloat = 18
 
     override init(frame: CGRect) {
-        if #available(iOS 26.0, *) {
-            let glass = UIVisualEffectView(effect: UIGlassEffect())
-            glass.cornerConfiguration = .corners(radius: .fixed(Self.radius))
-            surface = glass
-        } else {
-            surface = UIView()
-            surface.backgroundColor = .secondarySystemBackground
-            surface.layer.cornerRadius = Self.radius
-            surface.layer.cornerCurve = .continuous
-            surface.layer.borderWidth = 1 / max(1, UITraitCollection.current.displayScale)
-            surface.layer.borderColor = UIColor.separator.cgColor
-        }
+        surface = Self.surface()
         super.init(frame: frame)
-        card.layer.cornerRadius = Self.radius
-        card.layer.cornerCurve = .continuous
-        card.clipsToBounds = true
-        surface.isUserInteractionEnabled = false
-        surface.frame = card.bounds
-        surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        card.addSubview(surface)
+        Self.mount(surface, in: card)
 
         symbol.tintColor = .secondaryLabel
         symbol.setContentHuggingPriority(.required, for: .horizontal)
@@ -234,12 +217,42 @@ final class SessionPlanView: UIView {
         super.layoutSubviews()
     }
 
+    private func updateBorder() { Self.outline(card, surface: surface, for: traitCollection) }
+
+    /// The panel the plan and the queue over the composer sit on: glass from iOS 26, a grouped
+    /// background with a hairline before it.
+    static func surface() -> UIView {
+        if #available(iOS 26.0, *) {
+            let glass = UIVisualEffectView(effect: UIGlassEffect())
+            glass.cornerConfiguration = .corners(radius: .fixed(radius))
+            return glass
+        }
+        let surface = UIView()
+        surface.backgroundColor = .secondarySystemBackground
+        surface.layer.cornerRadius = radius
+        surface.layer.cornerCurve = .continuous
+        surface.layer.borderWidth = 1 / max(1, UITraitCollection.current.displayScale)
+        surface.layer.borderColor = UIColor.separator.cgColor
+        return surface
+    }
+
+    /// `surface` behind everything in `card`, which clips to its corners.
+    static func mount(_ surface: UIView, in card: UIView) {
+        card.layer.cornerRadius = radius
+        card.layer.cornerCurve = .continuous
+        card.clipsToBounds = true
+        surface.isUserInteractionEnabled = false
+        surface.frame = card.bounds
+        surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        card.insertSubview(surface, at: 0)
+    }
+
     /// With Increase Contrast an outline, where the panel alone is faint.
-    private func updateBorder() {
-        card.layer.borderWidth = traitCollection.accessibilityContrast == .high ? 1 : 0
-        card.layer.borderColor = UIColor.separator.resolvedColor(with: traitCollection).cgColor
+    static func outline(_ card: UIView, surface: UIView, for traits: UITraitCollection) {
+        card.layer.borderWidth = traits.accessibilityContrast == .high ? 1 : 0
+        card.layer.borderColor = UIColor.separator.resolvedColor(with: traits).cgColor
         if !(surface is UIVisualEffectView) {
-            surface.layer.borderColor = UIColor.separator.resolvedColor(with: traitCollection).cgColor
+            surface.layer.borderColor = UIColor.separator.resolvedColor(with: traits).cgColor
         }
     }
 

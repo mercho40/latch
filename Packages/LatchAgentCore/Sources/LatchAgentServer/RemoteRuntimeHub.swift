@@ -92,6 +92,9 @@ public actor RemoteRuntimeHub {
     private let journal: RemoteEventJournal
 
     private var runtimes: [AgentRuntimeID: RuntimeState] = [:]
+    /// Steers and forks still with the agent, by ID, for a resend to wait on rather than send again.
+    private var steering: [UUID: Task<Bool, any Error>] = [:]
+    private var forking: [UUID: Task<String, any Error>] = [:]
     /// Exited runtimes, oldest first.
     private var exited: [AgentRuntimeID] = []
     private var nextIncarnation: UInt64 = 0
@@ -239,6 +242,26 @@ public actor RemoteRuntimeHub {
             return await resolvePermission(runtimeID, requestID: requestID, outcome: outcome)
         case let .resolveElicitation(runtimeID, requestID, response):
             return await resolveElicitation(runtimeID, requestID: requestID, response: response)
+        case let .listSessions(runtimeID):
+            // Only reads; safe to send again.
+            guard let state = runtimes[runtimeID], state.lifecycle == .ready else { return .failure(.runtimeNotFound) }
+            do {
+                guard case let .sessionsListed(_, sessions) = try await runService(.listSessions(runtimeID: runtimeID, cwd: state.workingDirectory))
+                else { return .failure(Self.remoteError(for: HubError.unexpectedResponse)) }
+                // Bounded, so a long history still fits in a frame: the newest 200. ISO 8601 times in
+                // one format sort as text.
+                let newest = sessions.sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }.prefix(200)
+                return .success(.sessions(newest.map { session in
+                    ACPSessionSummary(sessionId: session.sessionId, cwd: session.cwd,
+                                      title: session.title.map { String($0.prefix(200)) }, updatedAt: session.updatedAt)
+                }))
+            } catch {
+                return .failure(Self.remoteError(for: error))
+            }
+        case let .forkSession(runtimeID, sessionID, forkID):
+            return await fork(runtimeID, sessionID: sessionID, forkID: forkID)
+        case let .steer(runtimeID, steerID, blocks):
+            return await steer(runtimeID, steerID: steerID, blocks: blocks)
         case let .attach(runtimeID, after):
             guard let state = runtimes[runtimeID] else { return .failure(.runtimeNotFound) }
             let (backlogFrom, truncated) = journal.subscribe(connection, to: runtimeID, after: after)
@@ -633,6 +656,80 @@ public actor RemoteRuntimeHub {
         }
     }
 
+    /// A message into the running turn, answered again by its ID, so one sent again after a
+    /// reconnect, even while the first is still with the agent, goes in once. One that went in
+    /// is journaled there, for every client to show where it went.
+    private func steer(_ id: AgentRuntimeID, steerID: UUID, blocks: [ACPPromptBlock]) async -> LatchRemoteReplyResult {
+        guard let state = runtimes[id] else { return .failure(.runtimeNotFound) }
+        if let known = state.steers.first(where: { $0.steerID == steerID }) { return .success(.steered(injected: known.injected)) }
+        let task: Task<Bool, any Error>
+        if let running = steering[steerID] {
+            task = running
+        } else {
+            guard state.lifecycle != .exited else { return .failure(.runtimeGone) }
+            // Between turns there is nothing to steer: the client sends it as a prompt.
+            guard let turn = state.activeTurnID else { return .success(.steered(injected: false)) }
+            let incarnation = state.incarnation
+            task = Task { [service] in
+                guard case let .promptSteered(_, injected) = try await service.execute(.steerPrompt(runtimeID: id, blocks: blocks)) else {
+                    throw HubError.unexpectedResponse
+                }
+                return injected
+            }
+            steering[steerID] = task
+            defer { steering[steerID] = nil }
+            do {
+                let injected = try await task.value
+                if runtimes[id]?.incarnation == incarnation {
+                    runtimes[id]!.steers.append((steerID, injected))
+                    if runtimes[id]!.steers.count > 16 { runtimes[id]!.steers.removeFirst() }
+                    // Nothing follows an exit in the journal.
+                    if injected, runtimes[id]!.lifecycle != .exited {
+                        let (text, attachments) = Self.summary(of: blocks)
+                        publish(.promptSteered(turnID: turn, steerID: steerID, text: text, attachments: attachments), for: id)
+                    }
+                }
+                return .success(.steered(injected: injected))
+            } catch {
+                return .failure(Self.remoteError(for: error))
+            }
+        }
+        do {
+            return .success(.steered(injected: try await task.value))
+        } catch {
+            return .failure(Self.remoteError(for: error))
+        }
+    }
+
+    /// A fork answered again by its ID, so a command sent again after a reconnect, even while
+    /// the first is still with the agent, makes one fork.
+    private func fork(_ id: AgentRuntimeID, sessionID: String, forkID: UUID) async -> LatchRemoteReplyResult {
+        guard let state = runtimes[id], state.lifecycle == .ready else { return .failure(.runtimeNotFound) }
+        if let forked = state.forks.first(where: { $0.forkID == forkID }) { return .success(.sessionForked(sessionID: forked.sessionID)) }
+        if let running = forking[forkID] {
+            do { return .success(.sessionForked(sessionID: try await running.value)) }
+            catch { return .failure(Self.remoteError(for: error)) }
+        }
+        let incarnation = state.incarnation
+        let task = Task { [service] in
+            guard case let .sessionForked(_, forked) = try await service.execute(.forkSession(runtimeID: id, sessionID: sessionID, cwd: state.workingDirectory))
+            else { throw HubError.unexpectedResponse }
+            return forked
+        }
+        forking[forkID] = task
+        defer { forking[forkID] = nil }
+        do {
+            let forked = try await task.value
+            if runtimes[id]?.incarnation == incarnation {
+                runtimes[id]!.forks.append((forkID, forked))
+                if runtimes[id]!.forks.count > 16 { runtimes[id]!.forks.removeFirst() }
+            }
+            return .success(.sessionForked(sessionID: forked))
+        } catch {
+            return .failure(Self.remoteError(for: error))
+        }
+    }
+
     private func resolveElicitation(_ id: AgentRuntimeID, requestID: UUID, response: ACPElicitationResponse) async -> LatchRemoteReplyResult {
         guard let state = runtimes[id] else { return .failure(.runtimeNotFound) }
         guard state.pendingElicitations.contains(where: { $0.requestID == requestID }) else {
@@ -919,6 +1016,12 @@ public actor RemoteRuntimeHub {
     }
 
     private static func turnStarted(_ turnID: UUID, blocks: [ACPPromptBlock]) -> LatchRemoteEvent {
+        let (text, attachments) = summary(of: blocks)
+        return .turnStarted(turnID: turnID, text: text, attachments: attachments)
+    }
+
+    /// What a prompt said, and what went with it, without the bytes.
+    private static func summary(of blocks: [ACPPromptBlock]) -> (text: String, attachments: [LatchRemoteAttachmentSummary]) {
         var text: [String] = []
         var attachments: [LatchRemoteAttachmentSummary] = []
         for block in blocks {
@@ -931,7 +1034,7 @@ public actor RemoteRuntimeHub {
                 attachments.append(LatchRemoteAttachmentSummary(kind: "resourceLink", mimeType: mimeType, name: name, byteCount: 0))
             }
         }
-        return .turnStarted(turnID: turnID, text: text.joined(separator: "\n"), attachments: attachments)
+        return (text.joined(separator: "\n"), attachments)
     }
 
     /// A prompt that failed because the agent went away ended with the runtime, not in error.
@@ -1013,6 +1116,10 @@ private struct RuntimeState {
     var turns: [LatchRemoteTurnRecord] = []
     var pendingPermissions: [LatchRemotePendingPermission] = []
     var pendingElicitations: [LatchRemotePendingElicitation] = []
+    /// The latest forks, by the client's ID for each, so one sent again is not made twice.
+    var forks: [(forkID: UUID, sessionID: String)] = []
+    /// The latest steers, by the client's ID for each, and whether each went in.
+    var steers: [(steerID: UUID, injected: Bool)] = []
     /// From the first turn whose prompt had text.
     var title: String?
 

@@ -17,21 +17,7 @@ final class PlanPanel: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        let surface: NSView
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.cornerRadius = Self.cornerRadius
-            surface = glass
-        } else {
-            let material = NSVisualEffectView()
-            material.material = .menu
-            material.state = .active
-            material.wantsLayer = true
-            material.layer?.cornerRadius = Self.cornerRadius
-            material.layer?.masksToBounds = true
-            surface = material
-        }
-        surface.translatesAutoresizingMaskIntoConstraints = false
+        let surface = Self.surface()
         addSubview(surface)
 
         toggle.isBordered = false
@@ -73,6 +59,26 @@ final class PlanPanel: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("Not used") }
+
+    /// Glass on macOS 26, a menu's material before it: what the panels over the composer sit on.
+    static func surface() -> NSView {
+        let surface: NSView
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = cornerRadius
+            surface = glass
+        } else {
+            let material = NSVisualEffectView()
+            material.material = .menu
+            material.state = .active
+            material.wantsLayer = true
+            material.layer?.cornerRadius = cornerRadius
+            material.layer?.masksToBounds = true
+            surface = material
+        }
+        surface.translatesAutoresizingMaskIntoConstraints = false
+        return surface
+    }
 
     /// The steps done and in all, and the one in hand: the one in progress, else the next pending.
     static func summary(of entries: [ACPPlanEntry]) -> (done: Int, total: Int, current: String?) {

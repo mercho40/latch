@@ -98,6 +98,31 @@ final class ToolCallDetailsTests: XCTestCase {
         XCTAssertFalse(details.text.contains("hidden"))
     }
 
+    /// Claude Code fences a command's output as one Markdown block; the details show what it
+    /// printed, and say what an image or a resource was without its bytes.
+    func testFencedOutputImagesAndResources() {
+        var details = ToolCallDetails()
+        details.apply(event(["content": .array([
+            text("```console\ntotal 8\n-rw-r--r--  1 me  staff  12 notes.md\n```"),
+            .object(["type": .string("content"), "content": .object([
+                "type": .string("image"), "mimeType": .string("image/png"), "data": .string(String(repeating: "A", count: 4_000)),
+            ])]),
+            .object(["type": .string("content"), "content": .object([
+                "type": .string("resource_link"), "name": .string("notes.md"), "uri": .string("file:///srv/notes.md"),
+            ])]),
+        ])]))
+        XCTAssertTrue(details.text.hasPrefix("Content:\ntotal 8\n-rw-r--r--  1 me  staff  12 notes.md\n\n"), details.text)
+        XCTAssertFalse(details.text.contains("```"))
+        XCTAssertTrue(details.text.contains("[Image: image/png · 3 KB]"), details.text)
+        XCTAssertFalse(details.text.contains("AAAA"))
+        XCTAssertTrue(details.text.contains("[Resource: notes.md: file:///srv/notes.md]"))
+
+        XCTAssertEqual(ToolCallDetails.unfenced("```\n```"), "")
+        XCTAssertEqual(ToolCallDetails.unfenced("Run:\n```sh\nls\n```"), "Run:\n```sh\nls\n```", "Prose around it stays")
+        XCTAssertEqual(ToolCallDetails.unfenced("```a\none\n```\nand\n```b\ntwo\n```"), "```a\none\n```\nand\n```b\ntwo\n```")
+        XCTAssertEqual(ToolCallDetails.unfenced("``` x ` y\nz\n```"), "``` x ` y\nz\n```")
+    }
+
     func testTerminalAndLocationsArePlainUnavailableReferences() {
         var details = ToolCallDetails()
         details.apply(event([

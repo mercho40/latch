@@ -165,6 +165,11 @@ public final class SessionModel {
     /// history an agent replayed when another client loaded its session. Otherwise that
     /// history is already in the transcript, which is where the session loaded it from.
     private var showsReplayedHistory = false
+    /// The next load shows the history the agent replays, rather than keeping a saved transcript:
+    /// a conversation taken up from the agent's own list, whose history only the agent has.
+    private var resumesWithHistory = false
+    /// What the last launch ran, and where, so the session can launch it again for another conversation.
+    private var lastLaunch: (launch: AgentLaunch, cwd: String)?
     /// Output was lost just before the next event, and this notice says so. Unless the
     /// transcript shows replayed history, a loss that the next event shows to be only such
     /// history is not news.
@@ -199,8 +204,12 @@ public final class SessionModel {
                                           showsReplayedHistory: showsReplayedHistory ? true : nil)
     }
     private var generation = UUID() {
-        // Whatever moved the session on lets go of a turn's end still waiting for its events.
-        didSet { releaseEndingTurn() }
+        // Whatever moved the session on lets go of a turn's end still waiting for its events, and
+        // gives back what was queued for it.
+        didSet {
+            releaseEndingTurn()
+            returnQueue()
+        }
     }
     private var promptGeneration = UUID()
     private var authenticationStop: (token: UUID, task: Task<Void, Never>)?
@@ -226,6 +235,19 @@ public final class SessionModel {
     private var commandsSequence: UInt64 = 0
     /// From the agent's prompt capabilities at connection; without it, images go as file links.
     public private(set) var acceptsImages = false
+    /// Whether the agent lists its saved conversations, so a new session can take one up.
+    public private(set) var listsAgentSessions = false
+    /// Whether the agent can fork its conversation into a copy that goes on separately.
+    public private(set) var forksAgentSessions = false
+    /// Whether a message written while the agent works goes into its turn, at its next step,
+    /// rather than waiting for the turn to end: Claude Code's steering.
+    public private(set) var steersPrompts = false
+    /// Steers on their way to the agent, so the composer can say so.
+    public private(set) var steersInFlight = 0
+    /// Messages written while the agent works, sent in order as each turn ends.
+    public private(set) var queuedPrompts: [QueuedPrompt] = []
+    /// Queued messages given back, by Stop or by losing the session, for the composer to take up again.
+    public var onQueueReturned: (([QueuedPrompt]) -> Void)?
     /// The agent runs on a server, where a link to a file on this Mac means nothing: only an
     /// image, and only to an agent that takes images, can go with a prompt. Implied by a
     /// remote channel; set it for a session on a server whose channel could not be made.
@@ -583,6 +605,9 @@ public final class SessionModel {
         legacyModeSequence = sequence ?? 0
         applyState(of: record)
         acceptsImages = record.initialization?.agentCapabilities.acceptsImages ?? false
+        listsAgentSessions = record.initialization?.agentCapabilities.listsSessions ?? false
+        forksAgentSessions = record.initialization?.agentCapabilities.forksSessions ?? false
+        steersPrompts = record.initialization?.supportsSteering ?? false
         let title = record.initialization?.agentInfo?.title ?? record.initialization?.agentInfo?.name ?? record.agentTitle
         agentName = title
         status = "Connected · \(title)"
@@ -780,8 +805,13 @@ public final class SessionModel {
         loadedThroughSequence = nil
         appliedSequence = 0
         updatesTakenThrough = 0
-        // The transcript is this session's own, and a load replays what it already shows.
-        showsReplayedHistory = false
+        // The transcript is this session's own, and a load replays what it already shows, unless
+        // there is none: a conversation taken up from the agent's own list, whose history only the
+        // agent has, or one whose first load failed before it was all in.
+        showsReplayedHistory = resumingID != nil && (resumesWithHistory || history.messages.isEmpty)
+        replayEndedMessage = false
+        replayedMessageID = nil
+        lastLaunch = (launch, cwd)
         forgetRemoteRuntime()
         linkState = .connected
         clearConfiguration()
@@ -821,6 +851,7 @@ public final class SessionModel {
             }
             pendingStateUpdates.removeAll()
             phase = .ready
+            resumesWithHistory = false
             if case .remote = launch {
                 runtimeIsRemote = true
                 backlogThrough = 0
@@ -829,10 +860,18 @@ public final class SessionModel {
                 agentName = initialization.agentInfo?.title ?? initialization.agentInfo?.name
                 status = "Connected · \(agentName ?? "ACP agent")"
                 acceptsImages = initialization.agentCapabilities.acceptsImages
+                listsAgentSessions = initialization.agentCapabilities.listsSessions
+                forksAgentSessions = initialization.agentCapabilities.forksSessions
+                steersPrompts = initialization.supportsSteering
             } else { status = "Connected" }
         } catch {
             _ = try? await client.execute(.stopRuntime(id: id))
             guard generation == token else { return }
+            // Part of a history the agent replays is not the conversation: the next try shows it all.
+            if showsReplayedHistory {
+                history.reset()
+                publishHistory()
+            }
             runtimeID = nil
             sessionID = nil
             clearConfiguration()
@@ -911,11 +950,18 @@ public final class SessionModel {
             errorMessage = error.localizedDescription
         }
         isChangingConfiguration = false
+        sendNextQueued()
         onChange?()
     }
 
     public func send(_ text: String, attachments: [PromptAttachment] = []) async {
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Written while the agent works: into its turn when it steers, else it waits for the turn to end.
+        if phase == .prompting, steersPrompts, !cancellationRequested, queuedPrompts.isEmpty,
+           !attachments.contains(where: refusesRemotely) {
+            return await steer(text, attachments: attachments)
+        }
+        if enqueue(text, attachments: attachments) { return }
         guard phase == .ready, !isChangingConfiguration, let id = runtimeID, hasText || !attachments.isEmpty else { return }
         // The composer takes these out before the draft leaves it, and says why; this only
         // makes sure a link to a file on this Mac never reaches a server.
@@ -1062,7 +1108,143 @@ public final class SessionModel {
             foreignTurn = nil
             followTurn(foreign.turn, runtimeID: runtimeID, boundary: foreign.boundary)
         }
+        sendNextQueued()
         onChange?()
+    }
+
+    /// A message into the running turn. One the agent says found no turn running waits for the
+    /// next turn, or goes now if the session is ready; any other outcome that is not "taken",
+    /// a failure included, which may come after the agent took it, gives it back to the
+    /// composer rather than send it twice. So does a Stop meanwhile. Over a server the journal
+    /// shows a steered message where it went in; here, it shows once the agent has it.
+    private func steer(_ text: String, attachments: [PromptAttachment]) async {
+        let message = QueuedPrompt(text: text, attachments: attachments)
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasText || !attachments.isEmpty else { return }
+        guard let id = runtimeID else { return giveBack(message) }
+        let blocks: [ACPPromptBlock]
+        do {
+            blocks = try attachments.map { try $0.block(acceptsImages: acceptsImages) } + (hasText ? [.text(text)] : [])
+        } catch {
+            errorMessage = error.localizedDescription
+            errorAdvice = "An attachment could not be prepared. Remove it and send again."
+            return giveBack(message)
+        }
+        let token = generation
+        let prompting = promptGeneration
+        steersInFlight += 1
+        onChange?()
+        let response = try? await client.execute(.steerPrompt(runtimeID: id, blocks: blocks))
+        steersInFlight -= 1
+        onChange?()
+        guard case let .promptSteered(_, taken)? = response else { return giveBack(message) }
+        if taken {
+            if !runtimeIsRemote, generation == token {
+                history.appendUser(text, attachments: attachments.map(\.record))
+                publishHistory()
+            }
+            return
+        }
+        // No turn took it. Stopped, or moved on, meanwhile: it is the user's again.
+        guard generation == token, promptGeneration == prompting, !cancellationRequested else { return giveBack(message) }
+        if enqueue(text, attachments: attachments) { return }
+        guard phase == .ready, !isChangingConfiguration else { return giveBack(message) }
+        await send(text, attachments: attachments)
+    }
+
+    /// A message that did not go, back to the composer.
+    private func giveBack(_ message: QueuedPrompt) {
+        onChange?()
+        onQueueReturned?([message])
+    }
+
+    /// The next message written while the agent worked, once the session is ready for it. It
+    /// stays queued until it goes, so a session lost meanwhile gives it back with the rest, and
+    /// one busy with something else sends it when that ends.
+    private func sendNextQueued() {
+        guard phase == .ready, !queuedPrompts.isEmpty else { return }
+        Task { [weak self] in
+            // The head now, whatever was edited out meanwhile.
+            guard let self, phase == .ready, !isChangingConfiguration, runtimeID != nil, !queuedPrompts.isEmpty else { return }
+            let next = queuedPrompts.removeFirst()
+            await send(next.text, attachments: next.attachments)
+        }
+    }
+
+    /// Keeps a message written while the agent works, to send when its turn ends. False, and
+    /// nothing kept, when there is no turn to wait for or nothing to send.
+    @discardableResult
+    public func enqueue(_ text: String, attachments: [PromptAttachment] = []) -> Bool {
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard phase == .prompting, hasText || !attachments.isEmpty, !attachments.contains(where: refusesRemotely) else { return false }
+        queuedPrompts.append(QueuedPrompt(text: text, attachments: attachments))
+        onChange?()
+        return true
+    }
+
+    /// Takes a queued message out, as the composer does to edit it again.
+    @discardableResult
+    public func unqueue(_ id: UUID) -> QueuedPrompt? {
+        guard let index = queuedPrompts.firstIndex(where: { $0.id == id }) else { return nil }
+        let prompt = queuedPrompts.remove(at: index)
+        onChange?()
+        return prompt
+    }
+
+    /// Stop, or losing the session, gives queued messages back rather than sending them into
+    /// whatever comes next.
+    private func returnQueue() {
+        guard !queuedPrompts.isEmpty else { return }
+        let returned = queuedPrompts
+        queuedPrompts = []
+        onQueueReturned?(returned)
+    }
+
+    /// The agent's saved conversations in this session's folder, newest first as it lists them,
+    /// without the one this session holds.
+    public func agentSessions() async throws -> [ACPSessionSummary] {
+        guard phase == .ready, listsAgentSessions, let id = runtimeID, let cwd = lastLaunch?.cwd ?? remoteTarget?.path else { return [] }
+        let response: LatchAgentResponse
+        do {
+            response = try await client.execute(.listSessions(runtimeID: id, cwd: cwd))
+        } catch is RemoteCommandUnsupported {
+            // The agent lists them; its server cannot pass the list on.
+            listsAgentSessions = false
+            onChange?()
+            throw RemoteCommandUnsupported()
+        }
+        guard case let .sessionsListed(_, sessions) = response else { return [] }
+        return sessions.filter { $0.sessionId != sessionID }
+    }
+
+    /// A copy of this conversation under a new ID, for a new session to go on with separately.
+    public func forkAgentSession() async throws -> String? {
+        guard phase == .ready, forksAgentSessions, let id = runtimeID, let sessionID,
+              let cwd = lastLaunch?.cwd ?? remoteTarget?.path else { return nil }
+        let response: LatchAgentResponse
+        do {
+            response = try await client.execute(.forkSession(runtimeID: id, sessionID: sessionID, cwd: cwd))
+        } catch is RemoteCommandUnsupported {
+            forksAgentSessions = false
+            onChange?()
+            throw RemoteCommandUnsupported()
+        }
+        guard case let .sessionForked(_, forked) = response else { return nil }
+        return forked
+    }
+
+    /// A session with nothing in it yet takes up one of the agent's saved conversations instead,
+    /// showing its history: its runtime stops, and the same agent starts again on that one.
+    public func switchToAgentSession(_ agentSessionID: String) async {
+        guard phase == .ready, history.messages.isEmpty, let target = lastLaunch else { return }
+        await disconnect()
+        guard phase == .disconnected else { return }
+        savedAgentSessionID = agentSessionID
+        archivedWithoutContext = false
+        resumesWithHistory = true
+        guard beginConnecting(startNewSession: false) else { return }
+        if case let .remote(agent, path) = target.launch { remoteTarget = (agent, path) }
+        await launch(target.launch, cwd: target.cwd, startNewSession: false)
     }
 
     /// What a turn cut short says where its reply stops, by the agent's stop reason.
@@ -1114,7 +1296,10 @@ public final class SessionModel {
     public func cancel() async {
         // A turn waiting only for its last events is over where it ran; a cancel now could only
         // reach the next one, perhaps another client's.
-        guard phase == .prompting, !cancellationRequested, endingTurn == nil, let id = runtimeID else { return }
+        guard phase == .prompting else { return }
+        // Stop means nothing more goes, even when the turn is over and only its last events are due.
+        returnQueue()
+        guard !cancellationRequested, endingTurn == nil, let id = runtimeID else { return }
         let token = generation
         cancellationRequested = true
         cancelRequests()
@@ -1232,6 +1417,12 @@ public final class SessionModel {
             }
             guard notification.sessionId == sessionID else { return }
             applyStateUpdate(notification)
+            // Taking up a conversation only the agent has: what its load replays is the transcript.
+            if showsReplayedHistory, !runtimeIsRemote,
+               phase == .connecting || loadedThroughSequence.map({ boundary in notification.localSequence.map { $0 <= boundary } ?? false }) == true {
+                showReplayed(notification)
+                return
+            }
             // session/load replays old content. Keep the saved, bounded transcript (and
             // stable message IDs), rather than appending a second copy. The reply's trusted
             // ingress sequence also excludes replay delivered after its continuation.
@@ -1340,6 +1531,11 @@ public final class SessionModel {
             history.appendNotice(Self.outputLostNotice)
             publishHistory()
             if let sequence { appliedSequence = max(appliedSequence, sequence) }
+        case let .promptSteered(id, _, text, attachments, sequence) where id == runtimeID:
+            // Sent into a running turn, from here or another client: shown where it went in.
+            appliedSequence = max(appliedSequence, sequence)
+            history.appendUser(text, attachments: attachments)
+            publishHistory()
         case let .turnStarted(id, turn, text, attachments, sequence) where id == runtimeID:
             appliedSequence = max(appliedSequence, sequence)
             if unsentTurn?.turn == turn { unsentTurn = nil }
@@ -1459,6 +1655,9 @@ public final class SessionModel {
         // Each agent process counts from one; the title itself stands until the next.
         agentTitleSequence = 0
         acceptsImages = false
+        listsAgentSessions = false
+        forksAgentSessions = false
+        steersPrompts = false
     }
 
     private func isStateUpdate(_ notification: ACPSessionNotification) -> Bool {
@@ -1528,7 +1727,7 @@ private extension RemoteServiceEvent {
         switch self {
         case let .agent(event, sequence): sequence.map { (event.runtimeID, $0) }
         case let .replayed(id, _, sequence), let .configurationSet(id, _, sequence), let .turnStarted(id, _, _, _, sequence),
-             let .turnEnded(id, _, sequence), let .skipped(id, sequence): (id, sequence)
+             let .promptSteered(id, _, _, _, sequence), let .turnEnded(id, _, sequence), let .skipped(id, sequence): (id, sequence)
         case let .outputLost(id, sequence): sequence.map { (id, $0) }
         case let .stopped(id, _, sequence): (id, sequence)
         case .attached, .link, .serverChanged: nil

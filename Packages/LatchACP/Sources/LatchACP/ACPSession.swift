@@ -387,6 +387,22 @@ public struct ACPElicitationResponse: Codable, Equatable, Sendable {
     public static let cancelled = ACPElicitationResponse(action: .cancel)
 }
 
+/// A saved session as the agent lists it.
+public struct ACPSessionSummary: Codable, Equatable, Sendable {
+    public let sessionId: String
+    public let cwd: String
+    public let title: String?
+    /// ISO 8601, as the agent wrote it.
+    public let updatedAt: String?
+
+    public init(sessionId: String, cwd: String, title: String? = nil, updatedAt: String? = nil) {
+        self.sessionId = sessionId
+        self.cwd = cwd
+        self.title = title
+        self.updatedAt = updatedAt
+    }
+}
+
 public enum ACPPermissionOutcome: Equatable, Sendable {
     case selected(optionID: String)
     case cancelled

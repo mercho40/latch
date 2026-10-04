@@ -66,3 +66,16 @@ struct ComposerImage: Identifiable, Sendable {
         return await Task.detached(priority: .userInitiated) { make(from: data, name: name) }.value
     }
 }
+
+extension ComposerImage {
+    /// A photo the composer let go of, such as a queued message's, back in it: with the
+    /// thumbnail it had, or one made again from its data.
+    init(returning prompt: PromptAttachment, thumbnail: UIImage?) {
+        var preview = thumbnail
+        if preview == nil, case let .image(data, _, _) = prompt.content,
+           let source = CGImageSourceCreateWithData(data as CFData, nil) {
+            preview = Self.thumbnail(source, maximum: Int(SentImageCache.maximumPixelSize)).map { UIImage(cgImage: $0) }
+        }
+        self.init(prompt: prompt, thumbnail: preview)
+    }
+}

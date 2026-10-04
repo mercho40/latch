@@ -97,7 +97,11 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
             })
         }
         library.onServerRemoved = { [weak self] server in self?.memory.recordRemoval(of: server) }
-        library.onForget = { session in SentImageCache.shared.remove(session.model.messages.map(\.id)) }
+        // A fork shares its messages, and their pictures, with the session it was copied from.
+        library.onForget = { [weak library] session in
+            let kept = Set(library?.sessions.flatMap { $0.model.messages.map(\.id) } ?? [])
+            SentImageCache.shared.remove(session.model.messages.map(\.id).filter { !kept.contains($0) })
+        }
         library.isSessionVisible = { [weak self] id in self?.isShowing(id) ?? false }
         library.onChange = { [weak self] in self?.libraryChanged() }
         library.onSessionChange = { [weak self] session in self?.sessions.sessionChanged(session) }

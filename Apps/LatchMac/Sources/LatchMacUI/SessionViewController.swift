@@ -53,6 +53,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     /// Asks the window for a sibling session in this workspace on the given harness.
     var onForkSession: ((AgentPreset, String) -> Void)?
+    /// Asks the window for a session that goes on with a copy of this conversation.
+    var onForkConversation: ((SavedSession) -> Void)?
+    /// The agent conversations the window's other sessions go on with.
+    var openAgentSessionIDs: (() -> Set<String>)?
     /// A fork inherits the parent's environment when one was injected, so tests and smoke
     /// runs stay hermetic; a real session lets the fork rescan the filesystem itself.
     var injectedEnvironment: AgentLaunchEnvironment? { injectedLaunchEnvironment == nil ? nil : launchEnvironment }
@@ -156,7 +160,24 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         !shuttingDown && model.phase != .disconnected && model.phase != .stopping
     }
 
-    var canFork: Bool { !shuttingDown && restoredCommandIsUsable }
+    /// While the conversation is being copied it cannot fork again; a fork with nothing to
+    /// copy opens a new session at once.
+    var canFork: Bool {
+        !shuttingDown && restoredCommandIsUsable && (!forksConversation || model.phase == .ready && !forking)
+    }
+
+    /// Fork copies the conversation: there is one, and the agent can fork it.
+    private var forksConversation: Bool { holdsConversation && model.forksAgentSessions && !pendingNewContext }
+    private var forking = false
+
+    /// A session that has not started a conversation can take up one of the agent's own instead.
+    var canResumeConversation: Bool {
+        !shuttingDown && operation == nil && model.phase == .ready && !holdsConversation && model.listsAgentSessions
+            && !pendingNewContext && !choosingConversation
+    }
+    private var choosingConversation = false
+    /// The list of conversations on screen, with its picker.
+    private(set) var conversationAlert: (alert: NSAlert, picker: NSPopUpButton)?
 
     private var restoredCommandIsUsable: Bool { isViewLoaded && launchProblem == nil }
 
@@ -170,10 +191,137 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         disconnect()
     }
 
-    /// Opens a sibling session on the same harness and command, beside this one.
+    /// Opens a sibling session on the same harness and command, beside this one: with a copy of
+    /// this conversation, which goes on separately from here, when the agent forks one.
     func forkSession() {
         guard canFork else { return }
-        onForkSession?(selectedAgent, customCommand)
+        guard forksConversation else {
+            onForkSession?(selectedAgent, customCommand)
+            return
+        }
+        // The transcript as the agent forks it; Send waits until the fork is made.
+        let snapshot = savedSession
+        forking = true
+        refresh()
+        onChange?()
+        Task {
+            defer {
+                forking = false
+                refresh()
+                onChange?()
+            }
+            do {
+                guard let forked = try await model.forkAgentSession() else { return }
+                onForkConversation?(forkedSession(snapshot, agentSessionID: forked))
+            } catch is RemoteCommandUnsupported {
+                // A server older than Latch: a sibling without the conversation, as Fork was before.
+                onForkSession?(selectedAgent, customCommand)
+            } catch {
+                presentFailure("Couldn’t Fork the Conversation", error)
+            }
+        }
+    }
+
+    /// This session as a new one that resumes the agent's copy of its conversation.
+    private func forkedSession(_ snapshot: SavedSession, agentSessionID: String) -> SavedSession {
+        var fork = snapshot
+        fork.id = UUID()
+        fork.title = String(sessionTitle.prefix(53)) + " (fork)"
+        fork.adoptedAgentTitle = nil
+        fork.draft = ""
+        fork.agentSessionID = agentSessionID
+        fork.remote = nil
+        fork.lastActiveAt = model.now()
+        return fork
+    }
+
+    /// Lists the agent's other conversations in this folder; the one chosen continues here, with
+    /// the history the agent keeps for it.
+    func resumeConversation() {
+        guard canResumeConversation else { return }
+        choosingConversation = true
+        Task {
+            defer { choosingConversation = false }
+            let conversations: [ACPSessionSummary]
+            do {
+                conversations = try await model.agentSessions()
+            } catch {
+                return presentFailure("Couldn’t List the Agent’s Conversations", error)
+            }
+            guard let window = view.window, model.phase == .ready, !holdsConversation else { return }
+            let alert = NSAlert()
+            let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 380, height: 26), pullsDown: false)
+            // Not one another session here already goes on with: two agents on one conversation.
+            let open = openAgentSessionIDs?() ?? []
+            let listed = Self.newestFirst(conversations.filter { !open.contains($0.sessionId) }).prefix(100)
+            if listed.isEmpty {
+                alert.messageText = "No Conversations to Resume"
+                alert.informativeText = "\(selectedAgent.title) has no other saved conversations in \(location.folderName)."
+            } else {
+                alert.messageText = "Resume a Conversation"
+                alert.informativeText = "\(selectedAgent.title)’s saved conversations in \(location.folderName). The one you choose goes on here, with its history."
+                // Through the menu, which keeps two items with one title apart, as addItem(withTitle:) does not.
+                for conversation in listed {
+                    let item = NSMenuItem(title: Self.menuTitle(for: conversation), action: nil, keyEquivalent: "")
+                    item.representedObject = conversation.sessionId
+                    picker.menu?.addItem(item)
+                }
+                alert.accessoryView = picker
+                alert.addButton(withTitle: "Resume")
+            }
+            alert.addButton(withTitle: listed.isEmpty ? "OK" : "Cancel")
+            conversationAlert = (alert, picker)
+            let response = await alert.beginSheetModal(for: window)
+            conversationAlert = nil
+            guard !listed.isEmpty, response == .alertFirstButtonReturn, !shuttingDown, operation == nil, !pendingNewContext,
+                  model.phase == .ready, !holdsConversation,
+                  let id = picker.selectedItem?.representedObject as? String,
+                  let chosen = listed.first(where: { $0.sessionId == id }) else { return }
+            sessionTitle = String((chosen.title ?? "Resumed Conversation").prefix(60))
+            adoptedAgentTitle = sessionTitle
+            // The session is busy until the agent has the conversation: no harness change, no send.
+            let token = UUID()
+            operation = token
+            refresh()
+            onChange?()
+            await model.switchToAgentSession(chosen.sessionId)
+            if operation == token { operation = nil }
+            refresh()
+        }
+    }
+
+    /// The agent's conversations by when each last changed, newest first; undated ones last.
+    static func newestFirst(_ conversations: [ACPSessionSummary]) -> [ACPSessionSummary] {
+        conversations.enumerated().sorted { a, b in
+            let (dateA, dateB) = (a.element.updatedAt.flatMap(Self.date), b.element.updatedAt.flatMap(Self.date))
+            switch (dateA, dateB) {
+            case let (x?, y?) where x != y: return x > y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return a.offset < b.offset
+            }
+        }.map(\.element)
+    }
+
+    /// A conversation as the list shows it: its title, and when it last changed.
+    static func menuTitle(for conversation: ACPSessionSummary) -> String {
+        let title = conversation.title.map { String($0.prefix(70)) } ?? "Untitled conversation"
+        guard let date = conversation.updatedAt.flatMap(Self.date) else { return title }
+        return "\(title) — \(date.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private static func date(_ text: String) -> Date? {
+        // Its offset counts: "+02:00" is not UTC.
+        (try? Date(text, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)))
+            ?? (try? Date(text, strategy: .iso8601))
+    }
+
+    private func presentFailure(_ title: String, _ error: Error) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = error.localizedDescription
+        alert.beginSheetModal(for: window)
     }
 
     private var permissionAlert: (id: UUID, alert: NSAlert, escapeMonitor: Any?)?
@@ -246,6 +394,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private let extraPickers = [NSPopUpButton(frame: .zero, pullsDown: false), NSPopUpButton(frame: .zero, pullsDown: false)]
     /// How full the agent's context is, before the composer's buttons.
     private let usageLabel = NSTextField(labelWithString: "")
+    /// Messages written while the agent works, over the composer and under the plan.
+    let queuePanel = QueuePanel()
+    private var planOverComposer: NSLayoutConstraint?
+    private var planOverQueue: NSLayoutConstraint?
+    /// The composer's attachments for queued messages, with their thumbnails, to give back to
+    /// the composer should a message return to it.
+    private var queuedAttachments: [UUID: ComposerAttachment] = [:]
     /// Only the settings that change between messages. The harness is chosen once per
     /// session and then locked, so it lives in the window's toolbar, not in the composer.
     private lazy var composerControls = ComposerControlsView(
@@ -323,6 +478,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             self?.transcriptUpdates.request()
             self?.onTranscriptChange?()
         }
+        model.onQueueReturned = { [weak self] in self?.returnToComposer($0) }
         NotificationCenter.default.addObserver(self, selector: #selector(agentSettingsChanged),
                                                name: AgentSettings.didChangeNotification, object: settings)
         if location.isRemote {
@@ -550,13 +706,31 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
         // Like the command menu, over the transcript and attached to the composer; the menu,
         // while open, takes its place.
+        // Messages waiting their turn sit between them.
         planPanel.isHidden = true
         planPanel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(planPanel, positioned: .above, relativeTo: composerContainer)
+        queuePanel.isHidden = true
+        queuePanel.translatesAutoresizingMaskIntoConstraints = false
+        queuePanel.onEdit = { [weak self] id in
+            guard let self, let queued = model.unqueue(id) else { return }
+            returnToComposer([queued])
+            view.window?.makeFirstResponder(prompt)
+        }
+        queuePanel.onRemove = { [weak self] id in
+            guard let self, let removed = model.unqueue(id) else { return }
+            for attachment in removed.attachments { queuedAttachments[attachment.id] = nil }
+        }
+        view.addSubview(queuePanel, positioned: .above, relativeTo: composerContainer)
+        planOverComposer = planPanel.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -8)
+        planOverQueue = planPanel.bottomAnchor.constraint(equalTo: queuePanel.topAnchor, constant: -6)
         NSLayoutConstraint.activate([
             planPanel.leadingAnchor.constraint(equalTo: composerBox.leadingAnchor, constant: 12),
             planPanel.trailingAnchor.constraint(equalTo: composerBox.trailingAnchor, constant: -12),
-            planPanel.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -8),
+            planOverComposer!,
+            queuePanel.leadingAnchor.constraint(equalTo: composerBox.leadingAnchor, constant: 12),
+            queuePanel.trailingAnchor.constraint(equalTo: composerBox.trailingAnchor, constant: -12),
+            queuePanel.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -8),
         ])
 
         // Over the transcript and the heading, attached to the composer it belongs to.
@@ -573,8 +747,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Tells the transcript how much of its end the composer covers, which changes as a draft grows.
     override func viewDidLayout() {
         super.viewDidLayout()
-        // The plan, when shown, covers the transcript's end too.
-        let composerTop = planPanel.isHidden ? composerContainer.frame.maxY : max(composerContainer.frame.maxY, planPanel.frame.maxY)
+        // The plan and the queue, when shown, cover the transcript's end too.
+        let composerTop = ([composerContainer] + [planPanel, queuePanel].filter { !$0.isHidden }).map(\.frame.maxY).max()!
         let transcriptBottom = conversation.convert(conversation.bounds, to: view).minY
         conversation.bottomOverlay = max(0, composerTop - transcriptBottom + 12)
     }
@@ -603,7 +777,11 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let readOnlyArchive = model.archivedWithoutContext && model.phase == .disconnected
         prompt.isEditable = !shuttingDown && !readOnlyArchive && (operation == nil || model.phase != .ready)
         refreshPickers()
-        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && model.phase == .ready && !model.isChangingConfiguration && hasSomethingToSend
+        // While the agent works, Send queues the message for when it finishes.
+        send.isEnabled = !shuttingDown && operation == nil && !changingConfiguration && !forking
+            && (model.phase == .ready || model.phase == .prompting) && !model.isChangingConfiguration && hasSomethingToSend
+        send.toolTip = model.phase != .prompting ? nil
+            : model.steersPrompts ? "The agent takes it at its next step" : "Sends when the agent finishes"
         let preparing = operation != nil || model.phase == .connecting
         // A forced bezel colour ignores the disabled state, so a button that could not send looked ready to.
         if #unavailable(macOS 26.0) {
@@ -1084,12 +1262,23 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         refreshPlan()
     }
 
-    /// The plan shows while the agent has one, except under an open command menu.
+    /// The plan shows while the agent has one, and the queue while it holds a message, except
+    /// under an open command menu.
     private func refreshPlan() {
         planPanel.show(model.plan)
-        let hidden = model.plan.isEmpty || !commandMenu.isHidden
-        guard planPanel.isHidden != hidden else { return }
-        planPanel.isHidden = hidden
+        queuePanel.show(model.queuedPrompts)
+        // A steer on its way may come back too.
+        if model.steersInFlight == 0 {
+            let queued = Set(model.queuedPrompts.flatMap(\.attachments).map(\.id))
+            queuedAttachments = queuedAttachments.filter { queued.contains($0.key) }
+        }
+        let planHidden = model.plan.isEmpty || !commandMenu.isHidden
+        let queueHidden = model.queuedPrompts.isEmpty || !commandMenu.isHidden
+        guard planPanel.isHidden != planHidden || queuePanel.isHidden != queueHidden else { return }
+        planPanel.isHidden = planHidden
+        queuePanel.isHidden = queueHidden
+        planOverComposer?.isActive = queueHidden
+        planOverQueue?.isActive = !queueHidden
         view.needsLayout = true
     }
 
@@ -1434,8 +1623,62 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     @objc private func sendPrompt() {
-        guard hasSomethingToSend else { return }
+        guard hasSomethingToSend, !forking else { return }
+        if model.phase == .prompting { return queueDraft() }
         beginOperation(draft: prompt.string)
+    }
+
+    /// What the composer holds.
+    var composerText: String { prompt.string }
+
+    /// Writes in the composer and presses Send, as the user would.
+    func submit(_ text: String) {
+        prompt.string = text
+        refresh()
+        send.performClick(nil)
+    }
+
+    /// A message written while the agent works goes into its turn, for an agent that steers as
+    /// Claude Code does; otherwise it waits over the composer, and goes when the turn ends.
+    private func queueDraft() {
+        guard !shuttingDown, operation == nil, !changingConfiguration, !model.isChangingConfiguration else { return }
+        let refused = attachments.filter { model.refusesRemotely($0.prompt) }
+        guard refused.isEmpty else {
+            attachments.removeAll { model.refusesRemotely($0.prompt) }
+            return refuse(refused)
+        }
+        if model.steersPrompts {
+            let draft = prompt.string
+            let sent = attachments
+            for attachment in sent { queuedAttachments[attachment.id] = attachment }
+            prompt.string = ""
+            composerUndo.removeAllActions()
+            attachments = []
+            attachmentNotice = nil
+            refresh()
+            // One the turn no longer takes waits in the queue, or comes back to the composer.
+            Task { await model.send(draft, attachments: sent.map(\.prompt)) }
+            return
+        }
+        guard model.enqueue(prompt.string, attachments: attachments.map(\.prompt)) else { return }
+        for attachment in attachments { queuedAttachments[attachment.id] = attachment }
+        prompt.string = ""
+        composerUndo.removeAllActions()
+        attachments = []
+        attachmentNotice = nil
+        refresh()
+    }
+
+    /// Queued messages back in the composer, before what is there, with their attachments.
+    private func returnToComposer(_ queued: [QueuedPrompt]) {
+        guard !queued.isEmpty else { return }
+        let texts = queued.map(\.text).filter { !$0.isEmpty } + (prompt.string.isEmpty ? [] : [prompt.string])
+        prompt.string = texts.joined(separator: "\n\n")
+        composerUndo.removeAllActions()
+        let returned = queued.flatMap(\.attachments).map { queuedAttachments.removeValue(forKey: $0.id) ?? ComposerAttachment($0) }
+        // All of them, even past what may be added at once: none is lost for having waited.
+        attachments = returned + attachments
+        refresh()
     }
 
     @objc private func cancelPrompt() {

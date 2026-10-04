@@ -25,6 +25,15 @@ struct ComposerAttachment: Identifiable {
         self.thumbnail = thumbnail
     }
 
+    /// One the composer let go of, such as a queued message's, back with a thumbnail made again.
+    init(_ prompt: PromptAttachment) {
+        self.prompt = prompt
+        switch prompt.content {
+        case let .image(data, _, _): thumbnail = NSImage(data: data) ?? NSWorkspace.shared.icon(for: .image)
+        case let .file(url): thumbnail = NSWorkspace.shared.icon(forFile: url.path)
+        }
+    }
+
     var id: UUID { prompt.id }
     var name: String { prompt.name }
     var content: Content { prompt.content }

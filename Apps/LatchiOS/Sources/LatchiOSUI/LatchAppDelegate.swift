@@ -47,8 +47,9 @@ public final class LatchAppDelegate: UIResponder, UIApplicationDelegate {
 
     static let sessionMenuIdentifier = UIMenu.Identifier("dev.latchapp.ios.session")
 
-    /// Send and Stop, the composer's photos, the session's own commands, then moving between
-    /// sessions with the Mac's keys; ⌘[ and ⌘], which the app had first, still work unlisted.
+    /// Send and Stop, the composer's photos, what the agent can do with the conversation, the
+    /// session's own commands, then moving between sessions with the Mac's keys; ⌘[ and ⌘],
+    /// which the app had first, still work unlisted.
     static var sessionMenu: UIMenu {
         func command(_ title: String, _ symbol: String?, _ action: Selector, _ input: String? = nil,
                      _ modifiers: UIKeyModifierFlags = .command, priority: Bool = false,
@@ -71,6 +72,10 @@ public final class LatchAppDelegate: UIResponder, UIApplicationDelegate {
                 command("Send", "arrow.up.circle", #selector(session.sendCommand), "\r", priority: true),
                 command("Stop", "stop.circle", #selector(session.stopCommand), ".", priority: true),
                 command("Add Photos…", "photo.on.rectangle", #selector(session.addPhotosCommand), "a", [.command, .shift]),
+            ]),
+            UIMenu(options: .displayInline, children: [
+                command("Fork Conversation", "arrow.triangle.branch", #selector(session.forkConversationCommand)),
+                command("Resume Conversation…", "clock.arrow.circlepath", #selector(session.resumeConversationCommand)),
             ]),
             UIMenu(options: .displayInline, children: [
                 command("Rename…", "pencil", #selector(session.renameCommand)),

@@ -218,6 +218,16 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             guard let self, let session else { return }
             self.forkSession(from: session, agent: agent, command: command)
         }
+        session.openAgentSessionIDs = { [weak self, weak session] in
+            Set(self?.sidebar.allSessions.filter { $0 !== session }.compactMap { $0.savedSession.agentSessionID } ?? [])
+        }
+        session.onForkConversation = { [weak self, weak session] fork in
+            guard let self, let session, !shuttingDown, restoreFinished else { return }
+            let copy = makeSession(WorkspaceLocation(fork), launchEnvironment: session.injectedEnvironment, savedSession: fork)
+            adopt(copy)
+            sidebar.add(copy, after: session)
+            scheduleSave()
+        }
     }
 
     /// A session that already holds a transcript owns its harness. Selecting another one
@@ -282,6 +292,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     @objc func disconnectSession(_ sender: Any?) { sidebar.selectedSession?.disconnectSession() }
 
     @objc func forkSelectedSession(_ sender: Any?) { sidebar.selectedSession?.forkSession() }
+
+    @objc func resumeConversation(_ sender: Any?) { sidebar.selectedSession?.resumeConversation() }
 
     @objc func renameSession(_ sender: Any?) {
         guard let session = sidebar.selectedSession else { return }
@@ -348,6 +360,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             return session?.canDisconnect ?? false
         case #selector(forkSelectedSession(_:)):
             return (session?.canFork ?? false) && restoreFinished && !shuttingDown
+        case #selector(resumeConversation(_:)):
+            return (session?.canResumeConversation ?? false) && restoreFinished && !shuttingDown
         case #selector(nextSession(_:)), #selector(previousSession(_:)):
             return sidebar.allSessions.count > 1
         case #selector(revealWorkspace(_:)):

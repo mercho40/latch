@@ -47,6 +47,40 @@ final class RemoteRuntimeHubTests: XCTestCase {
         }
     }
 
+    /// A message steered into the running turn goes in once, however often it is sent, even
+    /// while the first is still with the agent, and the journal shows it there once. Between
+    /// turns there is nothing to steer, and the agent hears nothing.
+    func testASteerGoesInOnceAndIsJournaledWhereItWent() async throws {
+        try await withTestbed { bed in
+            let id = AgentRuntimeID("steer")
+            try await bed.launchWithSession(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            try await bed.expect(.steer(runtimeID: id, steerID: UUID(), blocks: [.text("early")]), returns: .steered(injected: false))
+            XCTAssertEqual(bed.lines(in: "steers.log"), 0)
+
+            let turnID = UUID()
+            try await bed.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("permission please")]))
+            _ = try await viewer.pull(until: "the request") { frames in
+                frames.contains { if case .permissionRequested = $0.event { true } else { false } }
+            }
+            let steerID = UUID()
+            let steer = LatchRemoteCommand.steer(runtimeID: id, steerID: steerID, blocks: [.text("also this")])
+            let hub = bed.hub, control = bed.control
+            async let first = hub.handle(steer, from: control)
+            async let second = hub.handle(steer, from: control)
+            let replies = await [first, second]
+            XCTAssertEqual(replies, [.success(.steered(injected: true)), .success(.steered(injected: true))])
+            try await bed.expect(steer, returns: .steered(injected: true))
+            XCTAssertEqual(bed.lines(in: "steers.log"), 1)
+            let frames = try await viewer.pull(until: "the steer in the journal") { frames in
+                frames.contains { if case .promptSteered = $0.event { true } else { false } }
+            }
+            let steered = frames.filter { if case .promptSteered = $0.event { true } else { false } }
+            XCTAssertEqual(steered.map(\.event), [.promptSteered(turnID: turnID, steerID: steerID, text: "also this", attachments: [])])
+        }
+    }
+
     /// A turn's reply reaches the hub apart from its updates, and can come first. The turn goes
     /// on in the record until they are in, a cancel meanwhile has nothing left to cancel, and
     /// the journal ends the turn after them.
@@ -317,6 +351,22 @@ final class RemoteRuntimeHubTests: XCTestCase {
             XCTAssertEqual(bed.lines(in: "sessions.log"), 1)
             let load = try await bed.failure(.loadSession(runtimeID: id, sessionID: "session-1"))
             XCTAssertEqual(load.code, .sessionAlreadyBound)
+
+            // A fork sent again under its ID is the fork already made; another ID makes another.
+            let forkID = UUID()
+            // Sent again while the first is still with the agent: one fork all the same.
+            let fork = LatchRemoteCommand.forkSession(runtimeID: id, sessionID: "session-1", forkID: forkID)
+            async let racing = hub.handle(fork, from: control)
+            let forked = try await bed.ok(fork)
+            let raced = await racing
+            XCTAssertEqual(raced, .success(forked))
+            guard case let .sessionForked(forkedID) = forked else { return XCTFail("\(forked)") }
+            try await bed.expect(.forkSession(runtimeID: id, sessionID: "session-1", forkID: forkID), returns: forked)
+            XCTAssertEqual(bed.lines(in: "forks.log"), 1)
+            let another = try await bed.ok(.forkSession(runtimeID: id, sessionID: "session-1", forkID: UUID()))
+            XCTAssertNotEqual(another, .sessionForked(sessionID: forkedID))
+            XCTAssertEqual(bed.lines(in: "forks.log"), 2)
+            try await bed.expect(.listSessions(runtimeID: id), returns: .sessions([ACPSessionSummary(sessionId: "saved-1", cwd: "/srv", title: "Saved")]))
 
             try await bed.expect(.cancelPrompt(runtimeID: id), returns: .cancelRequested)
             let unknownRequest = try await bed.failure(.resolvePermission(runtimeID: id, requestID: UUID(), outcome: .cancelled))

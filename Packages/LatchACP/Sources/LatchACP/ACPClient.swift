@@ -57,6 +57,16 @@ public struct ACPAgentCapabilities: Codable, Equatable, Sendable {
     public let sessionCapabilities: ACPJSONValue?
     public let meta: ACPJSONValue?
 
+    /// Whether the agent lists its saved sessions: `session/list`.
+    public var listsSessions: Bool { sessionCapability("list") }
+    /// Whether the agent forks a session: `session/fork`.
+    public var forksSessions: Bool { sessionCapability("fork") }
+
+    private func sessionCapability(_ name: String) -> Bool {
+        guard case let .object(capabilities)? = sessionCapabilities, let value = capabilities[name] else { return false }
+        return value != .null && value != .bool(false)
+    }
+
     /// Whether a prompt may carry image blocks. Absent means no, per the protocol.
     public var acceptsImages: Bool {
         guard case let .object(capabilities)? = promptCapabilities else { return false }
@@ -112,18 +122,61 @@ public struct ACPInitializeResponse: Codable, Equatable, Sendable {
     public let agentCapabilities: ACPAgentCapabilities
     public let agentInfo: ACPImplementation?
     public let authMethods: [ACPAuthenticationMethod]?
+    /// Only what Latch reads of the agent's `_meta`: whether it steers.
+    public let meta: ACPJSONValue?
 
     public init(
         protocolVersion: Int,
         agentCapabilities: ACPAgentCapabilities,
         agentInfo: ACPImplementation? = nil,
-        authMethods: [ACPAuthenticationMethod]? = nil
+        authMethods: [ACPAuthenticationMethod]? = nil,
+        meta: ACPJSONValue? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.agentCapabilities = agentCapabilities
         self.agentInfo = agentInfo
         self.authMethods = authMethods
+        self.meta = meta
     }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        agentCapabilities = try container.decode(ACPAgentCapabilities.self, forKey: .agentCapabilities)
+        agentInfo = try container.decodeIfPresent(ACPImplementation.self, forKey: .agentInfo)
+        authMethods = try container.decodeIfPresent([ACPAuthenticationMethod].self, forKey: .authMethods)
+        // The rest of an agent's `_meta` can be anything, and this is kept in records a server sends.
+        let steering = try? container.decodeIfPresent(SteeringMeta.self, forKey: .meta)
+        meta = steering?.steering?.supported == true ? .object(["steering": .object(["supported": .bool(true)])]) : nil
+    }
+
+    /// Whether a message can go into the turn the agent is working on, at its next step:
+    /// `_session/steering`, as Claude Code offers.
+    public var supportsSteering: Bool {
+        guard case let .object(fields)? = meta, case let .object(steering)? = fields["steering"] else { return false }
+        return steering["supported"] == .bool(true)
+    }
+
+    private struct SteeringMeta: Decodable {
+        struct Steering: Decodable { let supported: Bool? }
+        let steering: Steering?
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion, agentCapabilities, agentInfo, authMethods
+        case meta = "_meta"
+    }
+}
+
+/// How a message sent into a running turn fared.
+public enum ACPSteerOutcome: Equatable, Sendable {
+    /// In the running turn; the agent takes it at its next step.
+    case injected
+    /// No turn was running, and the agent began one with it, as an agent that predates
+    /// `idleBehavior` does. Taken all the same: sending it again would say it twice.
+    case startedNewTurn
+    /// No turn was running: send it as a prompt of its own.
+    case promptRequired
 }
 
 public struct ACPNewSessionResponse: Codable, Equatable, Sendable {
@@ -178,6 +231,8 @@ public enum ACPClientError: Error, Equatable, Sendable {
     case loadSessionUnsupported
     case sessionOperationSuperseded
     case unsupportedProtocolVersion(expected: Int, received: Int)
+    /// An answer this client cannot read the outcome of.
+    case unexpectedResponse(String)
 }
 
 /// Typed ACP operations layered directly on a generic JSON-RPC connection.
@@ -461,6 +516,48 @@ public actor ACPClient {
             received.response, sequence: updatesThrough, key: "updatesThrough", as: ACPPromptResponse.self
         )
     }
+
+    /// The agent's saved sessions, in `cwd` when given; Claude Code's include those started
+    /// from its own command line.
+    public func listSessions(cwd: String?) async throws -> [ACPSessionSummary] {
+        try requireInitialized()
+        var params: [String: ACPJSONValue] = [:]
+        if let cwd { params["cwd"] = .string(cwd) }
+        let response: SessionList = try await connection.request("session/list", params: .object(params))
+        return response.sessions
+    }
+
+    /// A copy of the session `sessionID` under a new ID, which is not live: load it to go on with it.
+    public func forkSession(sessionID: String, cwd: String) async throws -> String {
+        try requireInitialized()
+        let response: ForkedSession = try await connection.request(
+            "session/fork", params: .object(["sessionId": .string(sessionID), "cwd": .string(cwd), "mcpServers": .array([])])
+        )
+        return response.sessionId
+    }
+
+    /// A message into the turn the agent is working on, for an agent that steers. One that
+    /// finds no turn running is left to the caller to send as a prompt.
+    public func steer(_ blocks: [ACPPromptBlock]) async throws -> ACPSteerOutcome {
+        try requireInitialized()
+        guard let activeSessionID else { throw ACPClientError.noActiveSession }
+        let response: SteerResponse = try await connection.request("_session/steering", params: .object([
+            "sessionId": .string(activeSessionID),
+            "prompt": .array(blocks.map(\.content)),
+            "_meta": .object(["steering": .object(["idleBehavior": .string("promptRequired")])]),
+        ]))
+        switch response.outcome {
+        case "injected": return .injected
+        case "startedNewTurn": return .startedNewTurn
+        case "promptRequired": return .promptRequired
+        // Whether the agent took it is unknown, so it is neither sent again nor counted as sent.
+        default: throw ACPClientError.unexpectedResponse("_session/steering answered \(response.outcome.prefix(64))")
+        }
+    }
+
+    private struct SteerResponse: Decodable, Sendable { let outcome: String }
+    private struct SessionList: Decodable, Sendable { let sessions: [ACPSessionSummary] }
+    private struct ForkedSession: Decodable, Sendable { let sessionId: String }
 
     public func cancelPrompt() async throws {
         try requireInitialized()

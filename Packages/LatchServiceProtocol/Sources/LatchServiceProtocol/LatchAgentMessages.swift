@@ -82,6 +82,12 @@ public enum LatchAgentCommand: Codable, Equatable, Sendable {
     case cancelPrompt(runtimeID: AgentRuntimeID)
     /// Answers a `permissionRequested` event. Unknown or already-closed requests fail.
     case resolvePermission(runtimeID: AgentRuntimeID, requestID: UUID, outcome: ACPPermissionOutcome)
+    /// A message into the running turn, for an agent that steers.
+    case steerPrompt(runtimeID: AgentRuntimeID, blocks: [ACPPromptBlock])
+    /// The agent's saved sessions in `cwd`, for an agent that lists them.
+    case listSessions(runtimeID: AgentRuntimeID, cwd: String)
+    /// A copy of the session under a new ID, for an agent that forks; load it to go on with it.
+    case forkSession(runtimeID: AgentRuntimeID, sessionID: String, cwd: String)
     /// Answers an `elicitationRequested` event. Unknown or already-closed requests fail.
     case resolveElicitation(runtimeID: AgentRuntimeID, requestID: UUID, response: ACPElicitationResponse)
 
@@ -104,6 +110,10 @@ public enum LatchAgentResponse: Codable, Equatable, Sendable {
     case promptCancellationRequested(runtimeID: AgentRuntimeID)
     case permissionResolved(runtimeID: AgentRuntimeID, requestID: UUID)
     case elicitationResolved(runtimeID: AgentRuntimeID, requestID: UUID)
+    /// False when no turn was running to take it: send it as a prompt.
+    case promptSteered(runtimeID: AgentRuntimeID, injected: Bool)
+    case sessionsListed(runtimeID: AgentRuntimeID, sessions: [ACPSessionSummary])
+    case sessionForked(runtimeID: AgentRuntimeID, sessionID: String)
 }
 
 public enum LatchAgentEvent: Codable, Equatable, Sendable {

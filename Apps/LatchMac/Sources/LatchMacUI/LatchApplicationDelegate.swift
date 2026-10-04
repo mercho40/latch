@@ -331,6 +331,7 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         session.addItem(withTitle: "Stop", action: #selector(SessionWindowController.stopSession(_:)), keyEquivalent: ".")
         session.addItem(withTitle: "Fork Session", action: #selector(SessionWindowController.forkSelectedSession(_:)), keyEquivalent: "n")
             .keyEquivalentModifierMask = [.command, .shift]
+        session.addItem(withTitle: "Resume Conversation…", action: #selector(SessionWindowController.resumeConversation(_:)), keyEquivalent: "")
         session.addItem(withTitle: "Disconnect", action: #selector(SessionWindowController.disconnectSession(_:)), keyEquivalent: "")
         session.addItem(.separator())
         session.addItem(withTitle: "Rename…", action: #selector(SessionWindowController.renameSession(_:)), keyEquivalent: "")

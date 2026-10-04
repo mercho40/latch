@@ -12,7 +12,8 @@ import XCTest
 /// and a tool call around them; the session ID picks a load with no history (`empty`), with a
 /// chunk of 4000 characters before the last (`huge`), or one that sends all of its history a
 /// second before it replies (`slow`). The prompt text picks the turn's behavior, and
-/// `sessions.log` and `prompts.log` in the workspace count what actually reached the agent. It
+/// `sessions.log`, `forks.log`, `steers.log` and `prompts.log` in the workspace count what actually reached the agent;
+/// a fork's new ID carries its request's. It
 /// sets its own PATH so tests can launch it with a minimal environment.
 enum MockAgent {
     static let script = #"""
@@ -30,6 +31,11 @@ enum MockAgent {
       case "$line" in
         *\"method\":\"initialize\"*)
           reply "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"agentInfo":{"name":"mock-agent","version":"1.0.0"}}' ;;
+        *\"method\":\"session*/fork\"*)
+          echo fork >> forks.log
+          reply "$id" '{"sessionId":"forked-'"$id"'"}' ;;
+        *\"method\":\"session*/list\"*)
+          reply "$id" '{"sessions":[{"sessionId":"saved-1","cwd":"/srv","title":"Saved"}]}' ;;
         *\"method\":\"session*/new\"*)
           echo new >> sessions.log
           reply "$id" '{"sessionId":"session-1","configOptions":[{"id":"effort","name":"Effort","type":"select","currentValue":"low","options":[{"value":"low","name":"Low"},{"value":"high","name":"High"}]}],"modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]},"models":{"currentModelId":"model-a","availableModels":[{"modelId":"model-a","name":"Model A"},{"modelId":"model-b","name":"Model B"}]}}' ;;
@@ -65,6 +71,9 @@ enum MockAgent {
             *slow*) sleep 1; chunk one; chunk two; chunk three; reply "$id" '{"stopReason":"end_turn"}' ;;
             *) chunk one; chunk two; chunk three; reply "$id" '{"stopReason":"end_turn"}' ;;
           esac ;;
+        *\"method\":\"_session*/steering\"*)
+          echo steer >> steers.log
+          reply "$id" '{"outcome":"injected"}' ;;
         *\"id\":900[,}]*)
           case "$line" in
             *\"selected\"*) chunk allowed; reply "$prompt_id" '{"stopReason":"end_turn"}' ;;

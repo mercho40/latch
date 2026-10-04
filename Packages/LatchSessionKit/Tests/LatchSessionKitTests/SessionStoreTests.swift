@@ -79,6 +79,20 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(Set(sessions[0].keys), ["id", "workspacePath", "title", "agentID", "customCommand", "draft", "messages"])
     }
 
+    /// A title the agent gave stays the agent's across a relaunch, so its next title replaces it;
+    /// a library saved before this was kept reads as the user's title.
+    func testATitleTheAgentGaveIsKeptAsTheAgents() async throws {
+        let directory = try temporaryDirectory().appendingPathComponent("Latch")
+        let store = SessionStore(directory: directory)
+        var library = fixture()
+        library.sessions[0].title = "Flaky test fix"
+        library.sessions[0].adoptedAgentTitle = "Flaky test fix"
+        try await store.save(library)
+        let restored = try await SessionStore(directory: directory).load()
+        XCTAssertEqual(restored.sessions[0].adoptedAgentTitle, "Flaky test fix")
+        XCTAssertNil(fixture().sessions[0].adoptedAgentTitle)
+    }
+
     func testCorruptAndFutureDataSurviveFailedLoadAndFreshStoreSave() async throws {
         let directory = try temporaryDirectory()
         let file = diskURL(directory)

@@ -2,14 +2,14 @@ import Foundation
 import LatchSessionKit
 
 /// The status slot at the end of a session's row. The Mac sidebar's rules, in the room a
-/// phone row has: only a decision, work in motion, a failure and an unread reply get a mark,
+/// phone row has: only a decision or a question, work in motion, a failure and an unread reply get a mark,
 /// and a session at rest says how long ago it was active.
 struct SessionRowStatus: Equatable {
     enum Mark: Equatable {
         case none
         /// A spinner: a turn is running, or the session is connecting or reconnecting.
         case working
-        /// A decision is waiting: orange, as on the Mac, so it stands apart from the tint.
+        /// A decision or an answer is waiting: orange, as on the Mac, so it stands apart from the tint.
         case waiting
         case failed
         /// A turn ended while the session was not on screen.
@@ -36,6 +36,8 @@ struct SessionRowStatus: Equatable {
         var phase: SessionModel.Phase = .disconnected
         var status = ""
         var needsApproval = false
+        /// The agent asked a question and waits for the answer.
+        var asksQuestion = false
         var linkState = SessionLinkState.connected
         var hasError = false
         /// The error is about reaching the server, not about the agent on it.
@@ -52,6 +54,7 @@ struct SessionRowStatus: Equatable {
 
     static func make(_ input: Input, now: Date) -> SessionRowStatus {
         if input.needsApproval { return SessionRowStatus(mark: .waiting, text: "Needs approval", spoken: "Needs approval") }
+        if input.asksQuestion { return SessionRowStatus(mark: .waiting, text: "Needs answer", spoken: "Needs an answer") }
         // Ahead of a failure: a live session's error belongs to an earlier prompt, and the lost
         // link is what matters now.
         if case .reconnecting = input.linkState, input.phase != .disconnected {

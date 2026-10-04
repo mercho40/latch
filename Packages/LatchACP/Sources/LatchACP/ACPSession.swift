@@ -330,6 +330,63 @@ public struct ACPPermissionRequest: Codable, Equatable, Sendable {
     }
 }
 
+/// The agent asks the user something: ACP's `elicitation/create`. Claude Code asks its
+/// AskUserQuestion questions this way. Latch answers forms; it does not offer URL mode.
+public struct ACPElicitationRequest: Codable, Equatable, Sendable {
+    public let sessionId: String
+    /// `form`, or `url` for a page to open, which Latch does not advertise.
+    public let mode: String
+    public let message: String
+    /// For a form, a JSON Schema object whose properties are its fields.
+    public let requestedSchema: ACPJSONValue?
+    /// The tool call that asks, when one does.
+    public let toolCallId: String?
+    public let meta: ACPJSONValue?
+
+    public init(sessionId: String, mode: String = "form", message: String, requestedSchema: ACPJSONValue? = nil,
+                toolCallId: String? = nil, meta: ACPJSONValue? = nil) {
+        self.sessionId = sessionId
+        self.mode = mode
+        self.message = message
+        self.requestedSchema = requestedSchema
+        self.toolCallId = toolCallId
+        self.meta = meta
+    }
+
+    /// A form may leave `mode` out, as MCP's do.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        mode = try container.decodeIfPresent(String.self, forKey: .mode) ?? "form"
+        message = try container.decode(String.self, forKey: .message)
+        requestedSchema = try container.decodeIfPresent(ACPJSONValue.self, forKey: .requestedSchema)
+        toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
+        meta = try container.decodeIfPresent(ACPJSONValue.self, forKey: .meta)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionId, mode, message, requestedSchema, toolCallId
+        case meta = "_meta"
+    }
+}
+
+public struct ACPElicitationResponse: Codable, Equatable, Sendable {
+    /// `accept` with the answers; `decline` to answer nothing, which Claude Code takes as
+    /// skipped; `cancel` to refuse the question, which ends the call that asked.
+    public enum Action: String, Codable, Equatable, Sendable { case accept, decline, cancel }
+
+    public let action: Action
+    /// The answers, by field, when accepted.
+    public let content: [String: ACPJSONValue]?
+
+    public init(action: Action, content: [String: ACPJSONValue]? = nil) {
+        self.action = action
+        self.content = action == .accept ? content : nil
+    }
+
+    public static let cancelled = ACPElicitationResponse(action: .cancel)
+}
+
 public enum ACPPermissionOutcome: Equatable, Sendable {
     case selected(optionID: String)
     case cancelled

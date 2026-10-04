@@ -11,7 +11,7 @@ import LatchSessionKit
 final class SessionLibrary {
     /// Why a session wants the user while it is not on screen.
     enum Attention: Equatable {
-        case needsApproval, finished, stoppedOnServer
+        case needsApproval, asksQuestion, finished, stoppedOnServer
     }
 
     private(set) var sessions: [PhoneSession] = []
@@ -26,9 +26,9 @@ final class SessionLibrary {
     var onChange: (() -> Void)?
     /// One row's content changed.
     var onSessionChange: ((PhoneSession) -> Void)?
-    /// A session off screen finished a turn or wants a decision, while the app is active.
+    /// A session off screen finished a turn or wants a decision or an answer, while the app is active.
     var onAttention: ((PhoneSession, Attention) -> Void)?
-    /// The number of sessions waiting for a decision, whenever it changes.
+    /// The number of sessions waiting for a decision or an answer, whenever it changes.
     var onApprovalCountChange: ((Int) -> Void)?
     /// A server went from Servers, as it was just before.
     var onServerRemoved: ((ServerProfile) -> Void)?
@@ -56,9 +56,10 @@ final class SessionLibrary {
     /// The runtimes sessions here follow or are adopting, as the list last showed them.
     private var followed: Set<String> = []
 
-    /// What a session last showed, so only a new request or a new turn end is announced.
+    /// What a session last showed, so only a new request or question, or a new turn end, is announced.
     private struct Watched {
         var permission: UUID?
+        var question: UUID?
         var turnsEnded: Int
     }
 
@@ -124,7 +125,7 @@ final class SessionLibrary {
         sessions.first { ($0.pendingAdoption?.rawValue ?? $0.model.remoteBinding?.runtimeID) == runtimeID }
     }
 
-    var approvalsNeeded: Int { sessions.filter(\.needsApproval).count }
+    var approvalsNeeded: Int { sessions.filter(\.waitsForUser).count }
 
     var savedLibrary: SavedSessionLibrary {
         // An adoption whose record never came has nothing to keep; the server lists it again.
@@ -230,7 +231,7 @@ final class SessionLibrary {
 
     private func watch(_ session: PhoneSession) {
         watched[session.id] = Watched(permission: session.model.permissions.current?.id,
-                                      turnsEnded: session.model.turnsEnded)
+                                      question: session.model.questions.current?.id, turnsEnded: session.model.turnsEnded)
         session.observe(self, change: { [weak self, weak session] in
             guard let self, let session else { return }
             self.sessionChanged(session)
@@ -244,8 +245,9 @@ final class SessionLibrary {
     private func sessionChanged(_ session: PhoneSession) {
         let model = session.model
         let permission = model.permissions.current?.id
-        let previous = watched[session.id] ?? Watched(permission: nil, turnsEnded: model.turnsEnded)
-        watched[session.id] = Watched(permission: permission, turnsEnded: model.turnsEnded)
+        let question = model.questions.current?.id
+        let previous = watched[session.id] ?? Watched(permission: nil, question: nil, turnsEnded: model.turnsEnded)
+        watched[session.id] = Watched(permission: permission, question: question, turnsEnded: model.turnsEnded)
         let visible = isSessionVisible(session.id)
         if model.turnsEnded != previous.turnsEnded, !visible {
             // A failed turn leaves no unread mark: the row already shows the failure.
@@ -254,6 +256,8 @@ final class SessionLibrary {
         }
         if let permission, permission != previous.permission, !visible, isActive {
             onAttention?(session, .needsApproval)
+        } else if let question, question != previous.question, !visible, isActive {
+            onAttention?(session, .asksQuestion)
         }
         // An adoption that took, or a runtime let go of, moves a row in or out of "On <server>".
         let nowFollowed = followedRuntimeIDs

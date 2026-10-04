@@ -296,6 +296,62 @@ final class ACPSessionTests: XCTestCase {
         _ = try await runTask.value
     }
 
+    /// The agent's questions reach the elicitation handler beside the permission handler, and
+    /// a page to open, which Latch never offers, is refused without asking.
+    func testElicitationHandlerAnswersFormsAndRefusesPages() async throws {
+        let server = MockACPServer()
+        let connection = makeConnection(server)
+        let client = ACPClient(connection: connection)
+        await client.setPermissionHandler { _ in .cancelled }
+        await client.setElicitationHandler { request in
+            XCTAssertEqual(request.message, "Which one?")
+            XCTAssertEqual(request.toolCallId, "tool-2")
+            return ACPElicitationResponse(action: .accept, content: ["question_0": .string("A")])
+        }
+        let runTask = Task { try await connection.run() }
+        var messages = server.receivedMessages.makeAsyncIterator()
+
+        await server.send(.object([
+            "jsonrpc": .string("2.0"), "id": .string("ask-1"), "method": .string("elicitation/create"),
+            "params": .object([
+                "sessionId": .string("session-1"), "mode": .string("form"), "message": .string("Which one?"),
+                "toolCallId": .string("tool-2"),
+                "requestedSchema": .object(["type": .string("object"), "properties": .object([:])]),
+            ]),
+        ]))
+        let answer = await messages.next()
+        XCTAssertEqual(answer, .object([
+            "jsonrpc": .string("2.0"), "id": .string("ask-1"),
+            "result": .object(["action": .string("accept"), "content": .object(["question_0": .string("A")])]),
+        ]))
+
+        await server.send(.object([
+            "jsonrpc": .string("2.0"), "id": .string("ask-2"), "method": .string("elicitation/create"),
+            "params": .object([
+                "sessionId": .string("session-1"), "mode": .string("url"), "message": .string("Sign in"),
+                "url": .string("https://example.com"), "elicitationId": .string("e-1"),
+            ]),
+        ]))
+        let refusal = await messages.next()
+        XCTAssertEqual(refusal, .object([
+            "jsonrpc": .string("2.0"), "id": .string("ask-2"), "result": .object(["action": .string("cancel")]),
+        ]))
+
+        await server.finish()
+        _ = try await runTask.value
+    }
+
+    /// Latch says it answers forms, and shows subagents' words.
+    func testLatchCapabilitiesEncodeFormsAndSubagentTranscripts() throws {
+        let capabilities = ACPClientCapabilities(elicitation: .object(["form": .object([:])]),
+                                                 meta: .object(["subagent-transcript": .bool(true)]))
+        let encoded = try ACPJSONValue.encode(capabilities)
+        guard case let .object(object) = encoded else { return XCTFail("An object") }
+        XCTAssertEqual(object["elicitation"], .object(["form": .object([:])]))
+        XCTAssertEqual(object["_meta"], .object(["subagent-transcript": .bool(true)]))
+        XCTAssertEqual(object["terminal"], .bool(false))
+    }
+
     private func makeConnection(_ server: MockACPServer) -> ACPJSONRPCConnection {
         ACPJSONRPCConnection(incoming: server.clientIncoming) { data in
             await server.receive(data)

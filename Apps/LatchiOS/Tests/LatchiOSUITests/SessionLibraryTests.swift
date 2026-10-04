@@ -176,6 +176,36 @@ final class SessionLibraryTests: XCTestCase {
         XCTAssertFalse(session.hasUnseenReply)
     }
 
+    /// A question waits like a decision: it asks for attention, counts toward the badge, and
+    /// says so on the row.
+    func testAnOffScreenQuestionAsksForAttentionAndCounts() async throws {
+        let connector = FakeConnector()
+        let library = makeLibrary(connector)
+        var attention: [SessionLibrary.Attention] = []
+        var counts: [Int] = []
+        library.onAttention = { _, kind in attention.append(kind) }
+        library.onApprovalCountChange = { counts.append($0) }
+        let session = library.create(serverID: vps.id, path: "/srv/app", agent: .fx)
+        await session.settled()
+        let send = Task { await session.model.send("go") }
+        try await eventually("the turn") { connector.clients[0].isRunningTurn }
+        connector.clients[0].ask()
+        try await eventually("the question") { session.model.questions.current != nil }
+        XCTAssertEqual(attention, [.asksQuestion])
+        XCTAssertEqual(counts, [1])
+        XCTAssertEqual(library.approvalsNeeded, 1)
+        XCTAssertTrue(session.waitsForUser)
+        XCTAssertFalse(session.needsApproval)
+        XCTAssertEqual(session.pendingQuestion, "Which database?")
+        XCTAssertEqual(session.rowStatus(now: Date()).text, "Needs answer")
+        XCTAssertEqual(session.rowStatus(now: Date()).mark, .waiting)
+        let question = try XCTUnwrap(session.model.questions.current)
+        session.model.questions.skip(id: question.id)
+        try await eventually("the badge to clear") { counts == [1, 0] }
+        connector.clients[0].finishTurn()
+        await send.value
+    }
+
     func testTheSessionOnScreenIsNeitherMarkedNorAnnounced() async throws {
         let connector = FakeConnector()
         let library = makeLibrary(connector)

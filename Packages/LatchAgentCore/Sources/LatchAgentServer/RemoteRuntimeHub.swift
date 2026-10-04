@@ -237,6 +237,8 @@ public actor RemoteRuntimeHub {
             return await cancelTurn(runtimeID)
         case let .resolvePermission(runtimeID, requestID, outcome):
             return await resolvePermission(runtimeID, requestID: requestID, outcome: outcome)
+        case let .resolveElicitation(runtimeID, requestID, response):
+            return await resolveElicitation(runtimeID, requestID: requestID, response: response)
         case let .attach(runtimeID, after):
             guard let state = runtimes[runtimeID] else { return .failure(.runtimeNotFound) }
             let (backlogFrom, truncated) = journal.subscribe(connection, to: runtimeID, after: after)
@@ -256,7 +258,7 @@ public actor RemoteRuntimeHub {
 
     /// Stops every runtime that has had no attached connection as of `now` for the configured
     /// timeout and is idle, or for `detachedPermissionTimeout` and is waiting on a permission
-    /// request. One running a turn that waits on nothing is never stopped. A reaped runtime is
+    /// request or a question. One running a turn that waits on nothing is never stopped. A reaped runtime is
     /// forgotten rather than kept as exited, so a returning client's attach fails with
     /// `runtimeNotFound` and it resumes the session instead.
     public func reapDetachedRuntimes(now: ContinuousClock.Instant) async {
@@ -266,7 +268,7 @@ public actor RemoteRuntimeHub {
         func isReapable(_ id: AgentRuntimeID) -> Bool {
             guard let state = runtimes[id], state.lifecycle == .ready, let since = journal.detachedSince(id) else { return false }
             let detached = since.duration(to: now)
-            if state.pendingPermissions.isEmpty { return state.activeTurnID == nil && detached >= timeout }
+            if state.pendingPermissions.isEmpty, state.pendingElicitations.isEmpty { return state.activeTurnID == nil && detached >= timeout }
             return detached >= permissionTimeout
         }
         for id in runtimes.keys.sorted(by: { $0.rawValue < $1.rawValue }) where isReapable(id) {
@@ -385,6 +387,10 @@ public actor RemoteRuntimeHub {
             publish(.permissionClosed(requestID: pending.requestID), for: id)
         }
         state.pendingPermissions = []
+        for pending in state.pendingElicitations {
+            publish(.elicitationClosed(requestID: pending.requestID), for: id)
+        }
+        state.pendingElicitations = []
         // History of a load that never finished.
         state.heldUpdates = HeldUpdates()
         state.lifecycle = .exited
@@ -627,6 +633,19 @@ public actor RemoteRuntimeHub {
         }
     }
 
+    private func resolveElicitation(_ id: AgentRuntimeID, requestID: UUID, response: ACPElicitationResponse) async -> LatchRemoteReplyResult {
+        guard let state = runtimes[id] else { return .failure(.runtimeNotFound) }
+        guard state.pendingElicitations.contains(where: { $0.requestID == requestID }) else {
+            return .failure(.elicitationRequestNotFound)
+        }
+        do {
+            _ = try await runService(.resolveElicitation(runtimeID: id, requestID: requestID, response: response))
+            return .success(.elicitationResolved)
+        } catch {
+            return .failure(Self.remoteError(for: error))
+        }
+    }
+
     // MARK: Events
 
     private func ingest(_ event: LatchAgentEvent) {
@@ -679,6 +698,17 @@ public actor RemoteRuntimeHub {
                   let index = runtimes[id]?.pendingPermissions.firstIndex(where: { $0.requestID == requestID }) else { return }
             runtimes[id]!.pendingPermissions.remove(at: index)
             publish(.permissionClosed(requestID: requestID), for: id)
+
+        case let .elicitationRequested(id, requestID, request):
+            guard runtimes[id]?.lifecycle != .exited, runtimes[id] != nil else { return }
+            runtimes[id]!.pendingElicitations.append(LatchRemotePendingElicitation(requestID: requestID, request: request))
+            publish(.elicitationRequested(requestID: requestID, request: request), for: id)
+
+        case let .elicitationClosed(id, requestID):
+            guard runtimes[id]?.lifecycle != .exited,
+                  let index = runtimes[id]?.pendingElicitations.firstIndex(where: { $0.requestID == requestID }) else { return }
+            runtimes[id]!.pendingElicitations.remove(at: index)
+            publish(.elicitationClosed(requestID: requestID), for: id)
         }
     }
 
@@ -814,6 +844,7 @@ public actor RemoteRuntimeHub {
             activeTurnID: state.activeTurnID,
             turns: state.turns,
             pendingPermissions: Self.recorded(state.pendingPermissions, budget: configuration.maxEncodedEventBytes / 2),
+            pendingElicitations: state.pendingElicitations.isEmpty ? nil : state.pendingElicitations,
             lastSequence: journal.lastSequence(of: id),
             loadedThrough: state.loadedThrough
         )
@@ -860,7 +891,7 @@ public actor RemoteRuntimeHub {
             workspace: state.workspace,
             lifecycle: state.lifecycle,
             activeTurnID: state.activeTurnID,
-            pendingPermissionCount: state.pendingPermissions.count,
+            pendingPermissionCount: state.pendingPermissions.count + state.pendingElicitations.count,
             lastSequence: journal.lastSequence(of: id),
             title: state.title,
             agent: state.agent
@@ -921,6 +952,7 @@ public actor RemoteRuntimeHub {
         case AgentRuntimeRegistryError.duplicateRuntime: code = .duplicateRuntime
         case AgentRuntimeRegistryError.permissionRequestNotFound: code = .permissionRequestNotFound
         case AgentRuntimeRegistryError.invalidPermissionOption: code = .invalidPermissionOption
+        case AgentRuntimeRegistryError.elicitationRequestNotFound: code = .elicitationRequestNotFound
         case ACPClientError.noActiveSession: return .noSession
         case ACPClientError.promptAlreadyActive:
             return LatchRemoteError(code: .busy, message: "A turn is already running.")
@@ -980,6 +1012,7 @@ private struct RuntimeState {
     var updatesThrough: UInt64 = 0
     var turns: [LatchRemoteTurnRecord] = []
     var pendingPermissions: [LatchRemotePendingPermission] = []
+    var pendingElicitations: [LatchRemotePendingElicitation] = []
     /// From the first turn whose prompt had text.
     var title: String?
 
@@ -1003,6 +1036,7 @@ private struct RuntimeState {
 
     static let stateKinds: Set<String> = [
         "config_option_update", "current_mode_update", "current_model_update", "available_commands_update", "plan",
+        "usage_update", "session_info_update",
     ]
 
     mutating func remember(_ notification: ACPSessionNotification) {
@@ -1112,6 +1146,9 @@ extension LatchRemoteError {
     static let noSession = LatchRemoteError(code: .noSession, message: "Start or load a session first.")
     static let permissionRequestNotFound = LatchRemoteError(
         code: .permissionRequestNotFound, message: "Permission request not found."
+    )
+    static let elicitationRequestNotFound = LatchRemoteError(
+        code: .elicitationRequestNotFound, message: "Question not found."
     )
 }
 

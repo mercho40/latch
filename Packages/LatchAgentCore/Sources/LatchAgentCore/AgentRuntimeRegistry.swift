@@ -7,6 +7,7 @@ public enum AgentRuntimeRegistryError: Error, Equatable, Sendable {
     case runtimeNotFound(AgentRuntimeID)
     case permissionRequestNotFound(UUID)
     case invalidPermissionOption(UUID)
+    case elicitationRequestNotFound(UUID)
 }
 
 #if os(macOS) || os(Linux)
@@ -20,14 +21,22 @@ public actor AgentRuntimeRegistry {
     private var runtimes: [AgentRuntimeID: ACPAgentRuntime] = [:]
     private var forwardingTasks: [AgentRuntimeID: [Task<Void, Never>]] = [:]
     private var pendingPermissions: [UUID: PendingPermission] = [:]
+    private var pendingElicitations: [UUID: PendingElicitation] = [:]
 
     /// Requests beyond this per-runtime limit are cancelled immediately instead of queued.
     public static let maximumPendingPermissionsPerRuntime = 16
+    /// The same for questions.
+    public static let maximumPendingElicitationsPerRuntime = 16
 
     private struct PendingPermission {
         let runtimeID: AgentRuntimeID
         let request: ACPPermissionRequest
         let continuation: CheckedContinuation<ACPPermissionOutcome, Never>
+    }
+
+    private struct PendingElicitation {
+        let runtimeID: AgentRuntimeID
+        let continuation: CheckedContinuation<ACPElicitationResponse, Never>
     }
 
     public init() {
@@ -72,6 +81,10 @@ public actor AgentRuntimeRegistry {
         try? await runtime.setPermissionHandler { [weak self] request in
             await self?.brokerPermission(runtimeID: id, runtime: runtime, request: request) ?? .cancelled
         }
+        // Questions the same way.
+        try? await runtime.setElicitationHandler { [weak self] request in
+            await self?.brokerElicitation(runtimeID: id, runtime: runtime, request: request) ?? .cancelled
+        }
         return initialization
     }
 
@@ -90,6 +103,18 @@ public actor AgentRuntimeRegistry {
             throw AgentRuntimeRegistryError.invalidPermissionOption(requestID)
         }
         closePermission(requestID: requestID, pending: pending, outcome: outcome)
+    }
+
+    /// Answers a pending `elicitationRequested` event for `runtimeID`.
+    public func resolveElicitation(runtimeID: AgentRuntimeID, requestID: UUID, response: ACPElicitationResponse) throws {
+        guard let pending = pendingElicitations[requestID], pending.runtimeID == runtimeID else {
+            throw AgentRuntimeRegistryError.elicitationRequestNotFound(requestID)
+        }
+        closeElicitation(requestID: requestID, pending: pending, response: response)
+    }
+
+    public func pendingElicitationRequestIDs(runtimeID: AgentRuntimeID) -> [UUID] {
+        pendingElicitations.filter { $0.value.runtimeID == runtimeID }.keys.sorted { $0.uuidString < $1.uuidString }
     }
 
     public func pendingPermissionRequestIDs(runtimeID: AgentRuntimeID) -> [UUID] {
@@ -171,13 +196,13 @@ public actor AgentRuntimeRegistry {
     ) async throws -> ACPPromptResponse {
         let runtime = try runtime(for: runtimeID)
         // A decision cannot outlive its prompt; release anything the agent left waiting.
-        defer { cancelPendingPermissions(runtimeID: runtimeID) }
+        defer { cancelPendingRequests(runtimeID: runtimeID) }
         return try await runtime.prompt(blocks)
     }
 
     public func cancelPrompt(runtimeID: AgentRuntimeID) async throws {
         let runtime = try runtime(for: runtimeID)
-        cancelPendingPermissions(runtimeID: runtimeID)
+        cancelPendingRequests(runtimeID: runtimeID)
         try await runtime.cancelPrompt()
     }
 
@@ -193,8 +218,8 @@ public actor AgentRuntimeRegistry {
         let ownedRuntimes = Array(runtimes.values)
         runtimes.removeAll()
         cancelAllForwardingTasks()
-        for id in Set(pendingPermissions.values.map(\.runtimeID)) {
-            cancelPendingPermissions(runtimeID: id)
+        for id in Set(pendingPermissions.values.map(\.runtimeID) + pendingElicitations.values.map(\.runtimeID)) {
+            cancelPendingRequests(runtimeID: id)
         }
         await withTaskGroup(of: Void.self) { group in
             for runtime in ownedRuntimes {
@@ -236,7 +261,7 @@ public actor AgentRuntimeRegistry {
         guard runtimes[id] === runtime else { return }
         runtimes[id] = nil
         forwardingTasks.removeValue(forKey: id)?.forEach { $0.cancel() }
-        cancelPendingPermissions(runtimeID: id)
+        cancelPendingRequests(runtimeID: id)
     }
 
     private func brokerPermission(
@@ -258,10 +283,34 @@ public actor AgentRuntimeRegistry {
         }
     }
 
-    private func cancelPendingPermissions(runtimeID: AgentRuntimeID) {
+    private func cancelPendingRequests(runtimeID: AgentRuntimeID) {
         for (requestID, pending) in pendingPermissions where pending.runtimeID == runtimeID {
             closePermission(requestID: requestID, pending: pending, outcome: .cancelled)
         }
+        for (requestID, pending) in pendingElicitations where pending.runtimeID == runtimeID {
+            closeElicitation(requestID: requestID, pending: pending, response: .cancelled)
+        }
+    }
+
+    private func brokerElicitation(
+        runtimeID: AgentRuntimeID,
+        runtime: ACPAgentRuntime,
+        request: ACPElicitationRequest
+    ) async -> ACPElicitationResponse {
+        guard runtimes[runtimeID] === runtime,
+              pendingElicitations.values.filter({ $0.runtimeID == runtimeID }).count
+                < Self.maximumPendingElicitationsPerRuntime else { return .cancelled }
+        let requestID = UUID()
+        return await withCheckedContinuation { continuation in
+            pendingElicitations[requestID] = PendingElicitation(runtimeID: runtimeID, continuation: continuation)
+            eventContinuation.yield(.elicitationRequested(runtimeID: runtimeID, requestID: requestID, request: request))
+        }
+    }
+
+    private func closeElicitation(requestID: UUID, pending: PendingElicitation, response: ACPElicitationResponse) {
+        pendingElicitations[requestID] = nil
+        pending.continuation.resume(returning: response)
+        eventContinuation.yield(.elicitationClosed(runtimeID: pending.runtimeID, requestID: requestID))
     }
 
     private func closePermission(requestID: UUID, pending: PendingPermission, outcome: ACPPermissionOutcome) {
@@ -281,5 +330,7 @@ public actor AgentRuntimeRegistry {
 extension ACPClientCapabilities {
     /// What Latch tells every agent it starts. Claude Code forwards a subagent's own words and
     /// thinking only to a client that says it shows them under the subagent's call.
-    public static let latch = ACPClientCapabilities(meta: .object(["subagent-transcript": .bool(true)]))
+    /// They ask their questions as forms, which Latch answers.
+    public static let latch = ACPClientCapabilities(elicitation: .object(["form": .object([:])]),
+                                                    meta: .object(["subagent-transcript": .bool(true)]))
 }

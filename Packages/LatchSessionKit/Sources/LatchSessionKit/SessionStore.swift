@@ -26,10 +26,13 @@ public struct SavedSession: Codable, Equatable, Sendable {
     /// The name the agent gave itself when it last connected, such as "Mock Agent", for a
     /// custom command whose own name says little. The iPhone and iPad keep it; the Mac saves nil.
     public var agentName: String? = nil
+    /// `title` when it is one the agent gave the conversation, so a later one from the agent may
+    /// replace it; nil when the title is the user's own, or the first prompt's.
+    public var adoptedAgentTitle: String? = nil
 
     public init(id: UUID, workspacePath: String, title: String, agentID: String, customCommand: String, draft: String,
                 messages: [ChatMessage], agentSessionID: String? = nil, lastActiveAt: Date? = nil, serverID: UUID? = nil,
-                remote: RemoteBinding? = nil, agentName: String? = nil) {
+                remote: RemoteBinding? = nil, agentName: String? = nil, adoptedAgentTitle: String? = nil) {
         self.id = id
         self.workspacePath = workspacePath
         self.title = title
@@ -42,6 +45,7 @@ public struct SavedSession: Codable, Equatable, Sendable {
         self.serverID = serverID
         self.remote = remote
         self.agentName = agentName
+        self.adoptedAgentTitle = adoptedAgentTitle
     }
 
     public struct RemoteBinding: Codable, Equatable, Sendable {

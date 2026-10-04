@@ -104,9 +104,9 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         library.onAttention = { [weak self] session, attention in self?.announce(session, attention) }
         library.onApprovalCountChange = { [weak self] count in
             guard let self else { return }
-            // Only for a request the user cannot see: over one on screen, the system's question
-            // about badges would come with no context, in front of the decision itself.
-            let unseen = library.sessions.contains { $0.needsApproval && !isShowing($0.id) }
+            // Only for a request or question the user cannot see: over one on screen, the
+            // system's question about badges would come with no context, in front of it.
+            let unseen = library.sessions.contains { $0.waitsForUser && !isShowing($0.id) }
             badge?.update(count, mayAsk: unseen)
         }
     }
@@ -426,11 +426,14 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         case .needsApproval:
             ("\(agent) on \(server) needs approval" + (session.pendingRequestTitle.map { ": \($0)" } ?? "."),
              waiting?.symbol ?? "exclamationmark.circle.fill", waiting?.color ?? .systemOrange)
+        case .asksQuestion:
+            ("\(agent) on \(server) asks" + (session.pendingQuestion.map { ": \($0)" } ?? " a question."),
+             "questionmark.circle.fill", waiting?.color ?? .systemOrange)
         case .finished: ("\(agent) finished.", "checkmark.circle.fill", .systemGreen)
         case .stoppedOnServer: ("\(agent) was stopped on \(server).", "stop.circle.fill", .secondaryLabel)
         }
         banners.show(title: session.title, message: message, symbol: symbol, tint: tint,
-                     urgent: attention == .needsApproval) { [weak self, weak session] in
+                     urgent: attention == .needsApproval || attention == .asksQuestion) { [weak self, weak session] in
             guard let self, let session, self.library.session(id: session.id) != nil else { return }
             self.show(session)
         }

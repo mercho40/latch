@@ -33,7 +33,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                      agentSessionID: pendingNewContext ? nil : model.savedAgentSessionID,
                      lastActiveAt: model.lastActiveAt,
                      serverID: location.serverID,
-                     remote: pendingNewContext ? nil : model.remoteBinding)
+                     remote: pendingNewContext ? nil : model.remoteBinding,
+                     adoptedAgentTitle: adoptedAgentTitle == sessionTitle ? adoptedAgentTitle : nil)
     }
 
     /// The server's name for a remote session, even once the server has left Settings.
@@ -87,6 +88,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// end_turn" and "Connected ·" never reach the list.
     func sidebarRow(now: Date) -> (status: SessionCellView.Status, detail: String) {
         if model.permissions.current != nil { return (.waiting, "Waiting for a decision") }
+        if model.questions.current != nil { return (.waiting, "Waiting for an answer") }
         // Ahead of a failure: a live session's error is an earlier prompt's or change's, and
         // the lost link is what matters now.
         if let reconnecting = reconnectingTitle { return (.working, reconnecting) }
@@ -113,6 +115,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         return AttentionCenter.State(
             workspaceName: serverName.map { "\($0) · \(location.folderName)" } ?? location.folderName,
             permission: pending?.id,
+            question: model.questions.current?.id,
             allowOptionID: pending?.options.first { $0.kind == "allow_once" }?.optionId,
             rejectOptionID: pending?.options.first { $0.kind == "reject_once" }?.optionId,
             isPrompting: model.phase == .prompting,
@@ -123,7 +126,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     var menuBarRow: MenuBarSession {
         MenuBarSession(id: id, title: sessionTitle, status: reconnectingTitle ?? displayStatus,
-                       phase: model.phase, needsPermission: model.permissions.current != nil)
+                       phase: model.phase, needsPermission: model.permissions.current != nil || model.questions.current != nil)
     }
 
     /// A decision taken outside the sheet, from a notification action. The queue only
@@ -174,6 +177,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     private var permissionAlert: (id: UUID, alert: NSAlert, escapeMonitor: Any?)?
+    /// The agent's question on screen. One sheet at a time: a question waits for a request's
+    /// sheet to close, and a request for a question's.
+    private(set) var questionSheet: QuestionSheet?
     private let settings: AgentSettings
     /// Names and custom commands of the servers remote sessions run on.
     private let servers: any ServerStore
@@ -235,13 +241,21 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private let modelPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let effortPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let permissionModePicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// The agent's other options, such as Claude Code's Fast mode, in its order; hidden when
+    /// it offers none, and any past these are not shown.
+    private let extraPickers = [NSPopUpButton(frame: .zero, pullsDown: false), NSPopUpButton(frame: .zero, pullsDown: false)]
+    /// How full the agent's context is, before the composer's buttons.
+    private let usageLabel = NSTextField(labelWithString: "")
     /// Only the settings that change between messages. The harness is chosen once per
     /// session and then locked, so it lives in the window's toolbar, not in the composer.
     private lazy var composerControls = ComposerControlsView(
         pickers: [.init(modelPicker, maximumWidth: 260),
                   .init(effortPicker, maximumWidth: 150),
-                  .init(permissionModePicker)],
-        actions: [attach, cancel, send])
+                  .init(permissionModePicker)] + extraPickers.map { .init($0, maximumWidth: 180) },
+        actions: [attach, cancel, send], accessory: usageLabel)
+    /// The agent's title the session took last, so a later one may replace it but a rename
+    /// is never overwritten.
+    private var adoptedAgentTitle: String?
     private var renderedConfiguration: SessionConfiguration?
     private var renderedPickerPlaceholder: String?
     private lazy var transcriptUpdates = TranscriptRenderScheduler { [weak self] in
@@ -292,6 +306,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         customCommand = command
         if let savedSession {
             sessionTitle = savedSession.title
+            adoptedAgentTitle = savedSession.adoptedAgentTitle
             prompt.string = savedSession.draft
             model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID,
                           lastActiveAt: savedSession.lastActiveAt,
@@ -387,7 +402,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             composerContent.topAnchor.constraint(equalTo: composerBox.topAnchor, constant: 8),
             composerContent.bottomAnchor.constraint(equalTo: composerBox.bottomAnchor, constant: -8),
         ])
-        for picker in [modelPicker, effortPicker, permissionModePicker] {
+        usageLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        usageLabel.textColor = .secondaryLabelColor
+        for picker in [modelPicker, effortPicker, permissionModePicker] + extraPickers {
             // Three bezelled pop-ups in a row made the composer look like a form. Borderless, a
             // pop-up is its title and the system's own arrows, which is all the affordance it needs.
             if #available(macOS 26.0, *) {
@@ -414,6 +431,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             picker.menu?.autoenablesItems = false
         }
         modelPicker.action = #selector(selectModel)
+        for picker in extraPickers { picker.action = #selector(selectExtra(_:)) }
         effortPicker.action = #selector(selectEffort)
         permissionModePicker.action = #selector(selectPermissionMode)
         modelPicker.setAccessibilityLabel("Session model")
@@ -577,6 +595,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private func refresh() {
         guard isViewLoaded else { return }
         refreshPermission()
+        refreshQuestion()
+        adoptAgentTitle()
         refreshBanner()
         // Drafting can continue during connection setup; only a queued send locks the ready composer.
         // A read-only archive has nowhere to send a draft; an editable field there would promise otherwise.
@@ -797,6 +817,70 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         effortPicker.isEnabled = editable && !(model.configuration.effort?.choices.isEmpty ?? true)
         permissionModePicker.isHidden = model.configuration.permissionMode?.choices.isEmpty ?? true
         permissionModePicker.isEnabled = editable && !permissionModePicker.isHidden
+        for (index, picker) in extraPickers.enumerated() {
+            let extra = model.configuration.extras.indices.contains(index) ? model.configuration.extras[index] : nil
+            if picker.identifier?.rawValue != extra.map(Self.configID) || picker.titleOfSelectedItem != extra.flatMap(Self.currentName) {
+                populate(picker, from: extra, placeholder: placeholder)
+                picker.identifier = extra.map { NSUserInterfaceItemIdentifier(Self.configID($0)) }
+                picker.setAccessibilityLabel(extra?.name)
+                picker.toolTip = extra.map { [$0.name, $0.description].compactMap { $0 }.joined(separator: ": ") }
+            }
+            picker.isHidden = extra == nil
+            picker.isEnabled = editable && extra != nil
+        }
+        refreshUsage()
+    }
+
+    private static func configID(_ picker: SessionPicker) -> String {
+        if case let .config(id) = picker.route { return id }
+        return ""
+    }
+
+    private static func currentName(_ picker: SessionPicker) -> String? {
+        picker.choices.first { $0.value == picker.currentValue }?.name
+    }
+
+    @objc private func selectExtra(_ sender: NSPopUpButton) {
+        guard let configID = sender.identifier?.rawValue, !configID.isEmpty else { return }
+        select(from: sender) { [model] value in await model.select(option: configID, value: value) }
+    }
+
+    /// "25% context", with the tokens and what the conversation has cost so far in its tooltip;
+    /// amber once the context is mostly full, when the agent is about to compact it.
+    private func refreshUsage() {
+        guard let usage = model.usage else {
+            usageLabel.stringValue = ""
+            return
+        }
+        let percent = Int((usage.fraction * 100).rounded())
+        usageLabel.stringValue = "\(percent)% context"
+        usageLabel.textColor = usage.fraction >= 0.8 ? .systemOrange : .secondaryLabelColor
+        let tokens = "\(usage.used.formatted()) of \(usage.size.formatted()) tokens"
+        let cost = usage.cost.map { $0.formatted(.currency(code: usage.currency ?? "USD")) }
+        usageLabel.toolTip = [tokens, cost.map { "\($0) so far" }].compactMap { $0 }.joined(separator: " · ")
+        usageLabel.setAccessibilityLabel("Context \(percent)% full" + (cost.map { ", \($0) so far" } ?? ""))
+        composerControls.refreshLayout()
+    }
+
+    private func adoptAgentTitle() {
+        let firstPrompt = model.messages.first { $0.role == .user }?.text
+        guard let title = Self.adoptedTitle(current: sessionTitle, agentTitle: model.agentTitle,
+                                            firstPrompt: firstPrompt, adoptedBefore: adoptedAgentTitle) else { return }
+        sessionTitle = title
+        adoptedAgentTitle = title
+        onChange?()
+    }
+
+    /// The agent's own title for the conversation replaces one taken from the first prompt, or
+    /// one it gave before; never a name the user chose.
+    static func adoptedTitle(current: String, agentTitle: String?, firstPrompt: String?, adoptedBefore: String?) -> String? {
+        guard let agentTitle else { return nil }
+        let title = String(agentTitle.prefix(60))
+        guard title != current else { return nil }
+        let fromPrompt = firstPrompt.map { text in
+            String((text.split(whereSeparator: \.isNewline).first.map(String.init) ?? "").trimmingCharacters(in: .whitespaces).prefix(60))
+        }
+        return current == "New Session" || current == fromPrompt || current == adoptedBefore ? title : nil
     }
 
     private func populate(_ button: NSPopUpButton, from picker: SessionPicker?, placeholder: String) {
@@ -838,6 +922,12 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     @objc private func selectPermissionMode() { select(.permissionMode, from: permissionModePicker) }
 
     private func select(_ kind: SessionPicker.Kind, from button: NSPopUpButton) {
+        select(from: button) { [model] value in await model.select(kind, value: value) }
+    }
+
+    /// One choice at a time, and none while the session is busy; the pop-up shows the agent's
+    /// value until the agent confirms the new one.
+    private func select(from button: NSPopUpButton, _ change: @escaping @MainActor (String) async -> Void) {
         guard operation == nil, !changingConfiguration, !shuttingDown,
               let value = button.selectedItem?.representedObject as? String else { return }
         changingConfiguration = true
@@ -849,7 +939,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         Task {
             defer { changingConfiguration = false; refresh() }
             guard !shuttingDown, generation == actionGeneration else { return }
-            await model.select(kind, value: value)
+            await change(value)
         }
     }
 
@@ -860,28 +950,23 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             if existing.id != pending?.id { window.endSheet(existing.alert.window, returnCode: .abort) }
             return
         }
-        guard let pending else { return }
+        guard let pending, questionSheet == nil else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
+        // Latch says what this is; the agent's heading, such as "Ready to code?", says what it wants.
         alert.messageText = "Agent requests permission"
-        alert.informativeText = "Review the agent-provided tool details below. “Always” is remembered by the agent, not by Latch. Cancel Request declines only this request; it doesn’t restrict the agent."
+        alert.informativeText = [pending.heading, pending.reason, "Review the agent-provided details below. “Always” is remembered by the agent, not by Latch. Cancel Request declines only this request; it doesn’t restrict the agent."]
+            .compactMap { $0 }.joined(separator: "\n\n")
         // Return and Escape both cancel. No approval receives a default key equivalent.
         alert.addButton(withTitle: "Cancel Request").keyEquivalent = "\r"
         for option in pending.options { alert.addButton(withTitle: option.permissionLabel!).keyEquivalent = "" }
         let details = NSTextView()
         details.isEditable = false
         details.isSelectable = true
-        details.isRichText = false
-        details.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        details.isRichText = true
         details.setAccessibilityLabel("Agent-provided permission request details")
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(pending.request), let text = String(data: data, encoding: .utf8) else {
-            model.permissions.resolve(id: pending.id, optionID: nil)
-            return
-        }
-        details.string = text
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 220))
+        details.textStorage?.setAttributedString(Self.permissionBody(pending))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: pending.plan == nil ? 220 : 300))
         scroll.borderType = .bezelBorder
         configureTextView(details, in: scroll)
         alert.accessoryView = scroll
@@ -899,7 +984,70 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             let optionID = pending.options.indices.contains(index) ? pending.options[index].optionId : nil
             self.model.permissions.resolve(id: pending.id, optionID: optionID)
             self.refreshPermission()
+            self.refreshQuestion()
         }
+    }
+
+    /// The plan to approve, as Markdown, or the tool call's details; then each choice by
+    /// Latch's own label, with the agent's words for it beside the label, never in its place.
+    static func permissionBody(_ prompt: PermissionQueue.Prompt) -> NSAttributedString {
+        let body = NSMutableAttributedString()
+        if let plan = prompt.plan {
+            body.append(ChatMarkdown.render(plan))
+        } else {
+            body.append(ToolTranscriptStyle.render(prompt.toolDetails, titled: false))
+        }
+        let words = prompt.options.compactMap { option in prompt.detail(for: option).map { (option.permissionLabel!, $0) } }
+        if !words.isEmpty {
+            let font = NSFont.systemFont(ofSize: 12)
+            body.append(NSAttributedString(string: "\n\nWhat the agent says each choice means\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor,
+            ]))
+            for (label, detail) in words {
+                body.append(NSAttributedString(string: label, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                                                                           .foregroundColor: NSColor.labelColor]))
+                body.append(NSAttributedString(string: ": " + detail + "\n", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+        }
+        // All of it, below what is clipped for reading, so a long command's end is there to check.
+        // A plan is shown whole already.
+        if prompt.plan == nil {
+            body.append(NSAttributedString(string: "\n\nFull request\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor,
+            ]))
+            body.append(NSAttributedString(string: prompt.fullRequest, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
+        return body
+    }
+
+    private func refreshQuestion() {
+        guard let window = view.window else { return }
+        let pending = model.questions.current
+        if let sheet = questionSheet {
+            // Withdrawn, or answered elsewhere: the sheet goes with it.
+            guard sheet.question.id != pending?.id else { return }
+            questionSheet = nil
+            window.endSheet(sheet.panel)
+            // What waited behind it comes up now; a blocked agent sends nothing else to bring it.
+            refreshPermission()
+        }
+        guard let pending, permissionAlert == nil else { return }
+        let sheet = QuestionSheet(question: pending)
+        sheet.onFinish = { [weak self, weak sheet] outcome in
+            guard let self, let sheet, self.questionSheet === sheet else { return }
+            self.questionSheet = nil
+            self.view.window?.endSheet(sheet.panel)
+            switch outcome {
+            case let .answer(answers): self.model.questions.answer(id: pending.id, with: answers)
+            case .skip: self.model.questions.skip(id: pending.id)
+            case .cancel: self.model.questions.cancel(id: pending.id)
+            }
+            self.refresh()
+        }
+        questionSheet = sheet
+        window.beginSheet(sheet.panel)
     }
 
     /// Permission sheets need a window; a session selected while a request is pending attaches it now.
@@ -1722,7 +1870,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         try checkRelocatedControls(view)
         // The composer carries only the settings that change between messages.
-        guard composerControls.pickerCount == 3 else {
+        guard composerControls.pickerCount == 3 + extraPickers.count else {
             throw SmokeError.failed("The composer must not carry the harness picker")
         }
         let original = window.frame

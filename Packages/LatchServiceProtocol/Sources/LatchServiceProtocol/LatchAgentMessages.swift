@@ -82,6 +82,8 @@ public enum LatchAgentCommand: Codable, Equatable, Sendable {
     case cancelPrompt(runtimeID: AgentRuntimeID)
     /// Answers a `permissionRequested` event. Unknown or already-closed requests fail.
     case resolvePermission(runtimeID: AgentRuntimeID, requestID: UUID, outcome: ACPPermissionOutcome)
+    /// Answers an `elicitationRequested` event. Unknown or already-closed requests fail.
+    case resolveElicitation(runtimeID: AgentRuntimeID, requestID: UUID, response: ACPElicitationResponse)
 
     /// A prompt that is only text.
     public static func prompt(runtimeID: AgentRuntimeID, text: String) -> LatchAgentCommand {
@@ -101,6 +103,7 @@ public enum LatchAgentResponse: Codable, Equatable, Sendable {
     case promptCompleted(runtimeID: AgentRuntimeID, response: ACPPromptResponse)
     case promptCancellationRequested(runtimeID: AgentRuntimeID)
     case permissionResolved(runtimeID: AgentRuntimeID, requestID: UUID)
+    case elicitationResolved(runtimeID: AgentRuntimeID, requestID: UUID)
 }
 
 public enum LatchAgentEvent: Codable, Equatable, Sendable {
@@ -111,4 +114,8 @@ public enum LatchAgentEvent: Codable, Equatable, Sendable {
     case permissionRequested(runtimeID: AgentRuntimeID, requestID: UUID, request: ACPPermissionRequest)
     /// The request was answered or cancelled and no longer accepts decisions.
     case permissionClosed(runtimeID: AgentRuntimeID, requestID: UUID)
+    /// The agent asks the user something and waits. Clients answer with `resolveElicitation`.
+    case elicitationRequested(runtimeID: AgentRuntimeID, requestID: UUID, request: ACPElicitationRequest)
+    /// The question was answered or withdrawn and no longer accepts an answer.
+    case elicitationClosed(runtimeID: AgentRuntimeID, requestID: UUID)
 }

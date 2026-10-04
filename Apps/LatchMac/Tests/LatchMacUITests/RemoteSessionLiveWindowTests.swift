@@ -28,6 +28,28 @@ final class RemoteSessionLiveWindowTests: XCTestCase {
         return saved
     }
 
+    /// The agent's question comes up as a sheet over the session, and what is chosen there
+    /// reaches the agent on the server.
+    func testTheAgentsQuestionIsAskedInASheetAndAnswered() async throws {
+        try await LoopbackServer.run { server in
+            try await WindowFixture.run { fixture in
+                let (_, sidebar) = try await fixture.restored(saved(fixture, on: server), servers: server.store,
+                                                              remoteConnector: connector(server))
+                let session = try XCTUnwrap(sidebar.selectedSession)
+                try await fixture.settle({ session.model.phase == .ready }, timeout: 15)
+                let sending = Task { await session.model.send("question please") }
+                try await fixture.settle({ session.questionSheet != nil }, timeout: 10)
+                let sheet = try XCTUnwrap(session.questionSheet)
+                XCTAssertTrue(sheet.panel.isSheet)
+                sheet.choose(["SQLite"], for: "question_0")
+                sheet.submit.performClick(nil)
+                await sending.value
+                XCTAssertNil(session.questionSheet)
+                try await fixture.settle({ self.texts(session.model).last == "asking chose SQLite" }, timeout: 5)
+            }
+        }
+    }
+
     func testClosingARemoteSessionStopsItsRuntimeOnTheServer() async throws {
         try await LoopbackServer.run { server in
             try await WindowFixture.run { fixture in

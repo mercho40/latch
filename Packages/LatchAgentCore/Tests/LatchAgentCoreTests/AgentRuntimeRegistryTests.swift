@@ -118,6 +118,65 @@ final class AgentRuntimeRegistryTests: XCTestCase {
         await registry.stopAll()
     }
 
+    /// A question the agent asks during a turn is brokered as an event and answered by command;
+    /// one still open when the turn ends is withdrawn and the agent hears it refused.
+    func testBrokersQuestionsAndWithdrawsThemWithTheirTurn() async throws {
+        let registry = AgentRuntimeRegistry()
+        let id = AgentRuntimeID("questions")
+        let script = #"""
+        prompt_id=
+        while IFS= read -r line; do
+          id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+          case "$line" in
+            *\"method\":\"initialize\"*)
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{}}}\n' "$id" ;;
+            *\"method\":\"session*/new\"*)
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"session-1"}}\n' "$id" ;;
+            *\"method\":\"session*/prompt\"*)
+              prompt_id=$id
+              printf '%s\n' '{"jsonrpc":"2.0","id":901,"method":"elicitation/create","params":{"sessionId":"session-1","mode":"form","message":"Which?","requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}}}' ;;
+            *\"id\":901[,}]*)
+              case "$line" in
+                *accept*) printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$prompt_id" ;;
+                *) printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"cancelled"}}\n' "$prompt_id" ;;
+              esac ;;
+          esac
+        done
+        """#
+        _ = try await registry.start(
+            id: id,
+            configuration: ACPProcessConfiguration(executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script],
+                                                   workingDirectoryURL: URL(fileURLWithPath: "/tmp")),
+            clientInfo: clientInfo
+        )
+        _ = try await registry.newSession(runtimeID: id, cwd: "/tmp")
+        var events = registry.events.makeAsyncIterator()
+
+        let answered = Task { try await registry.prompt(runtimeID: id, text: "ask") }
+        guard case let .elicitationRequested(askedBy, requestID, request)? = await events.next() else { return XCTFail("A question") }
+        XCTAssertEqual(askedBy, id)
+        XCTAssertEqual(request.message, "Which?")
+        let pending = await registry.pendingElicitationRequestIDs(runtimeID: id)
+        XCTAssertEqual(pending, [requestID])
+        try await registry.resolveElicitation(runtimeID: id, requestID: requestID,
+                                              response: ACPElicitationResponse(action: .accept, content: ["answer": .string("this")]))
+        guard case .elicitationClosed(id, requestID)? = await events.next() else { return XCTFail("The question closed") }
+        let firstStop = try await answered.value.stopReason
+        XCTAssertEqual(firstStop, "end_turn")
+        do {
+            try await registry.resolveElicitation(runtimeID: id, requestID: requestID, response: .cancelled)
+            XCTFail("An answered question takes no second answer")
+        } catch AgentRuntimeRegistryError.elicitationRequestNotFound {}
+
+        let withdrawn = Task { try await registry.prompt(runtimeID: id, text: "ask") }
+        guard case let .elicitationRequested(_, secondID, _)? = await events.next() else { return XCTFail("A second question") }
+        try await registry.cancelPrompt(runtimeID: id)
+        guard case .elicitationClosed(id, secondID)? = await events.next() else { return XCTFail("The question withdrawn") }
+        let secondStop = try await withdrawn.value.stopReason
+        XCTAssertEqual(secondStop, "cancelled")
+        await registry.stopAll()
+    }
+
     func testEvictsRuntimeAfterProcessTermination() async throws {
         let registry = AgentRuntimeRegistry()
         let id = AgentRuntimeID("terminating")

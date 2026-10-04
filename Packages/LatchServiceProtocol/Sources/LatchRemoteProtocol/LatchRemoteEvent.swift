@@ -80,6 +80,9 @@ public enum LatchRemoteEvent: Equatable, Sendable {
     /// Clients answer with `resolvePermission`.
     case permissionRequested(requestID: UUID, request: ACPPermissionRequest)
     case permissionClosed(requestID: UUID)
+    /// The agent asks the user something. Clients answer with `resolveElicitation`.
+    case elicitationRequested(requestID: UUID, request: ACPElicitationRequest)
+    case elicitationClosed(requestID: UUID)
     case turnStarted(turnID: UUID, text: String, attachments: [LatchRemoteAttachmentSummary])
     /// Follows every `sessionUpdate` the agent sent before it answered the prompt, unless it
     /// answered with an error, which says nothing of where they end. That, and older servers,
@@ -97,6 +100,8 @@ public enum LatchRemoteEvent: Equatable, Sendable {
         case .sessionUpdate: "sessionUpdate"
         case .permissionRequested: "permissionRequested"
         case .permissionClosed: "permissionClosed"
+        case .elicitationRequested: "elicitationRequested"
+        case .elicitationClosed: "elicitationClosed"
         case .turnStarted: "turnStarted"
         case .turnEnded: "turnEnded"
         case .configurationSet: "configurationSet"
@@ -141,6 +146,13 @@ extension LatchRemoteEvent: Codable {
             )
         case "permissionClosed":
             return .permissionClosed(requestID: try container.decode(UUID.self, forKey: .requestID))
+        case "elicitationRequested":
+            return .elicitationRequested(
+                requestID: try container.decode(UUID.self, forKey: .requestID),
+                request: try container.decode(ACPElicitationRequest.self, forKey: .request)
+            )
+        case "elicitationClosed":
+            return .elicitationClosed(requestID: try container.decode(UUID.self, forKey: .requestID))
         case "turnStarted":
             return .turnStarted(
                 turnID: try container.decode(UUID.self, forKey: .turnID),
@@ -180,6 +192,11 @@ extension LatchRemoteEvent: Codable {
             try container.encode(requestID, forKey: .requestID)
             try container.encode(request, forKey: .request)
         case let .permissionClosed(requestID):
+            try container.encode(requestID, forKey: .requestID)
+        case let .elicitationRequested(requestID, request):
+            try container.encode(requestID, forKey: .requestID)
+            try container.encode(request, forKey: .request)
+        case let .elicitationClosed(requestID):
             try container.encode(requestID, forKey: .requestID)
         case let .turnStarted(turnID, text, attachments):
             try container.encode(turnID, forKey: .turnID)

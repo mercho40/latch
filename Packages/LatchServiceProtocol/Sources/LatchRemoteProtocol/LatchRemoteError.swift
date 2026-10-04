@@ -27,6 +27,7 @@ public struct LatchRemoteFailureCode: RawRepresentable, Codable, Hashable, Senda
     public static let unknownPreset = LatchRemoteFailureCode(rawValue: "unknownPreset")
     public static let permissionRequestNotFound = LatchRemoteFailureCode(rawValue: "permissionRequestNotFound")
     public static let invalidPermissionOption = LatchRemoteFailureCode(rawValue: "invalidPermissionOption")
+    public static let elicitationRequestNotFound = LatchRemoteFailureCode(rawValue: "elicitationRequestNotFound")
     public static let authenticationRequired = LatchRemoteFailureCode(rawValue: "authenticationRequired")
     public static let payloadTooLarge = LatchRemoteFailureCode(rawValue: "payloadTooLarge")
     public static let commandFailed = LatchRemoteFailureCode(rawValue: "commandFailed")

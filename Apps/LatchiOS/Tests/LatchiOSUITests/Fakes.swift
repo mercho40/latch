@@ -9,7 +9,7 @@ import XCTest
 @testable import LatchiOSUI
 
 /// A server channel that answers in memory: it launches, starts a session, runs a turn until
-/// the test ends it, raises a permission request, and attaches to a runtime with the record
+/// the test ends it, raises a permission request or asks a question, and attaches to a runtime with the record
 /// and backlog a test gives it.
 final class FakeClient: AgentServiceClient {
     let events: AsyncStream<LatchAgentEvent>
@@ -86,6 +86,7 @@ final class FakeClient: AgentServiceClient {
             state.withLock { $0.stops.append(id.rawValue) }
             return .runtimeStopped(runtimeID: id)
         case let .resolvePermission(id, requestID, _): return .permissionResolved(runtimeID: id, requestID: requestID)
+        case let .resolveElicitation(id, requestID, _): return .elicitationResolved(runtimeID: id, requestID: requestID)
         case let .cancelPrompt(id): return .promptCancellationRequested(runtimeID: id)
         default: throw LatchAgentFailure(code: .commandFailed, message: "Unexpected command")
         }
@@ -112,6 +113,15 @@ final class FakeClient: AgentServiceClient {
         let request = ACPPermissionRequest(sessionId: "session", toolCall: .object(["title": .string("Run tests")]),
                                            options: [ACPPermissionOption(optionId: "allow", name: "Allow", kind: "allow_once")])
         continuation.yield(.agent(.permissionRequested(runtimeID: id, requestID: UUID(), request: request), sequence: nil))
+    }
+
+    func ask(_ message: String = "Which database?") {
+        guard let id = snapshot.launched else { return }
+        let request = ACPElicitationRequest(sessionId: "session", message: message, requestedSchema: .object([
+            "type": .string("object"),
+            "properties": .object(["question_0": .object(["type": .string("string"), "enum": .array([.string("Postgres"), .string("SQLite")])])]),
+        ]))
+        continuation.yield(.agent(.elicitationRequested(runtimeID: id, requestID: UUID(), request: request), sequence: nil))
     }
 
     func attach(runtimeID id: AgentRuntimeID, after cursor: UInt64) async throws -> LatchRemoteAttachment {

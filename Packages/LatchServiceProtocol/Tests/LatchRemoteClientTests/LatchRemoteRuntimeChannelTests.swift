@@ -370,6 +370,13 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         let resolvedResponse = try await resolved
         XCTAssertEqual(resolvedResponse, .permissionResolved)
 
+        async let answered = withTimeout {
+            try await channel.send(.resolveElicitation(runtimeID: Fixture.runtimeID, requestID: UUID(), response: .cancelled))
+        }
+        peer.reply(try await peer.nextRequest().id, failure: .elicitationRequestNotFound)
+        let answeredResponse = try await answered
+        XCTAssertEqual(answeredResponse, .elicitationResolved)
+
         async let stopped = withTimeout { try await channel.send(.stopRuntime(runtimeID: Fixture.runtimeID)) }
         peer.reply(try await peer.nextRequest().id, failure: .runtimeNotFound)
         let stoppedResponse = try await stopped

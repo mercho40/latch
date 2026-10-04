@@ -26,21 +26,26 @@ public struct ACPFileSystemCapabilities: Codable, Equatable, Sendable {
 public struct ACPClientCapabilities: Codable, Equatable, Sendable {
     public let fs: ACPFileSystemCapabilities
     public let terminal: Bool
+    /// Which kinds of question the client answers: `{"form": {}}` for forms.
+    public let elicitation: ACPJSONValue?
     public let meta: ACPJSONValue?
 
     public init(
         fs: ACPFileSystemCapabilities = ACPFileSystemCapabilities(),
         terminal: Bool = false,
+        elicitation: ACPJSONValue? = nil,
         meta: ACPJSONValue? = nil
     ) {
         self.fs = fs
         self.terminal = terminal
+        self.elicitation = elicitation
         self.meta = meta
     }
 
     private enum CodingKeys: String, CodingKey {
         case fs
         case terminal
+        case elicitation
         case meta = "_meta"
     }
 }
@@ -246,6 +251,8 @@ public actor ACPClient {
     private var activeSessionID: String?
     private var sessionGeneration: UInt64 = 0
     private var promptIsActive = false
+    private var permissionHandler: (@Sendable (ACPPermissionRequest) async -> ACPPermissionOutcome)?
+    private var elicitationHandler: (@Sendable (ACPElicitationRequest) async -> ACPElicitationResponse)?
 
     public init(connection: ACPJSONRPCConnection) {
         self.connection = connection
@@ -469,18 +476,43 @@ public actor ACPClient {
     public func setPermissionHandler(
         _ handler: (@Sendable (ACPPermissionRequest) async -> ACPPermissionOutcome)?
     ) async {
-        guard let handler else {
+        permissionHandler = handler
+        await installRequestHandler()
+    }
+
+    /// Answers the agent's questions: `elicitation/create`.
+    public func setElicitationHandler(
+        _ handler: (@Sendable (ACPElicitationRequest) async -> ACPElicitationResponse)?
+    ) async {
+        elicitationHandler = handler
+        await installRequestHandler()
+    }
+
+    /// The connection takes one handler for every request from the agent; this one passes each
+    /// to the handler for its method, and any other method is not found.
+    private func installRequestHandler() async {
+        let permission = permissionHandler
+        let elicitation = elicitationHandler
+        guard permission != nil || elicitation != nil else {
             await connection.setRequestHandler(nil)
             return
         }
-
         await connection.setRequestHandler { request in
-            guard request.method == "session/request_permission", let params = request.params else {
-                throw ACPJSONRPCErrorObject(code: -32601, message: "Method not found")
+            switch request.method {
+            case "session/request_permission":
+                guard let permission, let params = request.params else { break }
+                let permissionRequest = try params.decode(ACPPermissionRequest.self)
+                return try ACPJSONValue.encode(PermissionResponse(outcome: await permission(permissionRequest)))
+            case "elicitation/create":
+                guard let elicitation, let params = request.params else { break }
+                let elicitationRequest = try params.decode(ACPElicitationRequest.self)
+                // A page to open is a question Latch never said it could take.
+                guard elicitationRequest.mode == "form" else { return try ACPJSONValue.encode(ACPElicitationResponse.cancelled) }
+                return try ACPJSONValue.encode(await elicitation(elicitationRequest))
+            default:
+                break
             }
-            let permissionRequest = try params.decode(ACPPermissionRequest.self)
-            let response = PermissionResponse(outcome: await handler(permissionRequest))
-            return try ACPJSONValue.encode(response)
+            throw ACPJSONRPCErrorObject(code: -32601, message: "Method not found")
         }
     }
 

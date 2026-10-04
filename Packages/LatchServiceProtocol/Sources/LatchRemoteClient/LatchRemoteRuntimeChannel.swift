@@ -50,8 +50,9 @@ public enum LatchRemoteChannelEvent: Equatable, Sendable {
 /// the first attempt is known to have failed: `launchAgent` with the same ID, agent and
 /// workspace and `newSession`/`loadSession` on a bound runtime return the recorded response;
 /// set-* sets the same value; `prompt` is keyed by its turn ID; `cancelPrompt` is harmless
-/// twice; `resolvePermission` treats `permissionRequestNotFound` as success and `stopRuntime`
-/// treats `runtimeNotFound` as success.
+/// twice; `resolvePermission` treats `permissionRequestNotFound` as success, as
+/// `resolveElicitation` does `elicitationRequestNotFound`, and `stopRuntime` treats
+/// `runtimeNotFound` as success.
 ///
 /// Those rules assume this channel is the runtime's only client. `cancelPrompt` names no turn,
 /// so a cancel still waiting for the link is dropped once the turn that was running when it
@@ -481,6 +482,8 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         switch (command, failure.code) {
         case (.resolvePermission, .permissionRequestNotFound):
             .success(.permissionResolved)
+        case (.resolveElicitation, .elicitationRequestNotFound):
+            .success(.elicitationResolved)
         case (.stopRuntime, .runtimeNotFound):
             .success(.stopped)
         default:

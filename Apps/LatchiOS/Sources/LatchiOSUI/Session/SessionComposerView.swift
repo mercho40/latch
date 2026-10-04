@@ -1,10 +1,12 @@
 import LatchACP
+import LatchSessionKit
 import UIKit
 
 /// The field at the bottom of a session: a growing text view with the photos to send above
 /// it, an Add Photos button before it, and one button after it that sends, or stops the turn
-/// that is running. Over it all, while the agent has one, the agent's plan. It holds the
-/// draft; the session decides what each state allows.
+/// that is running. Before that button, once the agent says, how much of its context is in
+/// use. Over it all, while the agent has one, the agent's plan. It holds the draft; the
+/// session decides what each state allows.
 final class SessionComposerView: UIView, UITextViewDelegate {
     enum Action: Equatable {
         case send(enabled: Bool)
@@ -18,6 +20,9 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     let placeholderLabel = UILabel()
     let attachButton = UIButton(type: .system)
     let actionButton = UIButton(type: .system)
+    /// "25%" of the context in use; its menu has the tokens and the cost.
+    let usageButton = UIButton(type: .system)
+    private(set) var usage: ContextUsageSummary?
     let planView = SessionPlanView()
     private let field = UIView()
     private let fieldBackground: UIView
@@ -144,7 +149,17 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         dropHighlight.layer.cornerCurve = .continuous
         dropHighlight.isUserInteractionEnabled = false
         dropHighlight.alpha = 0
-        for view in [fieldBackground, dropHighlight, strip, textView, placeholderLabel, actionButton] {
+        usageButton.showsMenuAsPrimaryAction = true
+        usageButton.showsLargeContentViewer = true
+        usageButton.isPointerInteractionEnabled = true
+        usageButton.isHidden = true
+        // It stays a caption beside the field's text, which needs the room more; held down,
+        // it shows large, as the bar's buttons do.
+        usageButton.maximumContentSizeCategory = .extraExtraLarge
+        // Never squeezed by the text, but gone entirely while there is nothing to show.
+        usageButton.setContentHuggingPriority(.required, for: .horizontal)
+        usageButton.setContentCompressionResistancePriority(.defaultHigh + 10, for: .horizontal)
+        for view in [fieldBackground, dropHighlight, strip, textView, placeholderLabel, usageButton, actionButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             field.addSubview(view)
         }
@@ -187,7 +202,11 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             stripStack.bottomAnchor.constraint(equalTo: strip.contentLayoutGuide.bottomAnchor),
             stripStack.heightAnchor.constraint(equalTo: strip.frameLayoutGuide.heightAnchor, constant: -4),
             textView.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: 16),
-            textView.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor),
+            textView.trailingAnchor.constraint(equalTo: usageButton.leadingAnchor),
+            usageButton.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor),
+            usageButton.centerYAnchor.constraint(equalTo: actionButton.centerYAnchor),
+            usageButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+            usageHidden,
             textView.topAnchor.constraint(equalTo: strip.bottomAnchor),
             textView.bottomAnchor.constraint(equalTo: field.bottomAnchor),
             textHeight,
@@ -202,6 +221,7 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         directionalLayoutMargins = .init(top: 8, leading: 16, bottom: 8, trailing: 16)
         addInteraction(UILargeContentViewerInteraction())
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: SessionComposerView, _) in
+            view.configureUsageButton()
             view.textChanged(notify: false)
         }
         textChanged(notify: false)
@@ -212,6 +232,8 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     private lazy var fieldUnderMargin = field.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor)
     private lazy var fieldUnderPlan = field.topAnchor.constraint(equalTo: planView.bottomAnchor, constant: 8)
     private lazy var placeholderBaseline = placeholderLabel.firstBaselineAnchor.constraint(equalTo: textView.topAnchor)
+    /// No usage yet: the text runs to the action button.
+    private lazy var usageHidden = usageButton.widthAnchor.constraint(equalToConstant: 0)
 
     // MARK: State
 
@@ -279,6 +301,44 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         actionButton.accessibilityLabel = title
         actionButton.largeContentTitle = title
         actionButton.largeContentImage = configuration.image
+    }
+
+    /// How much of its context the agent has used, as it last said: "25%" before the action
+    /// button, amber once the context is mostly full, with the tokens and the cost in its menu
+    /// and for VoiceOver. Nothing until the agent says.
+    func setUsage(_ usage: ContextUsage?) {
+        let summary = usage.map { ContextUsageSummary($0) }
+        guard summary != self.usage else { return }
+        self.usage = summary
+        usageButton.isHidden = summary == nil
+        usageHidden.isActive = summary == nil
+        if let summary {
+            configureUsageButton()
+            usageButton.menu = UIMenu(title: summary.title, children: summary.details.map { UIAction(title: $0, attributes: .disabled) { _ in } })
+            usageButton.accessibilityLabel = summary.spoken
+            usageButton.largeContentTitle = summary.title
+        }
+        // The text's width changed: measured again once the field has laid it out.
+        layoutIfNeeded()
+        textChanged(notify: false)
+    }
+
+    /// Its font is scaled for its own traits, which stop at its largest size.
+    private func configureUsageButton() {
+        guard let usage else { return }
+        var configuration = UIButton.Configuration.plain()
+        configuration.title = usage.short
+        configuration.contentInsets = .init(top: 4, leading: 6, bottom: 4, trailing: 2)
+        configuration.baseForegroundColor = usage.isHigh ? .systemOrange : .secondaryLabel
+        let size = UIFont.preferredFont(forTextStyle: .caption1, compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)).pointSize
+        let font = UIFontMetrics(forTextStyle: .caption1).scaledFont(for: .monospacedDigitSystemFont(ofSize: size, weight: .semibold),
+                                                                     compatibleWith: usageButton.traitCollection)
+        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = font
+            return attributes
+        }
+        usageButton.configuration = configuration
     }
 
     /// The agent's plan, as it last listed it; empty when it has none.
@@ -442,5 +502,27 @@ final class ComposerTextView: UITextView {
             return onPasteImages(pasteboard.itemProviders)
         }
         super.paste(sender)
+    }
+}
+
+/// The agent's context usage as the composer says it: "25%", and "Context 25% full" with
+/// "50,000 of 200,000 tokens" and "$0.12 so far" in its menu, as the Mac's tooltip has them.
+struct ContextUsageSummary: Equatable {
+    let short: String
+    let title: String
+    let details: [String]
+    let spoken: String
+    /// Mostly full: the agent will soon compact the conversation.
+    let isHigh: Bool
+
+    init(_ usage: ContextUsage, locale: Locale = .current) {
+        let percent = Int((usage.fraction * 100).rounded())
+        short = "\(percent)%"
+        title = "Context \(percent)% full"
+        let tokens = "\(usage.used.formatted(.number.locale(locale))) of \(usage.size.formatted(.number.locale(locale))) tokens"
+        let cost = usage.cost.map { "\($0.formatted(.currency(code: usage.currency ?? "USD").locale(locale))) so far" }
+        details = [tokens] + (cost.map { [$0] } ?? [])
+        spoken = ([title] + details).joined(separator: ", ")
+        isHigh = usage.fraction >= 0.8
     }
 }

@@ -194,8 +194,10 @@ public struct ToolCallDetails: Sendable {
         return result
     }
 
-    /// O(n) prefix/suffix preview, not a minimal patch. Inputs are bounded before
-    /// splitting/comparison. Truncated or unknown baselines never fabricate additions.
+    /// A minimal line diff of the bounded inputs, as unified hunks with three lines of context;
+    /// what lies between hunks is counted, not shown. Inputs are bounded before splitting and
+    /// comparison, so the quadratic search stays small. Truncated or unknown baselines never
+    /// fabricate additions.
     static func lineDiff(oldText: ACPJSONValue?, newText: String) -> String {
         let new = prefix(newText, bytes: 8_192, lines: 160)
         let old: (text: String, cut: Bool)
@@ -219,28 +221,84 @@ public struct ToolCallDetails: Sendable {
         }
         let before = lines(old.text)
         let after = lines(new.text)
-        var common = 0
-        while common < min(before.count, after.count), before[common] == after[common] { common += 1 }
-        if common == before.count && common == after.count {
-            return heading + "[No text changes]"
+        let edits = script(from: before, to: after)
+        guard edits.contains(where: { $0.kind != .same }) else { return heading + "[No text changes]" }
+
+        // Where each edit starts in the old and the new text, for the hunks' headers.
+        var oldAt: [Int] = [], newAt: [Int] = []
+        var oldLine = 0, newLine = 0
+        for edit in edits {
+            oldAt.append(oldLine)
+            newAt.append(newLine)
+            if edit.kind != .insert { oldLine += 1 }
+            if edit.kind != .delete { newLine += 1 }
         }
-        var suffix = 0
-        while suffix < min(before.count, after.count) - common,
-              before[before.count - suffix - 1] == after[after.count - suffix - 1] { suffix += 1 }
-        let start = max(0, common - 3)
-        let tail = min(3, suffix)
-        let oldEnd = before.count - suffix
-        let newEnd = after.count - suffix
-        let oldCount = oldEnd + tail - start
-        let newCount = newEnd + tail - start
-        var result = heading + "[Prefix/suffix diff preview; not a minimal patch]\n"
-        if start > 0 { result += "[\(start) unchanged lines omitted]\n" }
-        result += "@@ -\(oldCount == 0 ? start : start + 1),\(oldCount) +\(newCount == 0 ? start : start + 1),\(newCount) @@\n"
-        for line in before[start..<common] { result += displayed(line, marker: " ") }
-        for line in before[common..<oldEnd] { result += displayed(line, marker: "-") }
-        for line in after[common..<newEnd] { result += displayed(line, marker: "+") }
-        for line in after[newEnd..<(newEnd + tail)] { result += displayed(line, marker: " ") }
-        if suffix > tail { result += "[\(suffix - tail) unchanged lines omitted]\n" }
+        // Each change with its context; changes whose contexts meet share a hunk.
+        let context = 3
+        var hunks: [Range<Int>] = []
+        for (index, edit) in edits.enumerated() where edit.kind != .same {
+            let range = max(0, index - context)..<min(edits.count, index + context + 1)
+            if let last = hunks.last, range.lowerBound <= last.upperBound {
+                hunks[hunks.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                hunks.append(range)
+            }
+        }
+        var result = heading
+        var shown = 0
+        for hunk in hunks {
+            if hunk.lowerBound > shown { result += "[\(hunk.lowerBound - shown) unchanged lines omitted]\n" }
+            let slice = edits[hunk]
+            let oldCount = slice.count { $0.kind != .insert }
+            let newCount = slice.count { $0.kind != .delete }
+            let oldStart = oldAt[hunk.lowerBound], newStart = newAt[hunk.lowerBound]
+            result += "@@ -\(oldCount == 0 ? oldStart : oldStart + 1),\(oldCount) +\(newCount == 0 ? newStart : newStart + 1),\(newCount) @@\n"
+            for edit in slice {
+                switch edit.kind {
+                case .same: result += displayed(edit.line, marker: " ")
+                case .delete: result += displayed(edit.line, marker: "-")
+                case .insert: result += displayed(edit.line, marker: "+")
+                }
+            }
+            shown = hunk.upperBound
+        }
+        if edits.count > shown { result += "[\(edits.count - shown) unchanged lines omitted]\n" }
         return clipped(result, bytes: 7_000)
+    }
+
+    private struct Edit {
+        enum Kind { case same, delete, insert }
+        let kind: Kind
+        let line: Line
+    }
+
+    /// The shortest edit script by longest common subsequence: deletions before insertions
+    /// where both are possible, as `diff` writes them.
+    private static func script(from before: [Line], to after: [Line]) -> [Edit] {
+        let n = before.count, m = after.count
+        var common = [[Int]](repeating: [Int](repeating: 0, count: m + 1), count: n + 1)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            for j in stride(from: m - 1, through: 0, by: -1) {
+                common[i][j] = before[i] == after[j] ? common[i + 1][j + 1] + 1 : max(common[i + 1][j], common[i][j + 1])
+            }
+        }
+        var edits: [Edit] = []
+        var i = 0, j = 0
+        while i < n, j < m {
+            if before[i] == after[j] {
+                edits.append(Edit(kind: .same, line: before[i]))
+                i += 1
+                j += 1
+            } else if common[i + 1][j] >= common[i][j + 1] {
+                edits.append(Edit(kind: .delete, line: before[i]))
+                i += 1
+            } else {
+                edits.append(Edit(kind: .insert, line: after[j]))
+                j += 1
+            }
+        }
+        edits += before[i...].map { Edit(kind: .delete, line: $0) }
+        edits += after[j...].map { Edit(kind: .insert, line: $0) }
+        return edits
     }
 }

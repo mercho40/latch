@@ -42,6 +42,13 @@ enum Sample {
         toolCall: .object(["toolCallId": .string("call-1"), "title": .string("Read file")]),
         options: [ACPPermissionOption(optionId: "allow-once", name: "Allow", kind: "allow_once")]
     )
+    static let question = ACPElicitationRequest(
+        sessionId: "session-1", message: "Which one?",
+        requestedSchema: .object(["type": .string("object"), "properties": .object([
+            "question_0": .object(["type": .string("string"), "oneOf": .array([.object(["const": .string("A"), "title": .string("A")])])]),
+        ])]),
+        toolCallId: "call-2"
+    )
     static let configurationSet = LatchRemoteConfigurationSet(
         route: .config, configID: "effort", value: "high", acpSequence: 7, configOptions: configOptions
     )

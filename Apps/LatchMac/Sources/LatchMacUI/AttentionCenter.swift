@@ -29,6 +29,8 @@ final class AttentionCenter {
     struct State: Equatable {
         var workspaceName: String
         var permission: UUID?
+        /// A question of the agent's waiting for an answer.
+        var question: UUID?
         var allowOptionID: String?
         var rejectOptionID: String?
         var isPrompting: Bool
@@ -39,11 +41,12 @@ final class AttentionCenter {
         /// The last turn ended because its agent was stopped on the server.
         var lastTurnStopped: Bool
 
-        init(workspaceName: String, permission: UUID? = nil, allowOptionID: String? = nil,
+        init(workspaceName: String, permission: UUID? = nil, question: UUID? = nil, allowOptionID: String? = nil,
              rejectOptionID: String? = nil, isPrompting: Bool = false, turnsEnded: Int = 0,
              lastTurnStopped: Bool = false) {
             self.workspaceName = workspaceName
             self.permission = permission
+            self.question = question
             self.allowOptionID = allowOptionID
             self.rejectOptionID = rejectOptionID
             self.isPrompting = isPrompting
@@ -81,6 +84,12 @@ final class AttentionCenter {
             if let stale = previous?.permission, stale != state.permission {
                 presenter?.withdraw(id: Self.permissionID(stale))
             }
+            if let question = state.question, previous?.question != question {
+                announceQuestion(session: id, question: question, state: state)
+            }
+            if let stale = previous?.question, stale != state.question {
+                presenter?.withdraw(id: Self.questionID(stale))
+            }
             if let previous, state.turnsEnded != previous.turnsEnded, !isSessionVisible(id) {
                 presenter?.post(id: Self.finishedID(id), title: "Latch · \(state.workspaceName)",
                                 body: state.lastTurnStopped ? "The agent was stopped on its server." : "The agent finished its turn.",
@@ -93,6 +102,7 @@ final class AttentionCenter {
         // Sessions that went away take their alerts with them.
         for (id, state) in states where next[id] == nil {
             if let request = state.permission { presenter?.withdraw(id: Self.permissionID(request)) }
+            if let question = state.question { presenter?.withdraw(id: Self.questionID(question)) }
             presenter?.withdraw(id: Self.finishedID(id))
         }
         states = next
@@ -118,8 +128,19 @@ final class AttentionCenter {
         attentionRequest = NSApplication.shared.requestUserAttention(.informationalRequest)
     }
 
+    /// Only the session's folder, as for a request: what the agent asks stays in Latch. Clicking
+    /// it brings the session forward, since an answer needs the question in front of you.
+    private func announceQuestion(session: UUID, question: UUID, state: State) {
+        guard !isSessionVisible(session) else { return }
+        presenter?.post(id: Self.questionID(question), title: "Latch · \(state.workspaceName)",
+                        body: "The agent is asking you a question.", actions: [],
+                        userInfo: ["session": session.uuidString])
+        guard !NSApplication.shared.isActive, attentionRequest == nil else { return }
+        attentionRequest = NSApplication.shared.requestUserAttention(.informationalRequest)
+    }
+
     private func updateBadge() {
-        let count = states.values.filter { $0.permission != nil }.count
+        let count = states.values.filter { $0.permission != nil || $0.question != nil }.count
         badgeCount = count
         dockTile?.badgeLabel = count > 0 ? "\(count)" : nil
         if count == 0, let request = attentionRequest {
@@ -146,4 +167,5 @@ final class AttentionCenter {
 
     private static func permissionID(_ request: UUID) -> String { "permission.\(request.uuidString)" }
     private static func finishedID(_ session: UUID) -> String { "finished.\(session.uuidString)" }
+    private static func questionID(_ question: UUID) -> String { "question.\(question.uuidString)" }
 }

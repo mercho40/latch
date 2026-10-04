@@ -21,15 +21,19 @@ final class ComposerControlsView: NSView {
     static let controlHeight: CGFloat = 36
     private let pickers: [Slot]
     private let actions: [NSButton]
+    /// A short note before the actions, such as how full the agent's context is. It shows only
+    /// where it fits on their row, so it never costs the composer a line.
+    private let accessory: NSTextField?
     private let gap: CGFloat = 6
     private var surfaces: [ObjectIdentifier: NSView] = [:]
     /// The surface's padding around the pop-up it sits behind.
     private static let surfaceLeading: CGFloat = 5
     private static let surfaceTrailing: CGFloat = 12
 
-    init(pickers: [Slot], actions: [NSButton]) {
+    init(pickers: [Slot], actions: [NSButton], accessory: NSTextField? = nil) {
         self.pickers = pickers
         self.actions = actions
+        self.accessory = accessory
         super.init(frame: .zero)
         if #available(macOS 26.0, *) {
             // Behind each picker, not around it: the pop-up stays a direct subview with a frame of
@@ -42,6 +46,7 @@ final class ComposerControlsView: NSView {
             }
         }
         for control in pickers.map(\.button) as [NSView] + actions { addSubview(control) }
+        if let accessory { addSubview(accessory) }
         setContentCompressionResistancePriority(.required, for: .vertical)
         setContentHuggingPriority(.required, for: .vertical)
     }
@@ -69,7 +74,9 @@ final class ComposerControlsView: NSView {
 
     override func layout() {
         super.layout()
-        for (control, frame) in placements(width: bounds.width).items { control.frame = frame }
+        let placed = placements(width: bounds.width).items
+        for (control, frame) in placed { control.frame = frame }
+        accessory?.isHidden = !placed.contains { $0.0 === accessory }
         for slot in pickers {
             guard let surface = surfaces[ObjectIdentifier(slot.button)] else { continue }
             surface.isHidden = slot.button.isHidden
@@ -124,8 +131,16 @@ final class ComposerControlsView: NSView {
         let visibleActions = actions.filter { !$0.isHidden }
         if !visibleActions.isEmpty {
             let actionWidth = CGFloat(visibleActions.count) * Self.controlHeight + CGFloat(visibleActions.count - 1) * gap
-            if x > 0 && x + actionWidth > width { y += Self.controlHeight + gap }
+            if x > 0 && x + actionWidth > width { y = y + Self.controlHeight + gap; x = 0 }
             var actionX = max(0, width - actionWidth)
+            if let accessory, !accessory.stringValue.isEmpty {
+                let size = accessory.intrinsicContentSize
+                let start = actionX - gap * 2 - ceil(size.width)
+                if start >= x {
+                    items.append((accessory, NSRect(x: start, y: y + (Self.controlHeight - size.height) / 2,
+                                                    width: ceil(size.width), height: size.height)))
+                }
+            }
             for action in visibleActions {
                 items.append((action, NSRect(x: actionX, y: y, width: Self.controlHeight, height: Self.controlHeight)))
                 actionX += Self.controlHeight + gap

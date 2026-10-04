@@ -64,6 +64,41 @@ final class RemoteSessionLiveTests: XCTestCase {
         }
     }
 
+    /// The agent's question reaches the session through the server, the answer goes back the
+    /// same way, and Skip answers nothing.
+    func testTheAgentsQuestionsAreAskedAndAnswered() async throws {
+        try await LoopbackServer.run { server in
+            let model = try await connectedModel(server, connector(server))
+            for (answer, word) in [(true, " chose SQLite"), (false, " skipped")] {
+                let sending = Task { await model.send("question please") }
+                try await eventually("the question") { model.questions.current != nil }
+                let question = try XCTUnwrap(model.questions.current)
+                XCTAssertEqual(question.form.message, "Which database?")
+                XCTAssertEqual(question.form.fields.map(\.key), ["question_0"])
+                XCTAssertEqual(question.form.fields.first?.otherKey, "question_0_custom")
+                if answer { model.questions.answer(id: question.id, with: ["question_0": .choices(["SQLite"])]) }
+                else { model.questions.skip(id: question.id) }
+                await sending.value
+                XCTAssertNil(model.questions.current)
+                XCTAssertEqual(texts(model).last, "asking" + word)
+            }
+            XCTAssertEqual(server.lines(in: "answers.log"), 2)
+        }
+    }
+
+    /// Stop withdraws a question still showing, and the agent hears it refused.
+    func testStoppingATurnWithdrawsItsQuestion() async throws {
+        try await LoopbackServer.run { server in
+            let model = try await connectedModel(server, connector(server))
+            let sending = Task { await model.send("question please") }
+            try await eventually("the question") { model.questions.current != nil }
+            await model.cancel()
+            XCTAssertNil(model.questions.current)
+            await sending.value
+            try await eventually("the refusal") { self.texts(model).last == "asking refused" }
+        }
+    }
+
     func testADroppedConnectionMidTurnReconnectsAndTheTurnRunsOnce() async throws {
         try await LoopbackServer.run { server in
             // Long enough that only the probe reconnects, after the rest of the turn is journaled.
@@ -615,6 +650,8 @@ private extension RemotePermissionLedger.Change {
         switch self {
         case let .raised(id, _): "raised \(id)"
         case let .closed(id): "closed \(id)"
+        case let .asked(id, _): "asked \(id)"
+        case let .withdrawn(id): "withdrawn \(id)"
         }
     }
 }

@@ -103,6 +103,10 @@ public actor LatchAgentService {
         case let .resolvePermission(runtimeID, requestID, outcome):
             try await registry.resolvePermission(runtimeID: runtimeID, requestID: requestID, outcome: outcome)
             return .permissionResolved(runtimeID: runtimeID, requestID: requestID)
+
+        case let .resolveElicitation(runtimeID, requestID, response):
+            try await registry.resolveElicitation(runtimeID: runtimeID, requestID: requestID, response: response)
+            return .elicitationResolved(runtimeID: runtimeID, requestID: requestID)
         }
     }
 
@@ -129,6 +133,8 @@ public actor LatchAgentService {
             message = "Permission request not found."
         case AgentRuntimeRegistryError.invalidPermissionOption:
             message = "The selected option was not offered by this permission request."
+        case AgentRuntimeRegistryError.elicitationRequestNotFound:
+            message = "Question not found."
         default:
             message = "Agent command failed."
         }

@@ -52,6 +52,8 @@ public enum LatchRemoteCommand: Equatable, Sendable {
     case prompt(runtimeID: AgentRuntimeID, turnID: UUID, blocks: [ACPPromptBlock])
     case cancelPrompt(runtimeID: AgentRuntimeID)
     case resolvePermission(runtimeID: AgentRuntimeID, requestID: UUID, outcome: ACPPermissionOutcome)
+    /// Answers an `elicitationRequested` event; one answered already, or withdrawn, fails.
+    case resolveElicitation(runtimeID: AgentRuntimeID, requestID: UUID, response: ACPElicitationResponse)
     /// Streams the runtime's events with a sequence above `after`; 0 is from the start.
     case attach(runtimeID: AgentRuntimeID, after: UInt64)
     case detach(runtimeID: AgentRuntimeID)
@@ -70,6 +72,7 @@ public enum LatchRemoteCommand: Equatable, Sendable {
         case .prompt: "prompt"
         case .cancelPrompt: "cancelPrompt"
         case .resolvePermission: "resolvePermission"
+        case .resolveElicitation: "resolveElicitation"
         case .attach: "attach"
         case .detach: "detach"
         case .stopRuntime: "stopRuntime"
@@ -82,7 +85,7 @@ public enum LatchRemoteCommand: Equatable, Sendable {
 extension LatchRemoteCommand: Codable {
     private enum CodingKeys: String, CodingKey {
         case kind, runtimeID, agent, workspace, sessionID, configID, value, modelID, modeID
-        case turnID, blocks, requestID, outcome, after
+        case turnID, blocks, requestID, outcome, after, response
     }
 
     public init(from decoder: any Decoder) throws {
@@ -121,6 +124,12 @@ extension LatchRemoteCommand: Codable {
                 runtimeID: try runtimeID(),
                 requestID: try container.decode(UUID.self, forKey: .requestID),
                 outcome: try container.decode(ACPPermissionOutcome.self, forKey: .outcome)
+            )
+        case "resolveElicitation":
+            self = .resolveElicitation(
+                runtimeID: try runtimeID(),
+                requestID: try container.decode(UUID.self, forKey: .requestID),
+                response: try container.decode(ACPElicitationResponse.self, forKey: .response)
             )
         case "attach":
             self = .attach(runtimeID: try runtimeID(), after: try container.decode(UInt64.self, forKey: .after))
@@ -167,6 +176,10 @@ extension LatchRemoteCommand: Codable {
             try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
             try container.encode(requestID, forKey: .requestID)
             try container.encode(outcome, forKey: .outcome)
+        case let .resolveElicitation(runtimeID, requestID, response):
+            try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
+            try container.encode(requestID, forKey: .requestID)
+            try container.encode(response, forKey: .response)
         case let .attach(runtimeID, after):
             try container.encodeRuntimeID(runtimeID, forKey: .runtimeID)
             try container.encode(after, forKey: .after)
@@ -226,6 +239,7 @@ public enum LatchRemoteResponse: Equatable, Sendable {
     case promptAccepted(turnID: UUID)
     case cancelRequested
     case permissionResolved
+    case elicitationResolved
     /// Events with a sequence from `backlogFrom` follow this reply. `truncated` means some
     /// after the requested cursor were already evicted.
     case attached(record: LatchRemoteRuntimeRecord, backlogFrom: UInt64, truncated: Bool)
@@ -245,6 +259,7 @@ public enum LatchRemoteResponse: Equatable, Sendable {
         case .promptAccepted: "promptAccepted"
         case .cancelRequested: "cancelRequested"
         case .permissionResolved: "permissionResolved"
+        case .elicitationResolved: "elicitationResolved"
         case .attached: "attached"
         case .detached: "detached"
         case .stopped: "stopped"
@@ -282,6 +297,8 @@ extension LatchRemoteResponse: Codable {
             self = .cancelRequested
         case "permissionResolved":
             self = .permissionResolved
+        case "elicitationResolved":
+            self = .elicitationResolved
         case "attached":
             self = .attached(
                 record: try container.decode(LatchRemoteRuntimeRecord.self, forKey: .record),
@@ -322,7 +339,7 @@ extension LatchRemoteResponse: Codable {
             try container.encode(truncated, forKey: .truncated)
         case let .runtimes(runtimes):
             try container.encode(runtimes, forKey: .runtimes)
-        case .cancelRequested, .permissionResolved, .detached, .stopped, .unknown:
+        case .cancelRequested, .permissionResolved, .elicitationResolved, .detached, .stopped, .unknown:
             break
         }
     }

@@ -202,6 +202,21 @@ final class ToolCallDetailsTests: XCTestCase {
         XCTAssertTrue(details.text.contains("-line 6\n+replacement"))
     }
 
+    /// Two edits far apart are two hunks with what lies between counted, and an edit in the
+    /// middle of repeated lines shows only what changed, which a prefix and suffix could not.
+    func testSeparateEditsAreSeparateMinimalHunks() {
+        let old = (1...30).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        let new = old.replacingOccurrences(of: "line 3\n", with: "three\n").replacingOccurrences(of: "line 28\n", with: "")
+        let result = ToolCallDetails.lineDiff(oldText: .string(old), newText: new)
+        XCTAssertEqual(result.components(separatedBy: "@@ -").count - 1, 2, result)
+        XCTAssertTrue(result.contains("@@ -1,6 +1,6 @@\n line 1\n line 2\n-line 3\n+three\n line 4\n"), result)
+        XCTAssertTrue(result.contains("[18 unchanged lines omitted]"), result)
+        XCTAssertTrue(result.contains("-line 28\n line 29\n line 30\n"), result)
+        XCTAssertFalse(result.contains("+line"), "Only what changed is added")
+        let repeated = ToolCallDetails.lineDiff(oldText: .string("a\nb\na\nb\n"), newText: "a\nb\nX\na\nb\n")
+        XCTAssertTrue(repeated.contains("+X\n") && !repeated.contains("-a") && !repeated.contains("-b"), repeated)
+    }
+
     func testNewFileEmptyFileAndDeletion() {
         let new = ToolCallDetails.lineDiff(oldText: .null, newText: "hello\n")
         XCTAssertTrue(new.contains("New file: oldText is null"))

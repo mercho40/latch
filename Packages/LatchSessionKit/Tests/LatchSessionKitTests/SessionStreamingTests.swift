@@ -142,6 +142,35 @@ final class SessionStreamingTests: XCTestCase {
         await model.disconnect()
     }
 
+    /// How full the agent's context is and what the conversation has cost, its own title for the
+    /// conversation, and a turn cut short at a limit, which says so where its reply stops.
+    @MainActor func testUsageTitleAndATurnCutShortReachTheSession() async throws {
+        let started = expectation(description: "Prompt started")
+        let client = StreamingClient(promptStarted: started)
+        let model = await connected(client)
+        let runtimeValue = await client.runtime
+        let runtime = try XCTUnwrap(runtimeValue)
+        let prompt = Task { await model.send("Question") }
+        await fulfillment(of: [started], timeout: 3)
+        await client.update(runtime, value: .object([
+            "sessionUpdate": .string("usage_update"), "used": .integer(50_000), "size": .integer(200_000),
+            "cost": .object(["amount": .double(0.12), "currency": .string("USD")]),
+        ]), sequence: 12)
+        await client.update(runtime, value: .object(["sessionUpdate": .string("session_info_update"), "title": .string(" Fix the flaky test ")]), sequence: 13)
+        await client.update(runtime, value: .object(["sessionUpdate": .string("usage_update"), "used": .integer(1), "size": .integer(0)]), sequence: 14)
+        // Past what an Int holds: dropped, not trapped on, here and on every attach that replays it.
+        await client.update(runtime, value: .object(["sessionUpdate": .string("usage_update"), "used": .double(1e20), "size": .integer(200_000)]), sequence: 14)
+        await drain(client, runtime: runtime)
+        XCTAssertEqual(model.usage, ContextUsage(used: 50_000, size: 200_000, cost: 0.12, currency: "USD"), "A malformed update leaves the last one")
+        XCTAssertEqual(model.usage?.fraction, 0.25)
+        XCTAssertEqual(model.agentTitle, "Fix the flaky test")
+        await client.completePrompt(reason: "max_tokens", updatesThrough: 14)
+        await prompt.value
+        XCTAssertEqual(model.messages.last?.text, "_The reply stopped at the agent’s length limit._")
+        await model.disconnect()
+        XCTAssertNil(model.usage)
+    }
+
     /// Disconnecting while a local turn's reply waits for its last update lets go of it.
     @MainActor func testDisconnectingLetsGoOfALocalReplyWaitingForItsLastUpdate() async throws {
         let started = expectation(description: "Prompt started")

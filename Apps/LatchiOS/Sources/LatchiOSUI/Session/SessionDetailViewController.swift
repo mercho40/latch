@@ -46,8 +46,8 @@ struct SessionDetailContext {
 }
 
 /// One session: its conversation, a composer pinned above the keyboard, a banner for the
-/// link and failures, the agent's permission requests as sheets, and a menu for the
-/// agent's settings. It drops into the split view's secondary column.
+/// link and failures, the agent's permission requests and questions as sheets, and a menu
+/// for the agent's settings. It drops into the split view's secondary column.
 ///
 /// The host owns `model.onChange` and `model.onTranscriptChange`, because it needs them
 /// while no session screen is open, and passes each on to the screen that shows the model:
@@ -79,12 +79,14 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     private var announcedTurns: Int
     /// The permission sheet on screen, or on its way on or off.
     private(set) var permissionSheet: PermissionRequestViewController?
-    private var permissionTransition = false
-    /// A look again soon, while something else on screen keeps the sheet from showing.
-    private var permissionRetry: Task<Void, Never>?
+    /// The question sheet on screen, or on its way on or off. Never both: see `refreshRequests()`.
+    private(set) var questionSheet: QuestionViewController?
+    private var sheetTransition = false
+    /// A look again soon, while something else on screen keeps a sheet from showing.
+    private var sheetRetry: Task<Void, Never>?
     /// How much of the page's end the composer covers.
     private var composerOverlap: CGFloat = 0
-    /// How the permission sheet comes and goes, each calling back when its transition ends.
+    /// How the permission and question sheets come and go, each calling back when its transition ends.
     /// Tests replace them: a test host never finishes a sheet's transition.
     lazy var presentSheet: (UIViewController, @escaping () -> Void) -> Void = { [weak self] sheet, done in
         self?.topPresenter.present(sheet, animated: true, completion: done)
@@ -117,7 +119,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    /// The model's state changed: phase, link, permissions, configuration or an error.
+    /// The model's state changed: phase, link, permissions, questions, configuration or an error.
     func modelDidChange() { refresh() }
 
     /// The transcript changed. Coalesced, so a streaming reply renders at most every 50 ms.
@@ -386,7 +388,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         refreshComposer()
         refreshMenu()
         refreshEmptyState()
-        refreshPermission()
+        refreshRequests()
         announceTurnEnd()
         renderScheduler.cancel()
         renderTranscript()
@@ -426,6 +428,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     private func refreshComposer() {
         composer.setPlan(model.plan)
+        composer.setUsage(model.usage)
         composer.isEditable = !isReadOnly
         // Nothing else on the screen names the agent, so the placeholder does at every size.
         composer.placeholder = isReadOnly ? "This conversation is read-only" : "Ask \(context.agentTitle)…"
@@ -724,9 +727,20 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             (.effort, "Effort", "gauge.with.dots.needle.50percent"),
             (.permissionMode, "Permission Mode", "lock.shield"),
         ]
-        let settings = pickers.compactMap { kind, title, symbol -> UIMenu? in
+        var settings = pickers.compactMap { kind, title, symbol -> UIMenu? in
             guard let picker = state.configuration[kind], !picker.choices.isEmpty else { return nil }
-            return pickerMenu(kind, picker: picker, title: title, symbol: symbol, enabled: state.editable)
+            return pickerMenu(picker, title: title, symbol: symbol, enabled: state.editable) { [weak self] value in
+                guard let self else { return }
+                Task { await self.model.select(kind, value: value) }
+            }
+        }
+        // The agent's other options, such as Claude Code's Fast mode, under its names for them.
+        settings += state.configuration.extras.compactMap { picker -> UIMenu? in
+            guard case let .config(id) = picker.route, !picker.choices.isEmpty else { return nil }
+            return pickerMenu(picker, title: picker.name ?? id, symbol: "slider.horizontal.3", enabled: state.editable) { [weak self] value in
+                guard let self else { return }
+                Task { await self.model.select(option: id, value: value) }
+            }
         }
         let copyPath = UIAction(title: "Copy Path", image: UIImage(systemName: "doc.on.doc"),
                                 attributes: state.folderPath.isEmpty ? .disabled : []) { [weak self] _ in
@@ -753,8 +767,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
 
     /// The agent's choices in its order and groups, the current one checked. Nothing is
     /// checked ahead of the agent: the mark moves when it confirms the change.
-    private func pickerMenu(_ kind: SessionPicker.Kind, picker: SessionPicker, title: String, symbol: String,
-                            enabled: Bool) -> UIMenu {
+    private func pickerMenu(_ picker: SessionPicker, title: String, symbol: String, enabled: Bool,
+                            select: @escaping (String) -> Void) -> UIMenu {
         var children: [UIMenuElement] = []
         var group: (name: String, actions: [UIAction])?
         func closeGroup() {
@@ -764,10 +778,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         for choice in picker.choices {
             let action = UIAction(title: choice.name, subtitle: choice.description,
                                   attributes: enabled ? [] : .disabled,
-                                  state: choice.value == picker.currentValue ? .on : .off) { [weak self] _ in
-                guard let self else { return }
-                Task { await self.model.select(kind, value: choice.value) }
-            }
+                                  state: choice.value == picker.currentValue ? .on : .off) { _ in select(choice.value) }
             if let name = choice.group {
                 if group?.name != name { closeGroup(); group = (name, []) }
                 group?.actions.append(action)
@@ -986,69 +997,102 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         refresh()
     }
 
-    // MARK: Permission
+    // MARK: Requests
 
-    /// One request at a time, as a sheet over this screen, or over whatever this screen has
-    /// on top of it. A sheet whose request closed on its own, or was decided, goes, and the
-    /// next one waiting follows it. UIKit drops a dismissal asked for while the sheet is still
-    /// arriving, so nothing starts until the transition before it has ended, and each end
-    /// looks again. While another presentation is coming or going, it looks again shortly:
-    /// an agent waiting on a decision sends nothing else that would.
-    private func refreshPermission() {
-        guard !permissionTransition else { return }
-        let pending = model.permissions.current
+    /// One sheet at a time, for a permission request or a question, over this screen, or over
+    /// whatever this screen has on top of it. A question waits while a request's sheet shows,
+    /// and a request while a question's does; with both waiting and neither shown, the
+    /// request goes first. A sheet whose request closed on its own, or was answered, goes, and
+    /// the next one waiting follows it. UIKit drops a dismissal asked for while the sheet is
+    /// still arriving, so nothing starts until the transition before it has ended, and each end
+    /// looks again. While another presentation is coming or going, it looks again shortly: an
+    /// agent waiting on an answer sends nothing else that would.
+    private func refreshRequests() {
+        guard !sheetTransition else { return }
+        let permission = model.permissions.current
+        let question = model.questions.current
         if let sheet = permissionSheet {
-            guard sheet.promptID != pending?.id else { return }
-            permissionTransition = true
-            dismissSheet(sheet) { [weak self] in
-                self?.permissionTransition = false
-                self?.permissionSheet = nil
-                self?.refreshPermission()
-            }
-            return
+            guard sheet.promptID != permission?.id else { return }
+            return takeDown(sheet)
         }
-        guard let pending, viewIfLoaded?.window != nil else { return }
+        if let sheet = questionSheet {
+            guard sheet.questionID != question?.id else { return }
+            return takeDown(sheet)
+        }
+        guard permission != nil || question != nil, viewIfLoaded?.window != nil else { return }
         let presenter = topPresenter
         // An alert, such as Stop Agent's confirmation, is answered first: nothing is presented
         // over one. On iPad it can go with a tap outside its popover, which calls no action.
         guard !presenter.isBeingPresented, !presenter.isBeingDismissed, !(presenter is UIAlertController) else {
-            return schedulePermissionRetry()
+            return scheduleSheetRetry()
         }
-        let sheet = PermissionRequestViewController(prompt: pending, agentTitle: context.agentTitle) { [weak self] optionID in
-            guard let self else { return }
-            model.permissions.resolve(id: pending.id, optionID: optionID)
-            refresh()
+        let sheet: RequestSheetViewController
+        if let permission {
+            let shown = PermissionRequestViewController(prompt: permission, agentTitle: context.agentTitle) { [weak self] optionID in
+                guard let self else { return }
+                model.permissions.resolve(id: permission.id, optionID: optionID)
+                refresh()
+            }
+            permissionSheet = shown
+            sheet = shown
+        } else if let question {
+            let shown = QuestionViewController(question: question, agentTitle: context.agentTitle) { [weak self] outcome in
+                guard let self else { return }
+                switch outcome {
+                case let .answer(answers): model.questions.answer(id: question.id, with: answers)
+                case .skip: model.questions.skip(id: question.id)
+                case .cancel: model.questions.cancel(id: question.id)
+                }
+                refresh()
+            }
+            questionSheet = shown
+            sheet = shown
+        } else {
+            return
         }
         // Taken down by something else, such as the host showing another session: shown
         // again when this screen is next on screen, if the request is still open.
         sheet.onDismissedElsewhere = { [weak self, weak sheet] in
-            guard let self, let sheet, permissionSheet === sheet, !permissionTransition else { return }
-            permissionSheet = nil
-            refreshPermission()
+            guard let self, let sheet, permissionSheet === sheet || questionSheet === sheet, !sheetTransition else { return }
+            forget(sheet)
+            refreshRequests()
         }
-        permissionSheet = sheet
-        permissionTransition = true
+        sheetTransition = true
         presentSheet(sheet) { [weak self] in
-            self?.permissionTransition = false
-            self?.refreshPermission()
+            self?.sheetTransition = false
+            self?.refreshRequests()
         }
         // The sheet says what is asked when it takes VoiceOver's focus.
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
     }
 
-    private func schedulePermissionRetry() {
-        guard permissionRetry == nil else { return }
-        permissionRetry = Task { [weak self] in
+    private func takeDown(_ sheet: RequestSheetViewController) {
+        sheetTransition = true
+        dismissSheet(sheet) { [weak self] in
+            self?.sheetTransition = false
+            self?.forget(sheet)
+            self?.refreshRequests()
+        }
+    }
+
+    private func forget(_ sheet: RequestSheetViewController) {
+        if permissionSheet === sheet { permissionSheet = nil }
+        if questionSheet === sheet { questionSheet = nil }
+    }
+
+    private func scheduleSheetRetry() {
+        guard sheetRetry == nil else { return }
+        sheetRetry = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
-            self?.permissionRetry = nil
-            self?.refreshPermission()
+            self?.sheetRetry = nil
+            self?.refreshRequests()
         }
     }
 
     /// The controller at the top of what this screen's window shows.
     private var topPresenter: UIViewController {
         var top: UIViewController = self
-        while let next = top.presentedViewController, next !== permissionSheet { top = next }
+        while let next = top.presentedViewController, next !== permissionSheet, next !== questionSheet { top = next }
         return top
     }
 }

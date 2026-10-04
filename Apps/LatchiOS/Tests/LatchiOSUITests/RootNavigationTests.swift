@@ -136,6 +136,16 @@ final class RootNavigationTests: XCTestCase {
         XCTAssertNil(root.attentionBanner)
     }
 
+    func testAQuestionsBannerSaysTheAgentAsks() async throws {
+        let (root, library, window) = hosted()
+        defer { window.isHidden = true }
+        let session = library.create(serverID: vps.id, path: "/srv", agent: .fx)
+        library.onAttention?(session, .asksQuestion)
+        let banner = try XCTUnwrap(root.attentionBanner)
+        XCTAssertEqual(banner.messageLabel.text, "\(session.agentTitle) on vps asks a question.")
+        XCTAssertEqual(root.banners.duration, .seconds(8), "An answer holds the agent up as a decision does")
+    }
+
     // MARK: The badge
 
     func testTheBadgeAsksForPermissionOnlyWhenThereIsSomethingToCount() async {

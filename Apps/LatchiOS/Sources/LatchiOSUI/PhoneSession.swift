@@ -18,8 +18,11 @@ final class PhoneSession {
     private(set) var agent: AgentPreset
     /// The command a Custom agent runs, fixed when the session was made.
     private(set) var customCommand: String
-    /// From the first prompt, as on the Mac; until then "New Session".
+    /// From the first prompt, as on the Mac, then the agent's own title for the conversation
+    /// once it gives one, unless the user named it; until then "New Session".
     private(set) var title: String
+    /// The agent's title this session last took, so a later one from the agent replaces it.
+    private var adoptedAgentTitle: String?
     /// The composer's text, saved with the session.
     var draft: String {
         didSet { if draft != oldValue { notify(transcript: false, persistOnly: true) } }
@@ -63,6 +66,7 @@ final class PhoneSession {
         title = saved?.title ?? Self.untitled
         draft = saved?.draft ?? ""
         agentName = saved?.agentName
+        adoptedAgentTitle = saved?.adoptedAgentTitle
         model = SessionModel(makeClient: { connector.makeClient(serverID: serverID) })
         model.sendsAttachmentsRemotely = true
         if let saved {
@@ -87,7 +91,8 @@ final class PhoneSession {
         SavedSession(id: id, workspacePath: path, title: title, agentID: agent.rawValue,
                      customCommand: customCommand, draft: draft, messages: model.messages,
                      agentSessionID: model.savedAgentSessionID, lastActiveAt: model.lastActiveAt,
-                     serverID: serverID, remote: model.remoteBinding, agentName: agentName)
+                     serverID: serverID, remote: model.remoteBinding, agentName: agentName,
+                     adoptedAgentTitle: adoptedAgentTitle == title ? adoptedAgentTitle : nil)
     }
 
     var location: WorkspaceLocation { .remote(serverID: serverID, path: path) }
@@ -106,11 +111,17 @@ final class PhoneSession {
     /// ends with the dot rather than starts with it.
     var subtitle: String { "\(agentTitle)\u{00A0}· \(location.folderName)" }
 
-    /// What the agent is asking, for the banner that says a decision waits.
+    /// What the agent is asking, for the banner that says a decision waits: its heading for
+    /// the request, such as "Ready to code?", or the tool call's title.
     var pendingRequestTitle: String? {
-        guard let request = model.permissions.current?.request else { return nil }
-        let title = PermissionRequestViewController.describe(request).title
+        guard let title = model.permissions.current?.heading?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
         return title.isEmpty ? nil : title
+    }
+
+    /// The agent's question waiting for an answer, for the banner that says so.
+    var pendingQuestion: String? {
+        guard let message = model.questions.current?.form.message.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return message.isEmpty ? nil : message
     }
 
     /// Names the session as the user chose. A blank name changes nothing.
@@ -118,6 +129,8 @@ final class PhoneSession {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != title else { return }
         title = String(trimmed.prefix(120))
+        // A name the user chose is never replaced by the agent's.
+        adoptedAgentTitle = nil
         notify(transcript: false)
     }
 
@@ -126,10 +139,16 @@ final class PhoneSession {
 
     var needsApproval: Bool { stubbedStatus?.needsApproval ?? (model.permissions.current != nil) }
 
+    var asksQuestion: Bool { stubbedStatus?.asksQuestion ?? (model.questions.current != nil) }
+
+    /// A decision or an answer holds the agent up: what the badge counts.
+    var waitsForUser: Bool { needsApproval || asksQuestion }
+
     var statusInput: SessionRowStatus.Input {
         if let stubbedStatus { return stubbedStatus }
         return SessionRowStatus.Input(
             phase: model.phase, status: model.status, needsApproval: model.permissions.current != nil,
+            asksQuestion: model.questions.current != nil,
             linkState: model.linkState, hasError: model.errorMessage != nil,
             connectionFailure: model.errorIsConnectionFailure, stoppedOnServer: model.stoppedOnServer,
             stoppedHere: stoppedHere, stopping: model.cancellationRequested, promptStartedAt: model.promptStartedAt,
@@ -156,6 +175,7 @@ final class PhoneSession {
 
     private func modelChanged() {
         if model.phase != .disconnected { stoppedHere = false }
+        adoptAgentTitle()
         if let name = model.agentName, name != agentName {
             agentName = name
             notify(transcript: false, persistOnly: true)
@@ -178,6 +198,26 @@ final class PhoneSession {
             else if transcript { observer.transcript?() }
             else { observer.change() }
         }
+    }
+
+    private func adoptAgentTitle() {
+        guard let adopted = Self.adoptedTitle(current: title, agentTitle: model.agentTitle,
+                                              firstPrompt: model.messages.first { $0.role == .user },
+                                              adoptedBefore: adoptedAgentTitle) else { return }
+        title = adopted
+        adoptedAgentTitle = adopted
+        notify(transcript: false)
+    }
+
+    /// The Mac's rule for the agent's own title, such as the one Claude Code writes after a
+    /// turn: it replaces "New Session", the title the first prompt gave, or one the agent gave
+    /// before; never a name the user chose. Nil when the title stays as it is.
+    static func adoptedTitle(current: String, agentTitle: String?, firstPrompt: ChatMessage?, adoptedBefore: String?) -> String? {
+        guard let agentTitle else { return nil }
+        let title = String(agentTitle.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+        guard !title.isEmpty, title != current else { return nil }
+        let fromPrompt = firstPrompt.flatMap(Self.title(fromPrompt:))
+        return current == untitled || current == fromPrompt || current == adoptedBefore ? title : nil
     }
 
     /// The Mac's rule: the prompt's first line, or the first attachment's name when it has no

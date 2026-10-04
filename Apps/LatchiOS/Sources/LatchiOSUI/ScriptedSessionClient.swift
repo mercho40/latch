@@ -8,7 +8,8 @@ import Synchronization
 
 /// A server as the session screen sees it, scripted by a test or a `--ui-fixture` screen: it
 /// launches at once (or when released), holds each prompt until the script ends the turn, and
-/// records every prompt and command. Events reach the model as a remote channel's would.
+/// records every prompt and command. It raises permission requests and asks questions when
+/// told, and takes their answers. Events reach the model as a remote channel's would.
 /// Debug builds only.
 final class ScriptedSessionClient: AgentServiceClient {
     let events: AsyncStream<LatchAgentEvent>
@@ -95,6 +96,8 @@ final class ScriptedSessionClient: AgentServiceClient {
             return .sessionConfigOptionSet(runtimeID: id, response: ACPSetSessionConfigOptionResponse(configOptions: options))
         case let .resolvePermission(id, requestID, _):
             return .permissionResolved(runtimeID: id, requestID: requestID)
+        case let .resolveElicitation(id, requestID, _):
+            return .elicitationResolved(runtimeID: id, requestID: requestID)
         case let .cancelPrompt(id):
             endTurn(stopReason: "cancelled")
             return .promptCancellationRequested(runtimeID: id)
@@ -182,22 +185,60 @@ final class ScriptedSessionClient: AgentServiceClient {
                                                         "priority": .string("medium")]) })])
     }
 
+    /// How much of its context the agent has used, and with `cost` what the conversation has
+    /// cost so far, as Claude Code's `usage_update` says it.
+    func usage(used: Int, size: Int, cost: Double? = nil) {
+        var fields: [String: ACPJSONValue] = ["sessionUpdate": .string("usage_update"), "used": .integer(Int64(used)),
+                                              "size": .integer(Int64(size))]
+        if let cost { fields["cost"] = .object(["amount": .double(cost), "currency": .string("USD")]) }
+        update(fields)
+    }
+
+    /// The agent's own title for the conversation, as Claude Code gives one after a turn.
+    func title(_ title: String) {
+        update(["sessionUpdate": .string("session_info_update"), "title": .string(title)])
+    }
+
     func availableCommands(_ commands: [(String, String)]) {
         update(["sessionUpdate": .string("available_commands_update"),
                 "availableCommands": .array(commands.map { .object(["name": .string($0.0), "description": .string($0.1)]) })])
     }
 
+    /// A command to approve. With `heading` and `reason`, the agent's own words for what it
+    /// asks and why, as Claude Code sends them beside the tool call.
     @discardableResult
     func requestPermission(title: String, options: [ACPPermissionOption] = ScriptedSessionClient.standardOptions,
-                           command: String = "rm -rf build") -> UUID {
-        let request = UUID()
-        guard let id = runtimeID else { return request }
-        emit(.agent(.permissionRequested(runtimeID: id, requestID: request, request: ACPPermissionRequest(
+                           command: String = "rm -rf build", heading: String? = nil, reason: String? = nil) -> UUID {
+        var permission: [String: ACPJSONValue] = [:]
+        if let heading { permission["title"] = .string(heading) }
+        if let reason { permission["description"] = .string(reason) }
+        return requestPermission(ACPPermissionRequest(
             sessionId: Self.sessionID,
             toolCall: .object(["toolCallId": .string("call-1"), "title": .string(title), "kind": .string("execute"),
                                "rawInput": .object(["command": .string(command)])]),
-            options: options)), sequence: nil))
-        return request
+            options: options, meta: permission.isEmpty ? nil : .object(["permission": .object(permission)])))
+    }
+
+    /// Claude Code's ExitPlanMode: "Ready to code?", the plan as the call's content, and its
+    /// own words for each way to go on.
+    @discardableResult
+    func requestPlanApproval(_ plan: String = SamplePlan.text) -> UUID {
+        requestPermission(ACPPermissionRequest(
+            sessionId: Self.sessionID,
+            toolCall: .object(["toolCallId": .string("plan-1"), "title": .string("Ready to code?"), "kind": .string("switch_mode"),
+                               "content": .array([.object(["type": .string("content"),
+                                                           "content": .object(["type": .string("text"), "text": .string(plan)])])]),
+                               "rawInput": .object(["plan": .string(plan)])]),
+            options: SamplePlan.options,
+            meta: .object(["permission": .object(["title": .string("Ready to code?")])])))
+    }
+
+    @discardableResult
+    func requestPermission(_ request: ACPPermissionRequest) -> UUID {
+        let requestID = UUID()
+        guard let id = runtimeID else { return requestID }
+        emit(.agent(.permissionRequested(runtimeID: id, requestID: requestID, request: request), sequence: nil))
+        return requestID
     }
 
     func closePermission(_ request: UUID) {
@@ -205,11 +246,32 @@ final class ScriptedSessionClient: AgentServiceClient {
         emit(.agent(.permissionClosed(runtimeID: id, requestID: request), sequence: nil))
     }
 
+    /// Worded as Claude Code words them: the agent's words go under Latch's labels.
     static let standardOptions = [
-        ACPPermissionOption(optionId: "allow", name: "Allow", kind: "allow_once"),
-        ACPPermissionOption(optionId: "always", name: "Always", kind: "allow_always"),
-        ACPPermissionOption(optionId: "reject", name: "Reject", kind: "reject_once"),
+        ACPPermissionOption(optionId: "allow", name: "Yes", kind: "allow_once"),
+        ACPPermissionOption(optionId: "always", name: "Yes, and don’t ask again for rm commands in ~/latch", kind: "allow_always"),
+        ACPPermissionOption(optionId: "reject", name: "No, and tell Claude what to do differently", kind: "reject_once"),
     ]
+
+    /// Asks a question, as Claude Code's AskUserQuestion does through ACP's elicitation.
+    @discardableResult
+    func ask(_ request: ACPElicitationRequest = SampleQuestions.request) -> UUID {
+        let requestID = UUID()
+        guard let id = runtimeID else { return requestID }
+        emit(.agent(.elicitationRequested(runtimeID: id, requestID: requestID, request: request), sequence: nil))
+        return requestID
+    }
+
+    /// The question is withdrawn, as when another device answered it.
+    func closeQuestion(_ request: UUID) {
+        guard let id = runtimeID else { return }
+        emit(.agent(.elicitationClosed(runtimeID: id, requestID: request), sequence: nil))
+    }
+
+    /// The answers that reached the server, in order.
+    var elicitationResponses: [ACPElicitationResponse] {
+        commands.compactMap { if case let .resolveElicitation(_, _, response) = $0 { response } else { nil } }
+    }
 
     func close() {
         local.finish()
@@ -217,7 +279,8 @@ final class ScriptedSessionClient: AgentServiceClient {
     }
 }
 
-/// Config options an agent advertises: grouped models, an effort, and a permission mode.
+/// Config options an agent advertises: grouped models, an effort, a permission mode, and one
+/// of its own, Claude Code's Fast mode.
 enum ScriptedConfiguration {
     static let options: [ACPJSONValue] = [
         .object(["id": .string("model"), "name": .string("Model"), "category": .string("model"), "type": .string("select"),
@@ -241,6 +304,12 @@ enum ScriptedConfiguration {
                     .object(["value": .string("default"), "name": .string("Ask First"), "description": .string("Asks before editing")]),
                     .object(["value": .string("acceptEdits"), "name": .string("Accept Edits")]),
                  ])]),
+        .object(["id": .string("fast_mode"), "name": .string("Fast mode"), "type": .string("select"),
+                 "description": .string("Faster output from the same model"), "currentValue": .string("off"),
+                 "options": .array([
+                    .object(["value": .string("off"), "name": .string("Off")]),
+                    .object(["value": .string("on"), "name": .string("On")]),
+                 ])]),
     ]
 }
 
@@ -248,6 +317,74 @@ enum ScriptedConfiguration {
 struct UnreachableServer: RemoteConnectionFailure, LocalizedError {
     let message: String
     var errorDescription: String? { message }
+}
+
+/// Claude Code's AskUserQuestion with two questions, as claude-agent-acp asks it: one of several
+/// options, each with its words and a preview, then any number of others; each question with an
+/// Other box of its own.
+enum SampleQuestions {
+    static func other(for question: String) -> ACPJSONValue {
+        .object(["type": .string("string"), "title": .string("Other"),
+                 "_meta": .object(["_askUserQuestionCustomAnswer": .object(["questionId": .string(question),
+                                                                            "isCustomAnswer": .bool(true)])])])
+    }
+
+    static func option(_ value: String, _ title: String, _ detail: String, preview: String? = nil) -> ACPJSONValue {
+        var fields: [String: ACPJSONValue] = ["const": .string(value), "title": .string(title), "description": .string(detail)]
+        if let preview { fields["_meta"] = .object(["_claude/askUserQuestionOption": .object(["preview": .string(preview)])]) }
+        return .object(fields)
+    }
+
+    static let request = ACPElicitationRequest(
+        sessionId: ScriptedSessionClient.sessionID, message: "Please answer the following questions.",
+        requestedSchema: .object(["type": .string("object"), "required": .array([.string("question_0")]), "properties": .object([
+            "question_0": .object([
+                "type": .string("string"), "title": .string("Port"),
+                "description": .string("How should the server keep its port across a restart?"),
+                "oneOf": .array([
+                    option("reuse", "Reuse the port", "Set SO_REUSEADDR before bind, as the Mac does by default.", preview: """
+                        let listener = try Socket(.tcp)
+                        try listener.setOption(.reuseAddress, true)
+                        try listener.bind(port: port)
+                        """),
+                    option("fresh", "Take a new port", "Bind port 0 and tell the client which port it got.", preview: """
+                        try listener.bind(port: 0)
+                        client.port = listener.localPort
+                        """),
+                ]),
+            ]),
+            "question_0_custom": other(for: "question_0"),
+            "question_1": .object([
+                "type": .string("array"), "title": .string("Checks"),
+                "description": .string("Which checks should run after the change?"),
+                "items": .object(["anyOf": .array([
+                    option("linux", "Linux runner", "The reconnect test on Ubuntu, where it fails."),
+                    option("mac", "macOS runner", "The same test on the Mac, where it passes."),
+                    option("fifty", "Fifty runs", "Run it fifty times in a row to be sure."),
+                ])]),
+            ]),
+            "question_1_custom": other(for: "question_1"),
+        ])]),
+        toolCallId: "ask-1")
+}
+
+/// Claude Code's plan when it asks to leave plan mode, and its words for each way to go on.
+enum SamplePlan {
+    static let text = """
+        ## Keep the port across a restart
+
+        1. Set `SO_REUSEADDR` on the listener before `bind`, in `RemoteServer.listen()`.
+        2. Keep the bound port in `LoopbackServer.restart()` and listen on it again.
+        3. Run `RemoteSessionLiveTests` fifty times on the Linux runner.
+
+        No public API changes.
+        """
+
+    static let options = [
+        ACPPermissionOption(optionId: "acceptEdits", name: "Yes, and auto-accept edits", kind: "allow_always"),
+        ACPPermissionOption(optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once"),
+        ACPPermissionOption(optionId: "plan", name: "No, keep planning", kind: "reject_once"),
+    ]
 }
 
 /// A conversation about a flaky test: a prompt, two tool calls, a reply in rich Markdown, and a

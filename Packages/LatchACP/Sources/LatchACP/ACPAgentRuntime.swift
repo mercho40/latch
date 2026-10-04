@@ -130,6 +130,13 @@ public actor ACPAgentRuntime {
         await client?.setPermissionHandler(handler)
     }
 
+    public func setElicitationHandler(
+        _ handler: (@Sendable (ACPElicitationRequest) async -> ACPElicitationResponse)?
+    ) async throws {
+        try requireReady()
+        await client?.setElicitationHandler(handler)
+    }
+
     @discardableResult
     public func newSession(
         cwd: String,

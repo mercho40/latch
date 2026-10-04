@@ -70,6 +70,10 @@ final class LatchRemoteGoldenTests: XCTestCase {
             (.cancelPrompt(runtimeID: id), #"{"kind":"cancelPrompt","runtimeID":"rt-1"}"#),
             (.resolvePermission(runtimeID: id, requestID: Sample.requestID, outcome: .selected(optionID: "allow-once")), #"{"kind":"resolvePermission","outcome":{"optionId":"allow-once","outcome":"selected"},"requestID":"00000000-0000-0000-0000-00000000000B","runtimeID":"rt-1"}"#),
             (.resolvePermission(runtimeID: id, requestID: Sample.requestID, outcome: .cancelled), #"{"kind":"resolvePermission","outcome":{"outcome":"cancelled"},"requestID":"00000000-0000-0000-0000-00000000000B","runtimeID":"rt-1"}"#),
+            (.resolveElicitation(runtimeID: id, requestID: Sample.requestID, response: ACPElicitationResponse(
+                action: .accept, content: ["question_0": .string("A")]
+            )), #"{"kind":"resolveElicitation","requestID":"00000000-0000-0000-0000-00000000000B","response":{"action":"accept","content":{"question_0":"A"}},"runtimeID":"rt-1"}"#),
+            (.resolveElicitation(runtimeID: id, requestID: Sample.requestID, response: .cancelled), #"{"kind":"resolveElicitation","requestID":"00000000-0000-0000-0000-00000000000B","response":{"action":"cancel"},"runtimeID":"rt-1"}"#),
             (.attach(runtimeID: id, after: 0), #"{"after":0,"kind":"attach","runtimeID":"rt-1"}"#),
             (.detach(runtimeID: id), #"{"kind":"detach","runtimeID":"rt-1"}"#),
             (.stopRuntime(runtimeID: id), #"{"kind":"stopRuntime","runtimeID":"rt-1"}"#),
@@ -91,6 +95,7 @@ final class LatchRemoteGoldenTests: XCTestCase {
             (.promptAccepted(turnID: Sample.turnID), #"{"kind":"promptAccepted","turnID":"00000000-0000-0000-0000-00000000000A"}"#),
             (.cancelRequested, #"{"kind":"cancelRequested"}"#),
             (.permissionResolved, #"{"kind":"permissionResolved"}"#),
+            (.elicitationResolved, #"{"kind":"elicitationResolved"}"#),
             (.attached(record: Sample.record, backlogFrom: 5, truncated: false), #"{"backlogFrom":5,"kind":"attached","record":{"activeTurnID":"00000000-0000-0000-0000-00000000000A","agent":{"preset":"claudeCode"},"agentTitle":"Claude Code","configurationSets":[{"acpSequence":7,"configID":"effort","configOptions":[{"currentValue":"high","id":"effort"}],"route":"config","value":"high"}],"initialization":{"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}},"agentInfo":{"name":"mock-agent","version":"1.0.0"},"protocolVersion":1},"lastSequence":12,"lifecycle":"ready","pendingPermissions":[{"request":{"options":[{"kind":"allow_once","name":"Allow","optionId":"allow-once"}],"sessionId":"session-1","toolCall":{"title":"Read file","toolCallId":"call-1"}},"requestID":"00000000-0000-0000-0000-00000000000B"}],"runtimeID":"rt-1","session":{"kind":"new","response":{"localSequence":2,"modes":{"currentModeId":"ask"},"sessionId":"session-1"}},"sessionID":"session-1","state":[{"localSequence":6,"sessionId":"session-1","update":{"currentModeId":"code","sessionUpdate":"current_mode_update"}}],"turns":[{"state":"running","turnID":"00000000-0000-0000-0000-00000000000A"}],"workspace":"/home/me/project"},"truncated":false}"#),
             (.attached(record: Sample.exitedRecord, backlogFrom: 31, truncated: true), #"{"backlogFrom":31,"kind":"attached","record":{"agent":{"custom":"my-agent --acp"},"agentTitle":"my-agent","configurationSets":[],"exit":{"status":3,"stopped":false},"lastSequence":40,"lifecycle":"exited","loadedThrough":9,"pendingPermissions":[],"runtimeID":"rt-1","session":{"kind":"load","response":{"localSequence":9,"models":{"currentModelId":"model-b"}}},"sessionID":"session-2","state":[],"turns":[{"error":{"code":"runtimeExited","message":"The agent exited."},"state":"ended","turnID":"00000000-0000-0000-0000-00000000000A"}],"workspace":"/srv/work"},"truncated":true}"#),
             (.detached, #"{"kind":"detached"}"#),
@@ -109,12 +114,26 @@ final class LatchRemoteGoldenTests: XCTestCase {
         }
     }
 
+    /// A pending question rides in the record beside the requests; a record without one, as
+    /// every older server sends, has no key for them.
+    func testRecordCarriesPendingQuestions() throws {
+        var record = Sample.exitedRecord
+        record.pendingElicitations = [LatchRemotePendingElicitation(requestID: Sample.requestID, request: Sample.question)]
+        let encoded = try encodedString(record)
+        XCTAssertTrue(encoded.contains(#""pendingElicitations":[{"request":{"message":"Which one?","mode":"form","requestedSchema":{"properties":{"question_0":{"oneOf":[{"const":"A","title":"A"}],"type":"string"}},"type":"object"},"sessionId":"session-1","toolCallId":"call-2"},"requestID":"00000000-0000-0000-0000-00000000000B"}]"#), encoded)
+        XCTAssertEqual(try decoded(LatchRemoteRuntimeRecord.self, encoded), record)
+        let older = try encodedString(Sample.exitedRecord)
+        XCTAssertFalse(older.contains("pendingElicitations"))
+    }
+
     func testEvents() throws {
         let cases: [(LatchRemoteEvent, String)] = [
             (.sessionUpdate(notification: Sample.notification), #"{"kind":"sessionUpdate","notification":{"localSequence":5,"sessionId":"session-1","update":{"content":{"text":"a/b","type":"text"},"sessionUpdate":"agent_message_chunk"}}}"#),
             (.sessionUpdate(notification: Sample.notification, replay: true), #"{"kind":"sessionUpdate","notification":{"localSequence":5,"sessionId":"session-1","update":{"content":{"text":"a/b","type":"text"},"sessionUpdate":"agent_message_chunk"}},"replay":true}"#),
             (.permissionRequested(requestID: Sample.requestID, request: Sample.permission), #"{"kind":"permissionRequested","request":{"options":[{"kind":"allow_once","name":"Allow","optionId":"allow-once"}],"sessionId":"session-1","toolCall":{"title":"Read file","toolCallId":"call-1"}},"requestID":"00000000-0000-0000-0000-00000000000B"}"#),
             (.permissionClosed(requestID: Sample.requestID), #"{"kind":"permissionClosed","requestID":"00000000-0000-0000-0000-00000000000B"}"#),
+            (.elicitationRequested(requestID: Sample.requestID, request: Sample.question), #"{"kind":"elicitationRequested","request":{"message":"Which one?","mode":"form","requestedSchema":{"properties":{"question_0":{"oneOf":[{"const":"A","title":"A"}],"type":"string"}},"type":"object"},"sessionId":"session-1","toolCallId":"call-2"},"requestID":"00000000-0000-0000-0000-00000000000B"}"#),
+            (.elicitationClosed(requestID: Sample.requestID), #"{"kind":"elicitationClosed","requestID":"00000000-0000-0000-0000-00000000000B"}"#),
             (.turnStarted(turnID: Sample.turnID, text: "Look at this", attachments: [
                 LatchRemoteAttachmentSummary(kind: "image", mimeType: "image/png", byteCount: 2048),
                 LatchRemoteAttachmentSummary(kind: "resourceLink", name: "a.txt", byteCount: 0),

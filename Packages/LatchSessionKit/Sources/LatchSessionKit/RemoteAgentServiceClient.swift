@@ -218,6 +218,9 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         case let .resolvePermission(id, requestID, outcome):
             _ = try await send(.resolvePermission(runtimeID: id, requestID: requestID, outcome: outcome), to: id)
             return .permissionResolved(runtimeID: id, requestID: requestID)
+        case let .resolveElicitation(id, requestID, response):
+            _ = try await send(.resolveElicitation(runtimeID: id, requestID: requestID, response: response), to: id)
+            return .elicitationResolved(runtimeID: id, requestID: requestID)
         case let .stopRuntime(id):
             try await stop(id)
             return .runtimeStopped(runtimeID: id)
@@ -497,6 +500,12 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
             case let .permissionClosed(requestID):
                 guard permissions.close(requestID) else { return [skipped] }
                 return [.agent(.permissionClosed(runtimeID: id, requestID: requestID), sequence: sequence)]
+            case let .elicitationRequested(requestID, request):
+                guard permissions.ask(requestID, at: sequence) else { return [skipped] }
+                return [.agent(.elicitationRequested(runtimeID: id, requestID: requestID, request: request), sequence: sequence)]
+            case let .elicitationClosed(requestID):
+                guard permissions.withdraw(requestID) else { return [skipped] }
+                return [.agent(.elicitationClosed(runtimeID: id, requestID: requestID), sequence: sequence)]
             case let .turnStarted(turnID, text, attachments):
                 return [.turnStarted(runtimeID: id, turnID: turnID, text: text,
                                      attachments: attachments.map(ChatAttachment.init), sequence: sequence)]
@@ -660,11 +669,16 @@ struct RemotePermissionLedger {
     enum Change {
         case raised(UUID, ACPPermissionRequest)
         case closed(UUID)
+        /// The same for the agent's questions.
+        case asked(UUID, ACPElicitationRequest)
+        case withdrawn(UUID)
 
         func event(runtimeID: AgentRuntimeID) -> LatchAgentEvent {
             switch self {
             case let .raised(requestID, request): .permissionRequested(runtimeID: runtimeID, requestID: requestID, request: request)
             case let .closed(requestID): .permissionClosed(runtimeID: runtimeID, requestID: requestID)
+            case let .asked(requestID, request): .elicitationRequested(runtimeID: runtimeID, requestID: requestID, request: request)
+            case let .withdrawn(requestID): .elicitationClosed(runtimeID: runtimeID, requestID: requestID)
             }
         }
     }
@@ -672,6 +686,8 @@ struct RemotePermissionLedger {
     private var open: Set<UUID> = []
     /// The last re-attach's record: what was pending as of its last sequence.
     private var pendingAtRecord: Set<UUID> = []
+    private var openQuestions: Set<UUID> = []
+    private var questionsAtRecord: Set<UUID> = []
     private var recordThrough: UInt64 = 0
 
     /// Brings the session in line with the record before the backlog arrives: requests it
@@ -687,6 +703,14 @@ struct RemotePermissionLedger {
             open.insert(permission.requestID)
             changes.append(.raised(permission.requestID, permission.request))
         }
+        let questions = record.pendingElicitations ?? []
+        questionsAtRecord = Set(questions.map(\.requestID))
+        changes += openQuestions.subtracting(questionsAtRecord).sorted { $0.uuidString < $1.uuidString }.map { .withdrawn($0) }
+        openQuestions.formIntersection(questionsAtRecord)
+        for question in questions where !openQuestions.contains(question.requestID) {
+            openQuestions.insert(question.requestID)
+            changes.append(.asked(question.requestID, question.request))
+        }
         return changes
     }
 
@@ -701,5 +725,17 @@ struct RemotePermissionLedger {
     /// Whether to close a request: only one that is showing.
     mutating func close(_ requestID: UUID) -> Bool {
         open.remove(requestID) != nil
+    }
+
+    /// Whether to show a question, as `raise` decides for a request.
+    mutating func ask(_ requestID: UUID, at sequence: UInt64) -> Bool {
+        guard !openQuestions.contains(requestID), sequence > recordThrough || questionsAtRecord.contains(requestID) else { return false }
+        openQuestions.insert(requestID)
+        return true
+    }
+
+    /// Whether to take a question down: only one that is showing.
+    mutating func withdraw(_ requestID: UUID) -> Bool {
+        openQuestions.remove(requestID) != nil
     }
 }

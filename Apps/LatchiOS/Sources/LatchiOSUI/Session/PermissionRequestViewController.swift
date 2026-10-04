@@ -2,20 +2,24 @@ import LatchACP
 import LatchSessionKit
 import UIKit
 
-/// An agent asking before it acts: what it wants to do, the tool call's details as the agent
-/// sent them, one button per option it offers in its order, and Cancel Request. No option is
-/// the default, by look or by key, and the sheet cannot be swiped away: it closes with a
-/// decision, or on its own when the request does.
-///
-/// The request always comes first. The options and Cancel Request stay pinned below it only
-/// while they leave most of the sheet to the request; when they would not, as at accessibility
-/// text sizes, all of them follow the details in the scrolling area, together, so nobody
-/// decides without having scrolled past what is asked, and Cancel is never the only choice
-/// in sight.
-final class PermissionRequestViewController: UIViewController {
+/// An agent asking before it acts: what it wants to do, in its own heading when it gives one,
+/// such as Claude Code's "Ready to code?", and why; the tool call's details as the agent sent
+/// them, or the plan it asks to go ahead with, as Markdown; one button per option it offers in
+/// its order, and Cancel Request. Every button says Latch's own label; the agent's words for an
+/// option, such as "Yes, and don't ask again for git commands", go under the label, never in
+/// its place, so no option can pass itself off as another. No option is the default, by look
+/// or by key.
+final class PermissionRequestViewController: RequestSheetViewController {
     let promptID: UUID
     let options: [ACPPermissionOption]
+    /// The agent's heading for the request, or the tool call's title.
     let requestTitle: String
+    /// Why, when the agent says.
+    let reason: String?
+    /// The plan the agent asks to go ahead with, shown in place of the details.
+    let plan: String?
+    /// The agent's own words for each option that has some, by option ID.
+    let optionDetails: [String: String]
     let details: String
     /// The request is a shell command, set in monospace as the transcript sets it.
     let isCommand: Bool
@@ -27,46 +31,31 @@ final class PermissionRequestViewController: UIViewController {
     private(set) var optionButtons: [UIButton] = []
     private(set) var cancelButton = UIButton(type: .system)
     private let titleLabel = UILabel()
-    private let heading = UIStackView()
-    private let scrollView = UIScrollView()
-    private let content = UIStackView()
-    private let optionStack = UIStackView()
-    private let pinned = UIStackView()
-    /// The scrolling area ends above the pinned options, or with them inside it, at the sheet's edge.
-    private var scrollAbovePinned: NSLayoutConstraint?
-    private var scrollToEdge: NSLayoutConstraint?
-    private var contentBottom: NSLayoutConstraint?
-    /// Whether the options are pinned below the scrolling request, or follow it inside.
-    private(set) var optionsArePinned = true
-    /// Called when the sheet goes without a decision or a closed request taking it down.
-    var onDismissedElsewhere: (() -> Void)?
-
-    static let fitDetent = UISheetPresentationController.Detent.Identifier("fit")
+    /// The plan, rendered, when there is one.
+    private(set) var planView: MarkdownContentView?
+    private static let planPadding: CGFloat = 14
 
     init(prompt: PermissionQueue.Prompt, agentTitle: String, decide: @escaping (String?) -> Void) {
         promptID = prompt.id
         options = prompt.options
         self.agentTitle = agentTitle
         self.decide = decide
-        (requestTitle, details) = Self.describe(prompt.request)
+        let described = Self.describe(prompt.request)
+        details = described.details
+        requestTitle = prompt.heading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? described.title
+        reason = prompt.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        plan = prompt.plan
+        optionDetails = Dictionary(prompt.options.compactMap { option in prompt.detail(for: option).map { (option.optionId, $0) } },
+                                   uniquingKeysWith: { first, _ in first })
+        // Only the tool call's own title can be a command: a heading the agent wrote is prose.
+        let titled = requestTitle == described.title
         let command = Self.command(of: prompt.request)
         let bare = ToolCallPresentation(text: requestTitle)
-        isCommand = bare.isCommand || command != nil || Self.kind(of: prompt.request) == "execute"
+        isCommand = titled && (bare.isCommand || command != nil || Self.kind(of: prompt.request) == "execute")
         // Only when the input is the command alone, and the details say nothing else.
-        detailsRepeatTitle = command.map { $0 == bare.displayTitle } == true
+        detailsRepeatTitle = titled && command.map { $0 == bare.displayTitle } == true
             && details.components(separatedBy: "\n\n").allSatisfy { $0.hasPrefix("rawInput (") }
-        super.init(nibName: nil, bundle: nil)
-        isModalInPresentation = true
-        // A centred form on an iPad; a sheet from the bottom on an iPhone.
-        modalPresentationStyle = .formSheet
-        if let sheet = sheetPresentationController {
-            // As tall as the request needs, or the whole height.
-            sheet.detents = [.custom(identifier: Self.fitDetent) { [weak self] context in
-                self.map { min($0.fittingHeight, context.maximumDetentValue) }
-            }, .large()]
-            sheet.prefersGrabberVisible = true
-            sheet.prefersScrollingExpandsWhenScrolledToEdge = true
-        }
+        super.init()
     }
 
     @available(*, unavailable)
@@ -110,28 +99,10 @@ final class PermissionRequestViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-
         // The list's "Needs approval" mark, so a decision looks the same wherever it waits.
         let mark = SessionStatusView.mark(for: .waiting)
-        let icon = UIImageView(image: UIImage(systemName: mark?.symbol ?? "exclamationmark.circle.fill"))
-        icon.tintColor = mark?.color ?? .systemOrange
-        icon.preferredSymbolConfiguration = .init(textStyle: .title2)
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-        icon.isAccessibilityElement = false
-        // At accessibility sizes the heading grows less than the request, so the options come
-        // into view sooner.
-        icon.maximumContentSizeCategory = .accessibilityMedium
-
-        let caption = UILabel()
-        caption.text = "\(agentTitle) requests permission"
-        caption.font = .preferredFont(forTextStyle: .subheadline)
-        caption.adjustsFontForContentSizeCategory = true
-        caption.textColor = .secondaryLabel
-        caption.numberOfLines = 0
-        caption.maximumContentSizeCategory = .accessibilityMedium
-        // The title says it for VoiceOver, where focus lands.
-        caption.isAccessibilityElement = false
+        let heading = headingRow(symbol: mark?.symbol ?? "exclamationmark.circle.fill", tint: mark?.color ?? .systemOrange,
+                                 caption: "\(agentTitle) requests permission")
 
         let shownTitle = requestTitle.isEmpty ? "Permission Request" : ToolCallPresentation(text: requestTitle).displayTitle
         titleLabel.text = shownTitle
@@ -147,6 +118,76 @@ final class PermissionRequestViewController: UIViewController {
         spoken.append(NSAttributedString(string: shownTitle, attributes: isCommand ? [.accessibilitySpeechPunctuation: true] : [:]))
         titleLabel.accessibilityAttributedLabel = spoken
 
+        let header = UIStackView(arrangedSubviews: [heading, titleLabel])
+        header.axis = .vertical
+        header.spacing = 10
+        if let reason, !reason.isEmpty {
+            let label = UILabel()
+            label.text = reason
+            label.font = .preferredFont(forTextStyle: .subheadline)
+            label.adjustsFontForContentSizeCategory = true
+            label.textColor = .secondaryLabel
+            label.numberOfLines = 0
+            header.addArrangedSubview(label)
+            header.setCustomSpacing(6, after: titleLabel)
+        }
+        content.addArrangedSubview(header)
+
+        if let plan {
+            content.addArrangedSubview(makePlanBox(plan))
+        } else if !detailsRepeatTitle, !details.isEmpty {
+            content.addArrangedSubview(makeDetailsBox())
+        }
+        // After what is asked, so it is the first thing read.
+        let explanation = Self.note(
+            "“Always” is remembered by \(agentTitle), not by Latch. Cancel Request declines only this request; it doesn’t restrict the agent.")
+        content.addArrangedSubview(explanation)
+        if let box = content.arrangedSubviews.dropLast().last, box !== header { content.setCustomSpacing(10, after: box) }
+
+        // With the agent's words under some labels, every button is a rounded rectangle, so
+        // they all keep one look.
+        let worded = !optionDetails.isEmpty
+        for option in options {
+            var configuration = UIButton.Configuration.gray()
+            configuration.title = option.permissionLabel
+            configuration.subtitle = optionDetails[option.optionId]
+            configuration.buttonSize = .large
+            configuration.cornerStyle = worded ? .large : .capsule
+            configuration.titleLineBreakMode = .byWordWrapping
+            configuration.subtitleLineBreakMode = .byWordWrapping
+            configuration.titlePadding = 3
+            configuration.titleAlignment = .center
+            configuration.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                var attributes = attributes
+                attributes.font = UIFont.preferredFont(forTextStyle: .footnote)
+                attributes.foregroundColor = UIColor.secondaryLabel
+                return attributes
+            }
+            let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
+                self?.finish(option.optionId)
+            })
+            // Latch's label is the button's name; the agent's words are only its value.
+            button.accessibilityLabel = option.permissionLabel
+            button.accessibilityValue = optionDetails[option.optionId]
+            button.isPointerInteractionEnabled = true
+            actions.addArrangedSubview(button)
+            optionButtons.append(button)
+        }
+        var cancel = UIButton.Configuration.plain()
+        cancel.title = "Cancel Request"
+        cancel.baseForegroundColor = LatchPalette.tint
+        cancel.buttonSize = .large
+        cancel.titleLineBreakMode = .byWordWrapping
+        cancelButton = UIButton(configuration: cancel, primaryAction: UIAction { [weak self] _ in self?.finish(nil) })
+        cancelButton.isPointerInteractionEnabled = true
+        for button in optionButtons + [cancelButton] {
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 50).isActive = true
+        }
+        actions.addArrangedSubview(cancelButton)
+        installSheetLayout()
+    }
+
+    private func makeDetailsBox() -> UIView {
         let detailsBox = UIView()
         detailsBox.backgroundColor = LatchPalette.codeBackground
         detailsBox.layer.cornerRadius = 12
@@ -174,194 +215,59 @@ final class PermissionRequestViewController: UIViewController {
             detailsView.topAnchor.constraint(equalTo: detailsBox.topAnchor, constant: 10),
             detailsView.bottomAnchor.constraint(equalTo: detailsBox.bottomAnchor, constant: -10),
         ])
+        return detailsBox
+    }
 
-        // After the details, so the command is the first thing read.
-        let explanation = UILabel()
-        explanation.text = "“Always” is remembered by \(agentTitle), not by Latch. Cancel Request declines only this request; it doesn’t restrict the agent."
-        explanation.font = .preferredFont(forTextStyle: .footnote)
-        explanation.adjustsFontForContentSizeCategory = true
-        explanation.textColor = .secondaryLabel
-        explanation.numberOfLines = 0
-
-        heading.addArrangedSubview(icon)
-        heading.addArrangedSubview(caption)
-        heading.spacing = 8
-        let header = UIStackView(arrangedSubviews: [heading, titleLabel])
-        header.axis = .vertical
-        header.spacing = 10
-
-        optionStack.axis = .vertical
-        optionStack.spacing = 10
-        for option in options {
-            var configuration = UIButton.Configuration.gray()
-            configuration.title = option.permissionLabel
-            configuration.buttonSize = .large
-            configuration.cornerStyle = .capsule
-            configuration.titleLineBreakMode = .byWordWrapping
-            let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
-                self?.finish(option.optionId)
-            })
-            button.isPointerInteractionEnabled = true
-            optionStack.addArrangedSubview(button)
-            optionButtons.append(button)
+    /// The plan as a reply would show it, in a frame, as Claude Code frames it.
+    private func makePlanBox(_ plan: String) -> UIView {
+        let box = UIView()
+        box.layer.cornerRadius = 12
+        box.layer.cornerCurve = .continuous
+        let markdown = MarkdownContentView()
+        markdown.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(markdown)
+        let padding = Self.planPadding
+        NSLayoutConstraint.activate([
+            markdown.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: padding),
+            markdown.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -padding),
+            markdown.topAnchor.constraint(equalTo: box.topAnchor, constant: padding),
+            markdown.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -padding),
+        ])
+        planView = markdown
+        // VoiceOver says "Plan" on the way in, then reads it block by block.
+        box.accessibilityLabel = "Plan"
+        box.accessibilityContainerType = .semanticGroup
+        renderPlan()
+        Self.styleFrame(box)
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitLegibilityWeight.self]) {
+            (controller: PermissionRequestViewController, _) in controller.renderPlan()
         }
-        var cancel = UIButton.Configuration.plain()
-        cancel.title = "Cancel Request"
-        cancel.baseForegroundColor = LatchPalette.tint
-        cancel.buttonSize = .large
-        cancel.titleLineBreakMode = .byWordWrapping
-        cancelButton = UIButton(configuration: cancel, primaryAction: UIAction { [weak self] _ in self?.finish(nil) })
-        cancelButton.isPointerInteractionEnabled = true
-        for button in optionButtons + [cancelButton] {
-            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 50).isActive = true
+        box.registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitAccessibilityContrast.self]) { (box: UIView, _) in
+            Self.styleFrame(box)
         }
-
-        content.addArrangedSubview(header)
-        content.addArrangedSubview(detailsBox)
-        content.addArrangedSubview(explanation)
-        content.axis = .vertical
-        content.spacing = 16
-        content.setCustomSpacing(10, after: detailsBox)
-        detailsBox.isHidden = detailsRepeatTitle || details.isEmpty
-        pinned.axis = .vertical
-        pinned.spacing = 10
-        pinned.addArrangedSubview(optionStack)
-        pinned.addArrangedSubview(cancelButton)
-
-        scrollView.alwaysBounceVertical = false
-        for view in [content, pinned, scrollView] as [UIView] { view.translatesAutoresizingMaskIntoConstraints = false }
-        scrollView.addSubview(content)
-        view.addSubview(scrollView)
-        view.addSubview(pinned)
-        let guide = view.readableContentGuide
-        let abovePinned = scrollView.bottomAnchor.constraint(equalTo: pinned.topAnchor, constant: -12)
-        let bottom = content.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -4)
-        scrollAbovePinned = abovePinned
-        scrollToEdge = scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        contentBottom = bottom
-        var constraints = [
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            abovePinned,
-            content.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: Self.topInset),
-            bottom,
-            pinned.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-        ]
-        // The readable width, and never closer than 20 points to the sheet's edge.
-        for column in [content, pinned] as [UIView] {
-            let leading = column.leadingAnchor.constraint(equalTo: guide.leadingAnchor)
-            let trailing = column.trailingAnchor.constraint(equalTo: guide.trailingAnchor)
-            leading.priority = .defaultHigh
-            trailing.priority = .defaultHigh
-            constraints += [
-                leading, trailing,
-                column.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
-                column.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20),
-                column.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            ]
-        }
-        NSLayoutConstraint.activate(constraints)
-        pinned.setContentCompressionResistancePriority(.required, for: .vertical)
-        // What scrolls under the pinned options fades into them rather than stopping at a hard line.
-        if #available(iOS 26.0, *) {
-            let edge = UIScrollEdgeElementContainerInteraction()
-            edge.scrollView = scrollView
-            edge.edge = .bottom
-            pinned.addInteraction(edge)
-            scrollView.bottomEdgeEffect.style = .soft
-        }
-        arrangeHeading()
-        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: PermissionRequestViewController, _) in
-            controller.arrangeHeading()
-            controller.sheetPresentationController?.invalidateDetents()
-        }
+        return box
     }
 
-    private static let topInset: CGFloat = 28
-
-    /// At accessibility sizes the hand goes above the caption, so the caption keeps its width.
-    private func arrangeHeading() {
-        let large = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-        heading.axis = large ? .vertical : .horizontal
-        heading.alignment = large ? .leading : .center
+    private static func styleFrame(_ box: UIView) {
+        let high = box.traitCollection.accessibilityContrast == .high
+        box.layer.borderWidth = high ? 1.5 : 1
+        box.layer.borderColor = (high ? UIColor.label : .separator).resolvedColor(with: box.traitCollection).cgColor
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        // Pinned only while the options leave the request most of the sheet at its tallest.
-        // Measured against the window, not this sheet, whose height follows the choice.
-        // Measured, not read from frames, which this pass has not yet set below the top level.
-        guard view.bounds.height > 0 else { return }
-        let options = height(of: optionStack) + height(of: cancelButton)
-        let pin = options <= (view.window?.bounds.height ?? view.bounds.height) * 0.4
-        guard pin != optionsArePinned else { return }
-        optionsArePinned = pin
-        optionStack.removeFromSuperview()
-        cancelButton.removeFromSuperview()
-        // Unpinned, the empty footer goes and the scrolling area runs to the sheet's edge.
-        pinned.isHidden = !pin
-        scrollAbovePinned?.isActive = pin
-        scrollToEdge?.isActive = !pin
-        contentBottom?.constant = pin ? -4 : -Self.bottomInset
-        if pin {
-            pinned.addArrangedSubview(optionStack)
-            pinned.addArrangedSubview(cancelButton)
-        } else {
-            let last = content.arrangedSubviews.last
-            content.addArrangedSubview(optionStack)
-            content.addArrangedSubview(cancelButton)
-            if let last { content.setCustomSpacing(20, after: last) }
-            content.setCustomSpacing(10, after: optionStack)
-        }
-        view.setNeedsLayout()
-        // Said once it is there: the options are further down.
-        if !pin, view.window != nil { scrollView.flashScrollIndicators() }
+    private func renderPlan() {
+        guard let plan, let planView else { return }
+        let renderer = MarkdownRenderer(traits: traitCollection)
+        planView.show(renderer.render(plan), renderer: renderer)
+        sheetPresentationController?.invalidateDetents()
     }
 
-    private static let bottomInset: CGFloat = 16
-
-    /// The height that shows everything without scrolling, above the bottom safe area.
-    var fittingHeight: CGFloat {
-        loadViewIfNeeded()
-        guard optionsArePinned else { return ceil(Self.topInset + height(of: content) + Self.bottomInset) }
-        return ceil(Self.topInset + height(of: content) + 4 + 12 + height(of: pinned) + 12)
+    override func prepare(width: CGFloat) {
+        planView?.prepare(width: width - Self.planPadding * 2)
     }
 
-    /// The column's width: the readable width, at least 20 points in from each edge.
-    private var columnWidth: CGFloat {
-        let width = view.bounds.width > 0 ? view.bounds.width : 390
-        let readable = view.readableContentGuide.layoutFrame.width
-        return max(0, min(width - 40, readable > 0 ? readable : width))
-    }
+    override var firstFocus: Any? { titleLabel }
 
-    private func height(of subview: UIView) -> CGFloat {
-        subview.systemLayoutSizeFitting(CGSize(width: columnWidth, height: UIView.layoutFittingCompressedSize.height),
-                                        withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel).height
-    }
-
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        scrollView.flashScrollIndicators()
-        UIAccessibility.post(notification: .screenChanged, argument: titleLabel)
-    }
-
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if presentingViewController == nil || isBeingDismissed { onDismissedElsewhere?() }
-    }
-
-    /// Escape cancels, as on the Mac. No key chooses an option.
-    override var keyCommands: [UIKeyCommand]? {
-        [UIKeyCommand(title: "Cancel Request", action: #selector(cancelFromKeyboard), input: UIKeyCommand.inputEscape)]
-    }
-
-    @objc private func cancelFromKeyboard() { finish(nil) }
-
-    override func accessibilityPerformEscape() -> Bool {
-        finish(nil)
-        return true
-    }
+    override func cancelRequest() { finish(nil) }
 
     /// The decision, once. Dismissal follows from the queue moving on.
     func finish(_ optionID: String?) {

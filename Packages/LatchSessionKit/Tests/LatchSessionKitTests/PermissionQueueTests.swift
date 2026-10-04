@@ -111,6 +111,44 @@ final class PermissionQueueTests: XCTestCase {
         XCTAssertNil(queue.current)
     }
 
+    /// Claude Code's plan approval: its own heading and reason, the plan, and its words for
+    /// each option under Latch's labels.
+    @MainActor func testAPlanApprovalShowsTheAgentsHeadingPlanAndWords() {
+        let request = ACPPermissionRequest(
+            sessionId: "s",
+            toolCall: .object(["toolCallId": .string("plan-1"), "title": .string("Ready to code?"), "kind": .string("switch_mode"),
+                               "content": .array([.object(["type": .string("content"), "content": .object(["type": .string("text"), "text": .string("1. Read\n2. Fix")])])])]),
+            options: [ACPPermissionOption(optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once"),
+                      ACPPermissionOption(optionId: "reject", name: "Reject Once", kind: "reject_once")],
+            meta: .object(["permission": .object(["version": .integer(1), "title": .string("Ready to code?"), "description": .string("Reason: the plan is done")])])
+        )
+        let prompt = PermissionQueue.Prompt(id: UUID(), request: request)
+        XCTAssertEqual(prompt.heading, "Ready to code?")
+        XCTAssertEqual(prompt.reason, "Reason: the plan is done")
+        XCTAssertEqual(prompt.plan, "1. Read\n2. Fix")
+        XCTAssertEqual(prompt.detail(for: request.options[0]), "Yes, manually approve edits")
+        XCTAssertNil(prompt.detail(for: request.options[1]), "Words that only repeat the label add nothing")
+        // Claude Code's usual names are a word of the label: under Allow Once, "Allow" says nothing more.
+        XCTAssertNil(prompt.detail(for: ACPPermissionOption(optionId: "allow", name: "Allow", kind: "allow_once")))
+        XCTAssertNil(prompt.detail(for: ACPPermissionOption(optionId: "always", name: "always allow", kind: "allow_always")))
+        XCTAssertNil(prompt.detail(for: ACPPermissionOption(optionId: "reject", name: "Reject", kind: "reject_once")))
+        XCTAssertEqual(prompt.detail(for: ACPPermissionOption(optionId: "yes", name: "Yes", kind: "allow_once")), "Yes")
+        // Words that say the opposite of the choice they would sit under are not shown.
+        XCTAssertNil(prompt.detail(for: ACPPermissionOption(optionId: "trap", name: "No, keep planning", kind: "allow_once")))
+        XCTAssertNil(prompt.detail(for: ACPPermissionOption(optionId: "trap", name: "Yes, go ahead", kind: "reject_once")))
+        XCTAssertEqual(prompt.detail(for: ACPPermissionOption(optionId: "no", name: "No, keep planning", kind: "reject_once")), "No, keep planning")
+        let plain = PermissionQueue.Prompt(id: UUID(), request: ACPPermissionRequest(
+            sessionId: "s", toolCall: .object(["title": .string("git status"), "kind": .string("execute")]), options: []))
+        XCTAssertEqual(plain.heading, "git status")
+        // A heading is one line; the whole script is in the full request.
+        let script = PermissionQueue.Prompt(id: UUID(), request: ACPPermissionRequest(
+            sessionId: "s", toolCall: .object(["title": .string("cat <<'EOF' > a.sh\necho hi\nEOF"), "kind": .string("execute")]), options: []))
+        XCTAssertEqual(script.heading, "cat <<'EOF' > a.sh…")
+        XCTAssertTrue(script.fullRequest.contains("echo hi"))
+        XCTAssertNil(plain.reason)
+        XCTAssertNil(plain.plan)
+    }
+
     @MainActor private func waitForPrompt(_ queue: PermissionQueue) async throws -> UUID {
         let deadline = ContinuousClock.now + .seconds(2)
         while queue.current == nil {

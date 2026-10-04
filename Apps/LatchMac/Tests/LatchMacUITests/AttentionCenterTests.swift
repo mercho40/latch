@@ -28,6 +28,22 @@ final class AttentionCenterTests: XCTestCase {
         XCTAssertEqual(center.badgeCount, 1)
     }
 
+    /// A question waits like a request: announced out of sight with nothing of what it asks,
+    /// counted on the badge, and withdrawn once answered.
+    func testAQuestionIsAnnouncedCountedAndWithdrawn() throws {
+        let presenter = RecordingPresenter()
+        let center = AttentionCenter(presenter: presenter)
+        center.update([sessionID: AttentionCenter.State(workspaceName: "workspace", question: requestID, isPrompting: true)])
+        let post = try XCTUnwrap(presenter.posts.first)
+        XCTAssertEqual(post.body, "The agent is asking you a question.")
+        XCTAssertEqual(post.actions, [])
+        XCTAssertNil(post.userInfo["request"], "Clicking only brings the session forward")
+        XCTAssertEqual(center.badgeCount, 1)
+        center.update([sessionID: AttentionCenter.State(workspaceName: "workspace", isPrompting: true)])
+        XCTAssertTrue(presenter.withdrawn.contains("question.\(requestID.uuidString)"))
+        XCTAssertEqual(center.badgeCount, 0)
+    }
+
     func testNotificationBodyCarriesNoAgentSuppliedDetail() {
         let presenter = RecordingPresenter()
         let center = AttentionCenter(presenter: presenter)

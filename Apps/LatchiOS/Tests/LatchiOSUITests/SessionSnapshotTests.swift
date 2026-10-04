@@ -129,6 +129,20 @@ final class SessionSnapshotTests: XCTestCase {
     /// The test host never finishes a sheet's transition, so the sheet's own view is placed
     /// where UIKit puts it.
     func testPermissionSheet() async throws {
+        try await renderSheet("permission") { fixture in
+            fixture.client.requestPermission(title: "rm -rf .build && swift build", command: "rm -rf .build && swift build")
+        }
+    }
+
+    func testPlanApprovalSheet() async throws {
+        try await renderSheet("plan-approval") { $0.client.requestPlanApproval() }
+    }
+
+    func testQuestionSheet() async throws {
+        try await renderSheet("question") { $0.client.ask() }
+    }
+
+    private func renderSheet(_ name: String, raise: (SessionScreenFixture) -> Void) async throws {
         for detent in ["fit", "large"] {
             for appearance in Snapshot.Appearance.all + [.largest] {
                 let fixture = SessionScreenFixture()
@@ -137,9 +151,9 @@ final class SessionSnapshotTests: XCTestCase {
                 fixture.type("Clean the build folder and rebuild")
                 fixture.screen.send()
                 await waitUntil { fixture.client.hasOpenTurn }
-                fixture.client.requestPermission(title: "rm -rf .build && swift build", command: "rm -rf .build && swift build")
-                await waitUntil { fixture.screen.permissionSheet != nil }
-                let sheet = try XCTUnwrap(fixture.screen.permissionSheet)
+                raise(fixture)
+                await waitUntil { fixture.screen.permissionSheet != nil || fixture.screen.questionSheet != nil }
+                let sheet: RequestSheetViewController = try XCTUnwrap(fixture.screen.permissionSheet ?? fixture.screen.questionSheet)
                 let dim = UIView(frame: window.bounds)
                 dim.backgroundColor = UIColor.black.withAlphaComponent(0.25)
                 window.addSubview(dim)
@@ -156,7 +170,7 @@ final class SessionSnapshotTests: XCTestCase {
                 sheet.view.layer.cornerRadius = 38
                 sheet.view.layer.cornerCurve = .continuous
                 sheet.view.clipsToBounds = true
-                try await Snapshot.write(window, task: Self.task, name: "permission-\(detent)", appearance: appearance)
+                try await Snapshot.write(window, task: Self.task, name: "\(name)-\(detent)", appearance: appearance)
                 sheet.view.removeFromSuperview()
                 fixture.client.endTurn()
                 Snapshot.tearDown(window)

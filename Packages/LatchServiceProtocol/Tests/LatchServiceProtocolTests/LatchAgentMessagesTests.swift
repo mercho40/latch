@@ -29,6 +29,10 @@ final class LatchAgentMessagesTests: XCTestCase {
             .setSessionMode(runtimeID: id, modeID: "ask"),
             .resolvePermission(runtimeID: id, requestID: UUID(), outcome: .selected(optionID: "allow-once")),
             .resolvePermission(runtimeID: id, requestID: UUID(), outcome: .cancelled),
+            .resolveElicitation(runtimeID: id, requestID: UUID(), response: ACPElicitationResponse(
+                action: .accept, content: ["question_0": .string("SQLite"), "question_1": .array([.string("a"), .string("b")])]
+            )),
+            .resolveElicitation(runtimeID: id, requestID: UUID(), response: .cancelled),
         ]
 
         for command in commands {
@@ -76,6 +80,7 @@ final class LatchAgentMessagesTests: XCTestCase {
             .sessionModelSet(runtimeID: id, sequence: 4),
             .sessionModeSet(runtimeID: id, sequence: 5),
             .permissionResolved(runtimeID: id, requestID: UUID()),
+            .elicitationResolved(runtimeID: id, requestID: UUID()),
         ]
 
         for response in responses {
@@ -106,6 +111,12 @@ final class LatchAgentMessagesTests: XCTestCase {
                 options: [ACPPermissionOption(optionId: "allow-once", name: "Allow", kind: "allow_once")]
             )),
             .permissionClosed(runtimeID: id, requestID: UUID()),
+            .elicitationRequested(runtimeID: id, requestID: UUID(), request: ACPElicitationRequest(
+                sessionId: "session-1", message: "Which?",
+                requestedSchema: .object(["type": .string("object"), "properties": .object([:])]), toolCallId: "call-2",
+                meta: .object(["k": .string("v")])
+            )),
+            .elicitationClosed(runtimeID: id, requestID: UUID()),
         ]
 
         for event in events {

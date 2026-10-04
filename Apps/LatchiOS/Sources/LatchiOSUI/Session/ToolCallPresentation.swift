@@ -14,6 +14,8 @@ struct ToolCallPresentation: Equatable {
     var kind: String?
     /// The call runs a subagent, whose rows are nested under this one.
     var runsSubagent = false
+    /// The agent's own name for the tool, such as Claude Code's `compact`, when the row has a summary.
+    var toolName: String?
 
     init(text: String) {
         let line = Self.firstLine(of: text)
@@ -33,6 +35,7 @@ struct ToolCallPresentation: Equatable {
         if let status = tool.status, !status.isEmpty { self.status = status }
         kind = tool.kind
         runsSubagent = tool.runsSubagent
+        toolName = tool.toolName
     }
 
     private init(title: String, status: String, details: String) {
@@ -96,9 +99,11 @@ struct ToolCallPresentation: Equatable {
     }
 
     /// From the call's kind, as the Mac picks it, or for a row saved without one, or of kind
-    /// `other`, guessed from the title's first word.
+    /// `other`, guessed from the title's first word. Claude Code compacting the conversation
+    /// has a symbol of its own, as on the Mac.
     var symbolName: String {
         if runsSubagent { return "person.2" }
+        if toolName == "compact" { return "arrow.down.right.and.arrow.up.left" }
         switch kind {
         case "read": return "doc.text"
         case "edit": return "pencil"
@@ -151,8 +156,9 @@ struct ToolCallPresentation: Equatable {
             let line = source.substring(with: NSRange(location: position, length: contentEnd - position))
             if line.isEmpty { diffSection = false; diffHunk = false }
             if line.hasPrefix("Diff: ") { diffSection = true; diffHunk = false }
-            if diffSection && line.hasPrefix("@@ ") {
-                diffHunk = true
+            if diffSection && (line.hasPrefix("@@ ") || Self.isDiffAside(line)) {
+                // A hunk's header, and the unchanged lines counted between hunks, are quiet.
+                diffHunk = diffHunk || line.hasPrefix("@@ ")
                 result.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: range)
             } else if diffHunk && (line.hasPrefix("+") || line.hasPrefix("-")) {
                 let color: UIColor = line.hasPrefix("+") ? .systemGreen : .systemRed
@@ -167,6 +173,12 @@ struct ToolCallPresentation: Equatable {
 }
 
 extension ToolCallPresentation {
+    /// A line the diff writes about itself rather than of the file, such as "[12 unchanged
+    /// lines omitted]" or "[No text changes]".
+    static func isDiffAside(_ line: String) -> Bool {
+        line.hasPrefix("[") && line.hasSuffix("]") && (line.hasSuffix(" unchanged lines omitted]") || line.hasSuffix(" changes]"))
+    }
+
     /// The details as shown here: the shared history's headings for the agent's raw input and
     /// output, such as "rawInput (structural JSON preview):", read "Input:" and "Output:".
     /// The history itself, and what the Mac shows, keep theirs.
@@ -224,8 +236,8 @@ extension ChatMessageKind {
     }
 
     @MainActor
-    private static let notices: Set<String> = [
+    private static let notices = Set([
         SessionModel.outputLostWhileClosed, SessionModel.outputLostWhileUnreachable,
         SessionModel.promptNotSent, SessionModel.promptNotSentOverLink, SessionModel.outputLostNotice,
-    ]
+    ]).union(SessionModel.stopNotices.values)
 }

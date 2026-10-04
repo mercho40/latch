@@ -44,6 +44,25 @@ final class SessionConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.effort?.currentValue, "high")
     }
 
+    /// Claude Code's own options beyond model, effort and mode, such as Fast mode, are offered
+    /// under their names, in the agent's order; one with a single choice offers nothing to pick.
+    func testOtherSelectsAreOfferedUnderTheirOwnNames() throws {
+        let options = try json(#"""
+        [{"id":"mode","name":"Mode","type":"select","category":"mode","currentValue":"default","options":[{"value":"default","name":"Manual"},{"value":"plan","name":"Plan"}]},
+         {"id":"fast","name":"Fast mode","type":"select","currentValue":"off","options":[{"value":"off","name":"Off"},{"value":"on","name":"On"}]},
+         {"id":"agent","name":"Agent","type":"select","currentValue":"default","options":[{"value":"default","name":"Default"},{"value":"reviewer","name":"Reviewer"}]},
+         {"id":"lonely","name":"Lonely","type":"select","currentValue":"x","options":[{"value":"x","name":"X"}]},
+         {"id":"flag","name":"Flag","type":"boolean","currentValue":true}]
+        """#)
+        guard case let .array(list) = options else { return XCTFail("An array") }
+        let configuration = SessionConfiguration(configOptions: list)
+        XCTAssertEqual(configuration.permissionMode?.route, .config("mode"))
+        XCTAssertEqual(configuration.extras.map(\.name), ["Fast mode", "Agent"])
+        XCTAssertEqual(configuration.extras.first?.route, .config("fast"))
+        XCTAssertEqual(configuration.extras.first?.currentValue, "off")
+        XCTAssertEqual(configuration.extras.first?.choices.map(\.name), ["Off", "On"])
+    }
+
     func testCategoryIsAuthoritativeAndAbsentCategorySupportsKnownIDs() {
         for id in ["effort", "reasoning_effort", "thought_level"] {
             XCTAssertEqual(SessionConfiguration(configOptions: [select(id: id)]).effort?.route, .config(id))

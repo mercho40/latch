@@ -15,12 +15,13 @@ import UIKit
 enum UIFixture {
     static let argument = "--ui-fixture"
     /// A conversation from its end, and from its reply's start; a turn streaming, with Stop;
-    /// the composer with photos, and suggesting slash commands; a permission request; the
-    /// link lost mid-turn; a server that cannot be reached; a new session with nothing in it
-    /// yet; a turn with thinking, two subagents and a plan, one subagent open, and with the
-    /// plan open instead; and on iPad, the split view with the list beside the session.
-    static let sessionScreens = ["conversation", "markdown", "streaming", "photos", "slash", "permission",
-                                 "reconnecting", "error", "empty", "subagents", "plan", "split"]
+    /// the composer with photos, and suggesting slash commands; a permission request; Claude
+    /// Code's questions, and its plan waiting for approval; the link lost mid-turn; a server
+    /// that cannot be reached; a new session with nothing in it yet; a turn with thinking, two
+    /// subagents and a plan, one subagent open, and with the plan open instead; and on iPad,
+    /// the split view with the list beside the session.
+    static let sessionScreens = ["conversation", "markdown", "streaming", "photos", "slash", "permission", "question",
+                                 "plan-approval", "reconnecting", "error", "empty", "subagents", "plan", "split"]
 
     static var requestedScreen: String? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -160,7 +161,7 @@ enum UIFixture {
         let messages: [ChatMessage] = switch screen {
         case "empty", "photos", "slash": []
         case "streaming", "reconnecting": [SampleConversation.prompt, SampleConversation.read]
-        case "permission": [SampleConversation.prompt]
+        case "permission", "question", "plan-approval": [SampleConversation.prompt]
         case "subagents", "plan": SampleSubagents.messages
         default: SampleConversation.messages
         }
@@ -190,6 +191,10 @@ enum UIFixture {
         let model = session.model
         if screen == "error" { return }
         await until { model.phase == .ready }
+        // A conversation under way has used some of the context; the streaming one most of it.
+        if !messages.isEmpty {
+            client.usage(used: screen == "streaming" ? 168_400 : 62_300, size: 200_000, cost: screen == "streaming" ? 2.86 : 0.41)
+        }
         switch screen {
         case "markdown":
             await until { screenController.transcript.order.count == messages.count }
@@ -239,6 +244,11 @@ enum UIFixture {
             screenController.send()
             await until { client.hasOpenTurn }
             client.requestPermission(title: "rm -rf .build && swift build", command: "rm -rf .build && swift build")
+        case "question", "plan-approval":
+            type("Fix the reconnect test", in: screenController)
+            screenController.send()
+            await until { client.hasOpenTurn }
+            if screen == "question" { client.ask() } else { client.requestPlanApproval() }
         default:
             break
         }

@@ -49,6 +49,16 @@ public struct LatchRemotePendingPermission: Codable, Equatable, Sendable {
     }
 }
 
+public struct LatchRemotePendingElicitation: Codable, Equatable, Sendable {
+    public var requestID: UUID
+    public var request: ACPElicitationRequest
+
+    public init(requestID: UUID, request: ACPElicitationRequest) {
+        self.requestID = requestID
+        self.request = request
+    }
+}
+
 /// How the runtime's session was bound, with the agent's reply.
 public enum LatchRemoteSessionBinding: Equatable, Sendable {
     case new(ACPNewSessionResponse)
@@ -110,6 +120,9 @@ public struct LatchRemoteRuntimeRecord: Codable, Equatable, Sendable {
     public var turns: [LatchRemoteTurnRecord]
     /// In the order they were raised.
     public var pendingPermissions: [LatchRemotePendingPermission]
+    /// The agent's questions waiting for an answer, in the order asked. Left out when there
+    /// are none, and by older servers, which never broker any.
+    public var pendingElicitations: [LatchRemotePendingElicitation]?
     public var lastSequence: UInt64
     /// The ACP `localSequence` of the `loadSession` reply. The history the load replayed is at
     /// or below it, journaled as `sessionUpdate` marked `replay`; servers before that mark
@@ -131,6 +144,7 @@ public struct LatchRemoteRuntimeRecord: Codable, Equatable, Sendable {
         activeTurnID: UUID? = nil,
         turns: [LatchRemoteTurnRecord] = [],
         pendingPermissions: [LatchRemotePendingPermission] = [],
+        pendingElicitations: [LatchRemotePendingElicitation]? = nil,
         lastSequence: UInt64 = 0,
         loadedThrough: UInt64? = nil
     ) {
@@ -148,6 +162,7 @@ public struct LatchRemoteRuntimeRecord: Codable, Equatable, Sendable {
         self.activeTurnID = activeTurnID
         self.turns = turns
         self.pendingPermissions = pendingPermissions
+        self.pendingElicitations = pendingElicitations
         self.lastSequence = lastSequence
         self.loadedThrough = loadedThrough
     }
@@ -159,6 +174,7 @@ public struct LatchRemoteRuntimeSummary: Codable, Equatable, Sendable {
     public var workspace: String
     public var lifecycle: LatchRemoteLifecycle
     public var activeTurnID: UUID?
+    /// Requests waiting for the user: permission decisions and the agent's questions.
     public var pendingPermissionCount: Int
     public var lastSequence: UInt64
     /// What the runtime's first turn asked, cut to one short line, so a device that did not

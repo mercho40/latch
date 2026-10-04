@@ -2,7 +2,8 @@
 /// An ACP agent in `sh` for remote sessions. Every `case` matches one JSON key, never two:
 /// Latch's encoder orders keys differently in every process. The prompt's text picks the
 /// turn; a load replays `earlier question`, `earlier answer` and a tool row, as a saved
-/// conversation; `prompts.log`, `decisions.log` and `loads.log` count what reached the agent, and
+/// conversation; a `question` turn asks which database, as Claude Code's AskUserQuestion does,
+/// and says what came back; `prompts.log`, `decisions.log`, `answers.log` and `loads.log` count what reached the agent, and
 /// `slow.log`, `asked.log`, `tools.log`, `flood.log` and `deluge.log` when a turn got that far. A `fail-new`
 /// file fails session/new. The `tools` and `flood` turns hold after their first output until
 /// a `go` file appears, and exit with status 3 if a `die` file appears first; so does a load,
@@ -23,6 +24,9 @@ public enum RemoteMockAgent {
     hold() { n=0; while [ ! -f go ]; do if [ -f die ] || ! kill -0 "$PPID" 2>/dev/null || [ $n -ge 1200 ]; then exit 3; fi; n=$((n+1)); sleep 0.05; done; }
     ask() {
       printf '%s\n' '{"jsonrpc":"2.0","id":900,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1","title":"Edit file"},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+    }
+    question() {
+      printf '%s\n' '{"jsonrpc":"2.0","id":901,"method":"elicitation/create","params":{"sessionId":"session-1","mode":"form","message":"Which database?","toolCallId":"call-q","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"Postgres","title":"Postgres"},{"const":"SQLite","title":"SQLite"}]},"question_0_custom":{"type":"string","title":"Other","_meta":{"_askUserQuestionCustomAnswer":{"questionId":"question_0","isCustomAnswer":true}}}}}}}'
     }
     while IFS= read -r line; do
       id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -62,8 +66,17 @@ public enum RemoteMockAgent {
             *flood*) chunk start; hold; i=0
               while [ $i -lt 40 ]; do chunk "$(printf '%0300d' $i)"; i=$((i+1)); done
               chunk end; echo done >> flood.log; reply "$id" '{"stopReason":"end_turn"}' ;;
+            *question*) chunk asking; question ;;
             *) chunk one; chunk two; chunk three; reply "$id" '{"stopReason":"end_turn"}' ;;
           esac ;;
+        *\"id\":901[,}]*)
+          echo answer >> answers.log
+          case "$line" in
+            *SQLite*) chunk " chose SQLite" ;;
+            *decline*) chunk " skipped" ;;
+            *) chunk " refused" ;;
+          esac
+          reply "$prompt_id" '{"stopReason":"end_turn"}' ;;
         *\"id\":900[,}]*)
           echo decision >> decisions.log
           case "$line" in

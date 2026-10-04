@@ -358,7 +358,7 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertTrue(sheet.sheetPresentationController?.prefersGrabberVisible ?? false)
         sheet.loadViewIfNeeded()
         XCTAssertEqual(sheet.optionButtons.map { $0.configuration?.title }, ["Allow Once", "Always Allow", "Reject Once"])
-        XCTAssertTrue(sheet.optionButtons.allSatisfy { $0.configuration?.cornerStyle == .capsule })
+        XCTAssertEqual(Set(sheet.optionButtons.map { $0.configuration?.cornerStyle }).count, 1)
         XCTAssertEqual(Set(sheet.optionButtons.map { $0.configuration?.background.backgroundColor }).count, 1,
                        "Every option has the same look: none is the default")
         XCTAssertEqual(Set(sheet.optionButtons.map { $0.configuration?.baseForegroundColor }).count, 1)
@@ -442,7 +442,7 @@ final class SessionDetailViewControllerTests: XCTestCase {
         window.addSubview(sheet.view)
         sheet.view.layoutIfNeeded()
         sheet.view.layoutIfNeeded()
-        XCTAssertFalse(sheet.optionsArePinned, "The options follow the request instead of covering it")
+        XCTAssertFalse(sheet.actionsArePinned, "The options follow the request instead of covering it")
         let scroll = try XCTUnwrap(sheet.view.subviews.first { $0 is UIScrollView } as? UIScrollView)
         XCTAssertGreaterThan(scroll.bounds.height, window.bounds.height * 0.5)
         let first = try XCTUnwrap(sheet.optionButtons.first)
@@ -485,8 +485,8 @@ final class SessionDetailViewControllerTests: XCTestCase {
         let sections = menu.children.compactMap { $0 as? UIMenu }
         XCTAssertEqual(sections.count, 3)
         let pickers = sections[0].children.compactMap { $0 as? UIMenu }
-        XCTAssertEqual(pickers.map(\.title), ["Model", "Effort", "Permission Mode"])
-        XCTAssertEqual(pickers.map(\.subtitle), ["Sonnet", "Medium", "Ask First"])
+        XCTAssertEqual(pickers.map(\.title), ["Model", "Effort", "Permission Mode", "Fast mode"])
+        XCTAssertEqual(pickers.map(\.subtitle), ["Sonnet", "Medium", "Ask First", "Off"])
         let group = try XCTUnwrap(pickers[0].children.first as? UIMenu)
         XCTAssertEqual(group.title, "Claude")
         XCTAssertTrue(group.options.contains(.displayInline))

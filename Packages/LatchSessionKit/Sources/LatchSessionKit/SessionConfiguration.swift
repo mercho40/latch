@@ -8,6 +8,9 @@ public struct SessionPicker: Equatable, Sendable {
     public var currentValue: String
     public let choices: [Choice]
     public let description: String?
+    /// The agent's name for the option, such as "Fast mode": shown for the options that are
+    /// none of the three with places of their own.
+    public var name: String? = nil
 
     public struct Choice: Equatable, Sendable {
         public let value: String
@@ -22,6 +25,8 @@ public struct SessionConfiguration: Equatable, Sendable {
     public var model: SessionPicker?
     public var effort: SessionPicker?
     public var permissionMode: SessionPicker?
+    /// The agent's other choices, in its order, such as Claude Code's Fast mode or a custom agent.
+    public var extras: [SessionPicker] = []
 
     public init(configOptions: [ACPJSONValue]? = nil, models: ACPJSONValue? = nil, modes: ACPJSONValue? = nil) {
         let options = configOptions ?? []
@@ -52,6 +57,20 @@ public struct SessionConfiguration: Equatable, Sendable {
                   let choices = Self.choices(options) else { return nil }
             return SessionPicker(route: .config(id), currentValue: current,
                                  choices: choices, description: Self.string(option["description"]))
+        }
+        // Every other select the agent offers, each under its own name.
+        extras = objects.compactMap { option in
+            guard Self.kind(of: .object(option)) == nil,
+                  let id = Self.string(option["id"]), idCounts[id] == 1,
+                  Self.string(option["type"]) == "select",
+                  let name = Self.string(option["name"]),
+                  let current = Self.string(option["currentValue"]),
+                  case let .array(options) = option["options"],
+                  let choices = Self.choices(options), choices.count > 1 else { return nil }
+            var picker = SessionPicker(route: .config(id), currentValue: current, choices: choices,
+                                       description: Self.string(option["description"]))
+            picker.name = name
+            return picker
         }
         // Modern snapshots do not describe an independently active legacy model.
         // Any modern model candidate supersedes it, even if parsing fails closed.

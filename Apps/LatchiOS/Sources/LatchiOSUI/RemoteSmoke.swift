@@ -223,6 +223,31 @@ enum RemoteSmoke {
             guard lines(in: "decisions.log") == 1 else { throw Failure("the agent heard \(lines(in: "decisions.log")) decisions") }
             pass("\(device): permission sheet answered with the agent's own option")
 
+            try await send("Ask a question please", in: screen)
+            var question: QuestionViewController?
+            try await until("the question sheet") {
+                question = screen.questionSheet
+                return question?.viewIfLoaded?.window != nil && question?.isBeingPresented == false
+            }
+            guard let question, question.form.message == "Which database?",
+                  let options = question.optionButtons["question_0"], options.count == 2,
+                  let other = question.textFields["question_0_custom"] else {
+                throw Failure("the question sheet did not ask the agent's question with its two options and an Other box")
+            }
+            // An answer typed under Other gives way to the option chosen after it.
+            other.text = "MySQL"
+            other.sendActions(for: .editingChanged)
+            options[1].sendActions(for: .primaryActionTriggered)
+            guard options[1].isSelected, other.text?.isEmpty == true, question.submitButton.isEnabled else {
+                throw Failure("choosing SQLite did not take the place of the answer typed under Other")
+            }
+            question.submitButton.sendActions(for: .primaryActionTriggered)
+            try await until("the answer to reach the agent") {
+                screen.questionSheet == nil && model.phase == .ready && model.messages.last?.text == "asking chose SQLite"
+            }
+            guard lines(in: "answers.log") == 1 else { throw Failure("the agent heard \(lines(in: "answers.log")) answers") }
+            pass("\(device): question sheet answered with the agent's own option")
+
             try await send("Go slow", in: screen)
             try await until("the slow turn's first words") { model.phase == .prompting && model.messages.last?.text == "one" }
             for client in connector.liveClients { client.dropConnectionForTesting() }
@@ -240,8 +265,9 @@ enum RemoteSmoke {
             }
             try await until("the banner gone") { !screen.banner.isShowing }
             let texts = model.messages.map(\.text)
-            guard texts == ["Say hello", "onetwothree", "Ask permission", "askingallowed", "Go slow", "onetwothree"],
-                  lines(in: "prompts.log") == 3, screen.transcript.order.count == texts.count else {
+            guard texts == ["Say hello", "onetwothree", "Ask permission", "askingallowed", "Ask a question please",
+                            "asking chose SQLite", "Go slow", "onetwothree"],
+                  lines(in: "prompts.log") == 4, screen.transcript.order.count == texts.count else {
                 throw Failure("the turn did not survive the dropped link exactly once: \(texts), "
                     + "\(lines(in: "prompts.log")) prompts, \(screen.transcript.order.count) rows")
             }
@@ -283,7 +309,7 @@ enum RemoteSmoke {
             _ = try await connection.request(.newSession(runtimeID: runtimeID), timeout: .seconds(20))
             _ = try await connection.request(.prompt(runtimeID: runtimeID, turnID: UUID(), blocks: [.text("Outside hello")]),
                                              timeout: .seconds(20))
-            try await until("the other runtime's turn to reach its agent") { lines(in: "prompts.log") == 4 }
+            try await until("the other runtime's turn to reach its agent") { lines(in: "prompts.log") == 5 }
 
             // On iPhone the list is under the session; back to it, as the back button goes.
             if root.isCollapsed { root.show(.primary) }

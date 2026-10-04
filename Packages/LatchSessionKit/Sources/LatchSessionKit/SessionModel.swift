@@ -68,6 +68,8 @@ public final class SessionModel {
     public private(set) var linkState = SessionLinkState.connected
 
     public let permissions = PermissionQueue()
+    /// The agent's questions, such as Claude Code's AskUserQuestion, one shown at a time.
+    public let questions = QuestionQueue()
     private var sessionID: String?
     /// Agent-owned context identity survives runtime teardown. Local runtime IDs are never
     /// persisted; remote ones are, in `remoteBinding`, because the server outlives the app.
@@ -92,7 +94,7 @@ public final class SessionModel {
     private var client: AgentServiceClient
     private let makeClient: @MainActor () -> AgentServiceClient
     private var eventTask: Task<Void, Never>?
-    /// Brokered permission decisions in flight, keyed by the service's request ID.
+    /// Brokered permission decisions and questions in flight, keyed by the service's request ID.
     private var permissionTasks: [UUID: Task<Void, Never>] = [:]
     private var runtimeID: AgentRuntimeID?
     /// The turn `send` is waiting for, or one an attach found running, under the ID a server
@@ -211,6 +213,14 @@ public final class SessionModel {
     /// The agent's plan for the work in hand, as it last listed it; empty when it has none.
     public private(set) var plan: [ACPPlanEntry] = []
     private var planSequence: UInt64 = 0
+    /// How much of its context the agent has used, and what the conversation has cost, as it
+    /// last said; nil until it says.
+    public private(set) var usage: ContextUsage?
+    private var usageSequence: UInt64 = 0
+    /// The agent's own title for the conversation, such as the one Claude Code writes after
+    /// a turn; nil until it gives one.
+    public private(set) var agentTitle: String?
+    private var agentTitleSequence: UInt64 = 0
     /// Unlike the configuration's, this starts from zero rather than the session reply's
     /// position: the reply carries no commands, so a list sent just before it is still the newest.
     private var commandsSequence: UInt64 = 0
@@ -240,6 +250,7 @@ public final class SessionModel {
         self.makeClient = makeClient
         client = makeClient()
         permissions.onChange = { [weak self] in self?.onChange?() }
+        questions.onChange = { [weak self] in self?.onChange?() }
         startEventTask()
     }
 
@@ -325,7 +336,7 @@ public final class SessionModel {
         sessionID = nil
         clearConfiguration()
         cancellationRequested = false
-        permissions.cancelAll()
+        cancelRequests()
         permissionTasks.values.forEach { $0.cancel() }
         permissionTasks.removeAll()
         phase = .disconnected
@@ -672,7 +683,7 @@ public final class SessionModel {
         generation = UUID()
         permissionTasks.values.forEach { $0.cancel() }
         permissionTasks.removeAll()
-        permissions.cancelAll()
+        cancelRequests()
         runtimeID = nil
         forgetRemoteRuntime()
         savedBinding = binding
@@ -851,8 +862,17 @@ public final class SessionModel {
     /// Only offered values may be sent, and one change must finish before another prompt or change.
     /// Keep the confirmed selection until the agent acknowledges; errors leave it unchanged.
     public func select(_ kind: SessionPicker.Kind, value: String) async {
+        await select(configuration[kind], value: value)
+    }
+
+    /// One of the agent's other options, such as Claude Code's Fast mode, by its ID.
+    public func select(option configID: String, value: String) async {
+        await select(configuration.extras.first { $0.route == .config(configID) }, value: value)
+    }
+
+    private func select(_ picker: SessionPicker?, value: String) async {
         guard phase == .ready, !isChangingConfiguration, let id = runtimeID,
-              let picker = configuration[kind], value != picker.currentValue,
+              let picker, value != picker.currentValue,
               picker.choices.contains(where: { $0.value == value }) else { return }
         let token = generation
         isChangingConfiguration = true
@@ -1021,6 +1041,11 @@ public final class SessionModel {
         switch result {
         case let .success(.promptCompleted(_, response)):
             status = response.stopReason == "cancelled" ? "Cancelled" : "Ready · \(response.stopReason)"
+            // A turn cut short says why, in the transcript where its reply stops.
+            if let notice = Self.stopNotice(response.stopReason) {
+                history.appendNotice(notice)
+                publishHistory()
+            }
         case .success:
             break
         case let .failure(error):
@@ -1032,13 +1057,22 @@ public final class SessionModel {
         phase = .ready
         lastActiveAt = now()
         cancellationRequested = false
-        permissions.cancelAll()
+        cancelRequests()
         if let foreign = foreignTurn, runtimeIsRemote, let runtimeID {
             foreignTurn = nil
             followTurn(foreign.turn, runtimeID: runtimeID, boundary: foreign.boundary)
         }
         onChange?()
     }
+
+    /// What a turn cut short says where its reply stops, by the agent's stop reason.
+    public static let stopNotices: [String: String] = [
+        "max_tokens": "The reply stopped at the agent’s length limit.",
+        "max_turn_requests": "The turn stopped at the agent’s limit of steps.",
+        "refusal": "The agent declined to go on.",
+    ]
+
+    static func stopNotice(_ stopReason: String) -> String? { stopNotices[stopReason] }
 
     private static func requiresAuthentication(_ error: any Error) -> Bool {
         (error as? ACPJSONRPCErrorObject)?.code == -32000 || (error as? LatchAgentFailure)?.code == .authenticationRequired
@@ -1055,7 +1089,7 @@ public final class SessionModel {
         forgetRemoteRuntime()
         sessionID = nil
         clearConfiguration()
-        permissions.cancelAll()
+        cancelRequests()
         permissionTasks.values.forEach { $0.cancel() }
         permissionTasks.removeAll()
         cancellationRequested = false
@@ -1083,7 +1117,7 @@ public final class SessionModel {
         guard phase == .prompting, !cancellationRequested, endingTurn == nil, let id = runtimeID else { return }
         let token = generation
         cancellationRequested = true
-        permissions.cancelAll()
+        cancelRequests()
         status = "Cancelling…"
         onChange?()
         do { _ = try await client.execute(.cancelPrompt(runtimeID: id)) }
@@ -1105,7 +1139,7 @@ public final class SessionModel {
         forgetRemoteRuntime()
         sessionID = nil
         clearConfiguration()
-        permissions.cancelAll()
+        cancelRequests()
         interruptedPrompt = nil
         phase = .stopping
         status = "Stopping…"
@@ -1145,8 +1179,36 @@ public final class SessionModel {
         permissionTasks[requestID] = task
     }
 
+    /// The agent's questions travel like its requests, and the answer goes back the same way.
+    private func handleQuestion(_ request: ACPElicitationRequest, runtimeID: AgentRuntimeID, requestID: UUID) {
+        guard permissionTasks[requestID] == nil else { return }
+        // As for requests: another client's turn's question is theirs to answer.
+        if client.isRemote, phase != .prompting || endingTurn != nil { return }
+        let token = promptGeneration
+        let task = Task { @MainActor [weak self] in
+            var response = ACPElicitationResponse.cancelled
+            if let self, self.runtimeID == runtimeID, request.sessionId == self.sessionID,
+               self.phase == .prompting, !self.cancellationRequested {
+                let answered = await self.questions.ask(request)
+                if self.runtimeID == runtimeID, self.promptGeneration == token,
+                   self.phase == .prompting, !self.cancellationRequested { response = answered }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.permissionTasks[requestID] = nil
+            // The service may already have closed it (prompt ended); that failure is expected.
+            _ = try? await self.client.execute(.resolveElicitation(runtimeID: runtimeID, requestID: requestID, response: response))
+        }
+        permissionTasks[requestID] = task
+    }
+
     private func closePermission(requestID: UUID) {
         permissionTasks.removeValue(forKey: requestID)?.cancel()
+    }
+
+    /// Decisions and questions alike end with the turn they belong to.
+    private func cancelRequests() {
+        permissions.cancelAll()
+        questions.cancelAll()
     }
 
     /// A session update from this Mac's service is in, shown or not: a local turn's end may be
@@ -1197,6 +1259,10 @@ public final class SessionModel {
         case let .permissionRequested(id, requestID, request) where id == runtimeID:
             handlePermissionRequest(request, runtimeID: id, requestID: requestID)
         case let .permissionClosed(id, requestID) where id == runtimeID:
+            closePermission(requestID: requestID)
+        case let .elicitationRequested(id, requestID, request) where id == runtimeID:
+            handleQuestion(request, runtimeID: id, requestID: requestID)
+        case let .elicitationClosed(id, requestID) where id == runtimeID:
             closePermission(requestID: requestID)
         case let .processTerminated(id, status) where id == runtimeID:
             resetAfterLoss(status: "Agent exited (\(status))",
@@ -1388,6 +1454,10 @@ public final class SessionModel {
         commandsSequence = 0
         plan = []
         planSequence = 0
+        usage = nil
+        usageSequence = 0
+        // Each agent process counts from one; the title itself stands until the next.
+        agentTitleSequence = 0
         acceptsImages = false
     }
 
@@ -1402,6 +1472,22 @@ public final class SessionModel {
             guard notification.localSequence.map({ $0 > commandsSequence }) ?? true else { return }
             commandsSequence = notification.localSequence ?? commandsSequence
             commands = list
+            onChange?()
+            return
+        }
+        if case let .usage(raw) = notification.event, let usage = ContextUsage(raw) {
+            guard notification.localSequence.map({ $0 > usageSequence }) ?? true else { return }
+            usageSequence = notification.localSequence ?? usageSequence
+            self.usage = usage
+            onChange?()
+            return
+        }
+        if case let .other("session_info_update", payload) = notification.event,
+           case let .object(info) = payload, case let .string(title)? = info["title"] {
+            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, notification.localSequence.map({ $0 > agentTitleSequence }) ?? true else { return }
+            agentTitleSequence = notification.localSequence ?? agentTitleSequence
+            agentTitle = String(trimmed.prefix(200))
             onChange?()
             return
         }
@@ -1454,7 +1540,8 @@ private extension LatchAgentEvent {
     var runtimeID: AgentRuntimeID {
         switch self {
         case let .sessionUpdate(id, _), let .standardError(id, _), let .processTerminated(id, _),
-             let .permissionRequested(id, _, _), let .permissionClosed(id, _): id
+             let .permissionRequested(id, _, _), let .permissionClosed(id, _),
+             let .elicitationRequested(id, _, _), let .elicitationClosed(id, _): id
         }
     }
 }

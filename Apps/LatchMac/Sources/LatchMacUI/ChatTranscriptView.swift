@@ -851,6 +851,8 @@ private final class TranscriptMessageView: NSView {
     /// A symbol for what kind of thing a call does, from ACP's kinds; a subagent's has its own.
     static func symbolName(for tool: ToolSummary?, title: String = "") -> String {
         if tool?.runsSubagent == true { return "person.2" }
+        // Claude Code compacting the conversation, shown as a call of its own.
+        if tool?.toolName == "compact" { return "arrow.down.right.and.arrow.up.left" }
         return switch tool?.kind ?? Self.guessedKind(title) {
         case "read": "doc.text"
         case "edit": "pencil"
@@ -868,7 +870,7 @@ private final class TranscriptMessageView: NSView {
     /// A row saved before calls carried their kind says it by its title's first word, as
     /// Claude Code's titles do: "Read …", "Edit …", "Search …".
     static func guessedKind(_ title: String) -> String? {
-        switch title.prefix { !$0.isWhitespace }.lowercased() {
+        switch title.prefix(while: { !$0.isWhitespace }).lowercased() {
         case "read", "view", "list": "read"
         case "edit", "write", "update", "create": "edit"
         case "delete", "remove": "delete"

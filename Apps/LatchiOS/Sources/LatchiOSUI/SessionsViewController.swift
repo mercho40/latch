@@ -237,8 +237,9 @@ final class SessionsViewController: UICollectionViewController {
         let waiting = runtimes.filter { $0.pendingPermissionCount > 0 }.count
         var content = UIListContentConfiguration.valueCell()
         content.text = "On \(serverName(serverID))"
+        // The server counts requests and questions together, so the row cannot say which.
         let state: SessionRowStatus? = if waiting > 0 {
-            SessionRowStatus(mark: .waiting, text: "Needs approval", spoken: "Needs approval")
+            SessionRowStatus(mark: .waiting, text: "Waiting for you", spoken: "Waiting for you")
         } else if runtimes.contains(where: { $0.activeTurnID != nil }) {
             SessionRowStatus(mark: .working, text: "Working…", spoken: "Working")
         } else { nil }
@@ -533,7 +534,7 @@ final class SessionsViewController: UICollectionViewController {
         cell.contentConfiguration = content
         var accessories: [UICellAccessory] = []
         let state: SessionRowStatus? = if runtime.pendingPermissionCount > 0 {
-            SessionRowStatus(mark: .waiting, text: "Needs approval", spoken: "Needs approval")
+            SessionRowStatus(mark: .waiting, text: "Waiting for you", spoken: "Waiting for you")
         } else if runtime.activeTurnID != nil {
             SessionRowStatus(mark: .working, text: "Working…", spoken: "Working")
         } else { nil }
@@ -772,6 +773,11 @@ final class SessionsViewController: UICollectionViewController {
         if session.needsApproval {
             // The decision is made on the session's screen, where the request shows whole.
             actions.append(UIAccessibilityCustomAction(name: "Review Request…") { [weak self] _ in
+                self?.onOpen?(session)
+                return true
+            })
+        } else if session.asksQuestion {
+            actions.append(UIAccessibilityCustomAction(name: "Answer Question…") { [weak self] _ in
                 self?.onOpen?(session)
                 return true
             })

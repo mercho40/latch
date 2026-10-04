@@ -419,6 +419,98 @@ final class RemoteSessionReattachTests: XCTestCase {
         XCTAssertEqual(model.status, "Prompt failed")
         XCTAssertEqual(client.awaited, [])
     }
+
+    // MARK: A turn's answer before its last events
+
+    /// The answer to a turn travels apart from its events and can arrive first. The turn goes
+    /// on until the events the answer names are in, Stop meanwhile has nothing left to stop,
+    /// and the turn ends, and is announced, with all of them.
+    func testATurnsAnswerWaitsForTheEventsItNames() async throws {
+        let client = TrailingRemoteClient()
+        let model = SessionModel(makeClient: { client })
+        await model.connect(remote: .custom("agent"), path: "/srv/app")
+        let ended = model.turnsEnded
+        var atEnd: [String]?
+        model.onChange = { [weak model] in
+            guard let model, atEnd == nil, model.turnsEnded > ended else { return }
+            atEnd = model.messages.map(\.text)
+        }
+        let sending = Task { await model.send("go") }
+        try await eventually("the first words") { model.appliedSequence == 2 }
+        client.answer()
+        try await eventually("the answer held") { model.turnEndIsWaiting }
+        XCTAssertEqual(model.phase, .prompting)
+        XCTAssertEqual(model.status, "Working…")
+        XCTAssertEqual(model.turnsEnded, ended)
+        await model.cancel()
+        XCTAssertEqual(client.cancels, 0)
+
+        client.deliverRest()
+        await sending.value
+        XCTAssertEqual(texts(model), ["go", "readingdone"])
+        XCTAssertEqual(atEnd, ["go", "readingdone"])
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.status, "Ready · end_turn")
+        XCTAssertEqual(model.turnsEnded, ended + 1)
+        XCTAssertNil(model.turnID)
+        XCTAssertFalse(model.turnEndIsWaiting)
+    }
+
+    /// With the events in before the answer, the turn ends with the answer.
+    func testATurnsAnswerAfterItsEventsEndsTheTurnAtOnce() async throws {
+        let client = TrailingRemoteClient()
+        let model = SessionModel(makeClient: { client })
+        await model.connect(remote: .custom("agent"), path: "/srv/app")
+        let sending = Task { await model.send("go") }
+        try await eventually("the first words") { model.appliedSequence == 2 }
+        client.deliverRest()
+        try await eventually("the last events") { model.appliedSequence == 4 }
+        XCTAssertEqual(model.phase, .prompting)
+        client.answer()
+        await sending.value
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(texts(model), ["go", "readingdone"])
+        XCTAssertFalse(model.turnEndIsWaiting)
+    }
+
+    /// Another client's turn, followed from here, ends the same way.
+    func testAFollowedTurnsAnswerWaitsForTheEventsItNames() async throws {
+        let client = TrailingRemoteClient()
+        let model = SessionModel(makeClient: { client })
+        await model.connect(remote: .custom("agent"), path: "/srv/app")
+        let ended = model.turnsEnded
+        client.startOtherTurn()
+        try await eventually("the other turn followed") {
+            client.awaited == [TrailingRemoteClient.otherTurn] && model.appliedSequence == 2
+        }
+        client.answer()
+        try await eventually("the answer held") { model.turnEndIsWaiting }
+        XCTAssertEqual(model.phase, .prompting)
+        XCTAssertEqual(model.turnID, TrailingRemoteClient.otherTurn)
+        XCTAssertEqual(model.turnsEnded, ended)
+
+        client.deliverRest()
+        try await eventually("the turn's end") { model.phase == .ready }
+        XCTAssertEqual(texts(model), ["theirs", "readingdone"])
+        XCTAssertEqual(model.turnsEnded, ended + 1)
+    }
+
+    /// Detaching while an answer waits for its events lets go of it without ending the turn.
+    func testDetachingLetsGoOfAnAnswerWaitingForItsEvents() async throws {
+        let client = TrailingRemoteClient()
+        let model = SessionModel(makeClient: { client })
+        await model.connect(remote: .custom("agent"), path: "/srv/app")
+        let ended = model.turnsEnded
+        let sending = Task { await model.send("go") }
+        try await eventually("the first words") { model.appliedSequence == 2 }
+        client.answer()
+        try await eventually("the answer held") { model.turnEndIsWaiting }
+        await model.detach()
+        await sending.value
+        XCTAssertFalse(model.turnEndIsWaiting)
+        XCTAssertEqual(model.phase, .disconnected)
+        XCTAssertEqual(model.turnsEnded, ended)
+    }
 }
 
 extension RemoteSessionReattachTests {
@@ -587,6 +679,114 @@ private final class BusyRemoteClient: AgentServiceClient {
     }
 
     var transportDescription: String { "remote test double" }
+}
+
+/// A server whose answer to a turn overtakes the turn's last events, which travel apart from
+/// it: the turn starts and says "reading", the test answers it, and only then delivers "done"
+/// and `turnEnded`, at the sequences 3 and 4 the answer names.
+private final class TrailingRemoteClient: AgentServiceClient {
+    static let otherTurn = UUID()
+    let events: AsyncStream<LatchAgentEvent>
+    let remoteEvents: AsyncStream<RemoteServiceEvent>?
+    var isRemote: Bool { true }
+    private let lifetime: AsyncStream<LatchAgentEvent>.Continuation
+    private let continuation: AsyncStream<RemoteServiceEvent>.Continuation
+    private struct State {
+        var runtimeID: AgentRuntimeID?
+        var turn: UUID?
+        var answer: CheckedContinuation<Void, Never>?
+        var answered = false
+        var awaited: [UUID] = []
+        var cancels = 0
+    }
+    private let state = Mutex(State())
+
+    init() {
+        (events, lifetime) = AsyncStream.makeStream()
+        let (stream, continuation) = AsyncStream<RemoteServiceEvent>.makeStream()
+        remoteEvents = stream
+        self.continuation = continuation
+    }
+
+    var awaited: [UUID] { state.withLock { $0.awaited } }
+    var cancels: Int { state.withLock { $0.cancels } }
+
+    /// Another client's turn starts, and says "reading".
+    func startOtherTurn() {
+        let id = state.withLock { $0.runtimeID! }
+        continuation.yield(.turnStarted(runtimeID: id, turnID: Self.otherTurn, text: "theirs", attachments: [], sequence: 1))
+        continuation.yield(Self.chunk("reading", runtimeID: id, 2))
+    }
+
+    func answer() {
+        let waiter = state.withLock { state in
+            state.answered = true
+            defer { state.answer = nil }
+            return state.answer
+        }
+        waiter?.resume()
+    }
+
+    /// What the server journaled of the turn before its answer.
+    func deliverRest() {
+        let (id, turn) = state.withLock { ($0.runtimeID!, $0.turn!) }
+        continuation.yield(Self.chunk("done", runtimeID: id, 3))
+        continuation.yield(.turnEnded(runtimeID: id, turnID: turn, sequence: 4))
+    }
+
+    func launch(_ launch: AgentLaunch, id: AgentRuntimeID) async throws -> LatchAgentResponse {
+        state.withLock { $0.runtimeID = id }
+        return .runtimeStarted(runtimeID: id, initialization: ACPInitializeResponse(protocolVersion: 1, agentCapabilities: .init()))
+    }
+
+    func endOfTurn(runtimeID id: AgentRuntimeID, turnID: UUID, sending blocks: [ACPPromptBlock]?) async -> TurnEnd {
+        state.withLock { state in
+            state.turn = turnID
+            if blocks == nil { state.awaited.append(turnID) }
+        }
+        if blocks != nil {
+            continuation.yield(.turnStarted(runtimeID: id, turnID: turnID, text: "go", attachments: [], sequence: 1))
+            continuation.yield(Self.chunk("reading", runtimeID: id, 2))
+        }
+        await withCheckedContinuation { waiter in
+            let answered = state.withLock { state in
+                if !state.answered { state.answer = waiter }
+                return state.answered
+            }
+            if answered { waiter.resume() }
+        }
+        return TurnEnd(.success(.promptCompleted(runtimeID: id, response: ACPPromptResponse(stopReason: "end_turn"))),
+                       journaledThrough: 4)
+    }
+
+    func execute(_ command: LatchAgentCommand) async throws -> LatchAgentResponse {
+        switch command {
+        case let .newSession(id, _):
+            return .sessionCreated(runtimeID: id, session: ACPNewSessionResponse(sessionId: "remote-session"))
+        case let .cancelPrompt(id):
+            state.withLock { $0.cancels += 1 }
+            return .promptCancellationRequested(runtimeID: id)
+        case let .stopRuntime(id):
+            return .runtimeStopped(runtimeID: id)
+        default:
+            throw LatchAgentFailure(code: .commandFailed, message: "Unexpected command")
+        }
+    }
+
+    func close() {
+        continuation.finish()
+        lifetime.finish()
+        answer()
+    }
+
+    var transportDescription: String { "remote test double" }
+
+    private static func chunk(_ text: String, runtimeID id: AgentRuntimeID, _ sequence: UInt64) -> RemoteServiceEvent {
+        .agent(.sessionUpdate(runtimeID: id, notification: ACPSessionNotification(sessionId: "remote-session", update: .object([
+            "sessionUpdate": .string("agent_message_chunk"),
+            "content": .object(["type": .string("text"), "text": .string(text)]),
+        ]), localSequence: sequence)), sequence: sequence)
+    }
 }
 
 /// Delivers the one permission request of each prompt twice, as a server can after a

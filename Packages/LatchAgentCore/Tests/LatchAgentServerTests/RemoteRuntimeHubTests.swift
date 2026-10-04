@@ -47,6 +47,76 @@ final class RemoteRuntimeHubTests: XCTestCase {
         }
     }
 
+    /// A turn's reply reaches the hub apart from its updates, and can come first. The turn goes
+    /// on in the record until they are in, a cancel meanwhile has nothing left to cancel, and
+    /// the journal ends the turn after them.
+    func testATurnEndsOnlyOnceTheUpdatesBeforeItsReplyAreIn() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.turnDrainTimeout = .seconds(60)
+        try await withTestbed(configuration: configuration, startsEvents: false) { bed in
+            let id = AgentRuntimeID("held")
+            try await bed.launchWithSession(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            let turnID = UUID()
+            try await bed.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("hello")]))
+            // The agent replies straight after its updates, which wait unread on the service's stream.
+            try await eventually("the prompt") { bed.lines(in: "prompts.log") == 1 }
+            try await Task.sleep(for: .milliseconds(300))
+            let running = try await bed.record(id)
+            XCTAssertEqual(running.activeTurnID, turnID)
+            try await bed.expect(.cancelPrompt(runtimeID: id), returns: .cancelRequested)
+
+            await bed.hub.start()
+            let ended = LatchRemoteEvent.turnEnded(turnID: turnID, stopReason: "end_turn", error: nil)
+            let frames = try await viewer.pull(until: "the turn's end") { $0.contains { $0.event == ended } }
+            XCTAssertEqual(frames.last?.event, ended)
+            XCTAssertEqual(frames.chunkTexts, ["one", "two", "three"])
+            let record = try await bed.record(id)
+            XCTAssertNil(record.activeTurnID)
+            XCTAssertEqual(record.turns, [LatchRemoteTurnRecord(turnID: turnID, state: .ended, stopReason: "end_turn")])
+        }
+    }
+
+    /// Updates that never arrive hold a turn's end only so long.
+    func testATurnsEndWaitsForItsUpdatesOnlySoLong() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.turnDrainTimeout = .milliseconds(200)
+        try await withTestbed(configuration: configuration, startsEvents: false) { bed in
+            let id = AgentRuntimeID("drain-timeout")
+            try await bed.launchWithSession(id)
+            let turnID = UUID()
+            try await bed.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("hello")]))
+            try await bed.waitForIdle(id, through: 2)
+            let record = try await bed.record(id)
+            XCTAssertEqual(record.turns, [LatchRemoteTurnRecord(turnID: turnID, state: .ended, stopReason: "end_turn")])
+        }
+    }
+
+    /// A runtime stopped while its turn's end waits for the turn's updates ends the turn as the
+    /// agent answered it, not as one cut short, before `exited`.
+    func testStoppingWhileATurnsEndWaitsEndsItAsTheAgentAnswered() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.turnDrainTimeout = .seconds(60)
+        try await withTestbed(configuration: configuration, startsEvents: false) { bed in
+            let id = AgentRuntimeID("held-stop")
+            try await bed.launchWithSession(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            let turnID = UUID()
+            try await bed.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("hello")]))
+            try await eventually("the prompt") { bed.lines(in: "prompts.log") == 1 }
+            try await Task.sleep(for: .milliseconds(300))
+
+            try await bed.expect(.stopRuntime(runtimeID: id), returns: .stopped)
+            let frames = try await viewer.pull(until: "the exit") { frames in
+                frames.contains { if case .exited = $0.event { true } else { false } }
+            }
+            XCTAssertEqual(frames.filter(\.isTurnEnded).map(\.event), [.turnEnded(turnID: turnID, stopReason: "end_turn", error: nil)])
+            XCTAssertEqual(frames.last?.event, .exited(LatchRemoteExit(status: nil, stopped: true)))
+        }
+    }
+
     func testPulledLinesAreTheFramesEncodingWouldProduce() async throws {
         try await withTestbed { bed in
             let id = AgentRuntimeID("bytes")

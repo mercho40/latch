@@ -101,11 +101,17 @@ public struct LatchRemoteTurnOutcome: Equatable, Sendable {
     public var stopReason: String?
     /// Set when the turn failed, including `runtimeExited` when its runtime ended first.
     public var error: LatchRemoteError?
+    /// The last sequence the channel had delivered on `events` when it learned of this end:
+    /// the `turnEnded` event itself, the event that completed an attach's backlog when the
+    /// record said so, or the attach's cursor when there was none. The outcome travels apart
+    /// from the events, so whoever shows the turn takes in this much before ending it.
+    public var deliveredThrough: UInt64
 
-    public init(turnID: UUID, stopReason: String?, error: LatchRemoteError?) {
+    public init(turnID: UUID, stopReason: String?, error: LatchRemoteError?, deliveredThrough: UInt64 = 0) {
         self.turnID = turnID
         self.stopReason = stopReason
         self.error = error
+        self.deliveredThrough = deliveredThrough
     }
 }
 

@@ -24,6 +24,9 @@ public struct RemoteRuntimeHubConfiguration: Sendable {
     /// replayed, when nothing it has received shows that all of it is in. What the hub itself
     /// publishes for the runtime meanwhile waits too, so that it follows the history.
     public var replayDrainTimeout: Duration = .seconds(1)
+    /// How long after a turn's reply the hub waits for the session updates the agent sent
+    /// before it, should one of them never arrive. The turn runs on until they are in.
+    public var turnDrainTimeout: Duration = .seconds(1)
     /// Exited runtimes whose record stays attachable, and whose IDs cannot be reused.
     public var retainedExitedRuntimes = 8
     public var retainedTurns = 64
@@ -369,10 +372,14 @@ public actor RemoteRuntimeHub {
         guard var state = runtimes[id] else { return }
         let before = journal.lastSequence(of: id)
         if let turnID = state.activeTurnID {
-            let error = LatchRemoteError.runtimeExited
-            state.endTurn(turnID, stopReason: nil, error: error)
+            // One the agent had answered, held for its last updates, ends as the agent said.
+            let held = state.heldTurnEnd?.turnID == turnID ? state.heldTurnEnd : nil
+            let stopReason = held?.stopReason
+            let error: LatchRemoteError? = if let held { held.error } else { .runtimeExited }
+            state.heldTurnEnd = nil
+            state.endTurn(turnID, stopReason: stopReason, error: error)
             runtimes[id] = state
-            publish(.turnEnded(turnID: turnID, stopReason: nil, error: error), for: id)
+            publish(.turnEnded(turnID: turnID, stopReason: stopReason, error: error), for: id)
         }
         for pending in state.pendingPermissions {
             publish(.permissionClosed(requestID: pending.requestID), for: id)
@@ -541,33 +548,59 @@ public actor RemoteRuntimeHub {
         // Not tied to any connection: the turn runs to its end whoever is listening.
         let incarnation = state.incarnation
         Task { [service] in
-            let outcome: (stopReason: String?, error: LatchRemoteError?)
+            let outcome: (stopReason: String?, error: LatchRemoteError?, updatesThrough: UInt64?)
             do {
                 guard case let .promptCompleted(_, response) = try await service.execute(.prompt(runtimeID: id, blocks: blocks)) else {
                     throw HubError.unexpectedResponse
                 }
-                outcome = (response.stopReason, nil)
+                outcome = (response.stopReason, nil, response.updatesThrough)
             } catch {
-                outcome = (nil, Self.turnError(for: error))
+                outcome = (nil, Self.turnError(for: error), nil)
             }
-            self.endTurn(id, turnID: turnID, incarnation: incarnation, stopReason: outcome.stopReason, error: outcome.error)
+            self.endTurn(id, turnID: turnID, incarnation: incarnation, stopReason: outcome.stopReason, error: outcome.error,
+                         after: outcome.updatesThrough)
         }
         return .success(.promptAccepted(turnID: turnID))
     }
 
-    private func endTurn(_ id: AgentRuntimeID, turnID: UUID, incarnation: UInt64, stopReason: String?, error: LatchRemoteError?) {
+    /// The reply reaches the hub through none of the streams the turn's updates take, and can
+    /// come first: with `updatesThrough` past what has been taken in, the turn runs on until
+    /// that update is journaled, so `turnEnded` follows everything the agent said in it.
+    private func endTurn(_ id: AgentRuntimeID, turnID: UUID, incarnation: UInt64, stopReason: String?, error: LatchRemoteError?,
+                         after updatesThrough: UInt64? = nil) {
         // An exit or stop already ended it.
         guard var state = runtimes[id], state.incarnation == incarnation, state.lifecycle != .exited,
               state.activeTurnID == turnID else { return }
+        if let through = updatesThrough, state.updatesThrough < through {
+            state.heldTurnEnd = HeldTurnEnd(turnID: turnID, stopReason: stopReason, error: error, through: through)
+            runtimes[id] = state
+            let timeout = configuration.turnDrainTimeout
+            Task { [weak self] in
+                try? await Task.sleep(for: timeout)
+                await self?.endHeldTurn(id, turnID: turnID)
+            }
+            return
+        }
+        state.heldTurnEnd = nil
         state.endTurn(turnID, stopReason: stopReason, error: error)
         runtimes[id] = state
         publish(.turnEnded(turnID: turnID, stopReason: stopReason, error: error), for: id)
     }
 
-    /// Idempotent: with no turn running there is nothing to cancel.
+    /// Ends a turn held for its last updates: they are in, or the wait is over. With a
+    /// `turnID`, only that turn's.
+    private func endHeldTurn(_ id: AgentRuntimeID, turnID: UUID? = nil) {
+        guard let state = runtimes[id], let held = state.heldTurnEnd, turnID.map({ $0 == held.turnID }) ?? true else { return }
+        endTurn(id, turnID: held.turnID, incarnation: state.incarnation, stopReason: held.stopReason, error: held.error)
+    }
+
+    /// Idempotent: with no turn running there is nothing to cancel, nor with one the agent has
+    /// answered whose last updates are on their way.
     private func cancelTurn(_ id: AgentRuntimeID) async -> LatchRemoteReplyResult {
         guard let state = runtimes[id] else { return .failure(.runtimeNotFound) }
-        guard state.lifecycle != .exited, let turnID = state.activeTurnID else { return .success(.cancelRequested) }
+        guard state.lifecycle != .exited, let turnID = state.activeTurnID, state.heldTurnEnd == nil else {
+            return .success(.cancelRequested)
+        }
         do {
             _ = try await runService(.cancelPrompt(runtimeID: id))
         } catch {
@@ -600,6 +633,9 @@ public actor RemoteRuntimeHub {
         switch event {
         case let .sessionUpdate(id, notification):
             guard runtimes[id]?.lifecycle != .exited, runtimes[id] != nil else { return }
+            if let sequence = notification.localSequence {
+                runtimes[id]!.updatesThrough = max(runtimes[id]!.updatesThrough, sequence)
+            }
             runtimes[id]!.remember(notification)
             if case .binding(.load, _, _) = runtimes[id]!.binding {
                 // Most likely history the load is replaying; `bindingResult` decides.
@@ -615,6 +651,7 @@ public actor RemoteRuntimeHub {
             if isHistory { publishReplayed(notification, for: id) }
             if let sequence, runtimes[id]!.replayDrain?.isComplete(through: sequence) == true { endReplayDrain(id) }
             if !isHistory { publish(.sessionUpdate(notification: notification), for: id) }
+            if let held = runtimes[id]!.heldTurnEnd, runtimes[id]!.updatesThrough >= held.through { endHeldTurn(id) }
 
         case let .standardError(id, data):
             standardError?(id, data)
@@ -933,6 +970,10 @@ private struct RuntimeState {
     var sessionState: [String: ACPSessionNotification] = [:]
     var configurationSets: [LatchRemoteConfigurationRoute: LatchRemoteConfigurationSet] = [:]
     var activeTurnID: UUID?
+    /// The active turn once the agent has answered it, until its last updates are in.
+    var heldTurnEnd: HeldTurnEnd?
+    /// The latest connection sequence of a session update taken in.
+    var updatesThrough: UInt64 = 0
     var turns: [LatchRemoteTurnRecord] = []
     var pendingPermissions: [LatchRemotePendingPermission] = []
     /// From the first turn whose prompt had text.
@@ -999,6 +1040,15 @@ private struct HeldUpdate {
         self.encodedReplay = fitsAFrame ? encodedReplay : Data()
         byteCount = encodedReplay.count
     }
+}
+
+/// See `RemoteRuntimeHub.endTurn`.
+private struct HeldTurnEnd {
+    let turnID: UUID
+    let stopReason: String?
+    let error: LatchRemoteError?
+    /// The reply's `updatesThrough`.
+    let through: UInt64
 }
 
 /// See `RemoteRuntimeHub.beginReplayDrain`.

@@ -88,7 +88,7 @@ final class LatchAgentXPCClientTests: XCTestCase {
         }
         XCTAssertEqual(closedID, requestID)
         let completed = try await prompt.value
-        XCTAssertEqual(completed, .promptCompleted(runtimeID: id, response: ACPPromptResponse(stopReason: "end_turn")))
+        XCTAssertEqual(completed, .promptCompleted(runtimeID: id, response: ACPPromptResponse(stopReason: "end_turn", updatesThrough: 0)))
         _ = try await client.request(.stopRuntime(id: id))
 
         await host.shutdown()

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 public struct ACPImplementation: Codable, Equatable, Sendable {
     public let name: String
@@ -238,6 +239,7 @@ public actor ACPClient {
     private struct EmptyResponse: Decodable, Sendable {}
 
     public nonisolated let sessionUpdates: AsyncStream<ACPSessionNotification>
+    private let updateProgress: UpdateProgress
 
     private let connection: ACPJSONRPCConnection
     private var state = State.idle
@@ -249,19 +251,22 @@ public actor ACPClient {
         self.connection = connection
         let pair = AsyncStream<ACPSessionNotification>.makeStream()
         self.sessionUpdates = pair.stream
+        let progress = UpdateProgress()
+        self.updateProgress = progress
 
         Task {
             for await notification in connection.notifications {
-                guard notification.method == "session/update", let params = notification.params else {
-                    continue
+                var update: ACPSessionNotification?
+                if notification.method == "session/update", let params = notification.params {
+                    update = try? Self.decodeSessionValue(
+                        params, sequence: notification.sequence, as: ACPSessionNotification.self
+                    )
                 }
-                if let update = try? Self.decodeSessionValue(
-                    params, sequence: notification.sequence, as: ACPSessionNotification.self
-                ) {
-                    pair.continuation.yield(update)
-                }
+                if let update { pair.continuation.yield(update) }
+                progress.took(notification.sequence, update: update != nil)
             }
             pair.continuation.finish()
+            progress.finish()
         }
     }
 
@@ -437,9 +442,16 @@ public actor ACPClient {
             sessionId: activeSessionID,
             prompt: blocks.map(\.content)
         )
-        return try await connection.request(
+        let received = try await connection.requestWithSequence(
             "session/prompt",
-            params: try ACPJSONValue.encode(request)
+            params: try ACPJSONValue.encode(request),
+            as: ACPJSONValue.self
+        )
+        // The turn's last updates may still be on their way to `sessionUpdates`; the reply says
+        // where they end once they are all there.
+        let updatesThrough = await updateProgress.lastUpdate(through: received.notifiedThrough)
+        return try Self.decodeSessionValue(
+            received.response, sequence: updatesThrough, key: "updatesThrough", as: ACPPromptResponse.self
         )
     }
 
@@ -484,18 +496,83 @@ public actor ACPClient {
     private nonisolated static func decodeSessionValue<Value: Decodable>(
         _ value: ACPJSONValue,
         sequence: UInt64,
+        key: String = "localSequence",
         as type: Value.Type
     ) throws -> Value {
         guard case var .object(object) = value else {
             return try value.decode(type)
         }
-        object["localSequence"] = try ACPJSONValue.encode(sequence)
+        object[key] = try ACPJSONValue.encode(sequence)
         return try ACPJSONValue.object(object).decode(type)
     }
 
     private func requireInitialized() throws {
         guard case .initialized = state else {
             throw ACPClientError.initializeRequired
+        }
+    }
+}
+
+/// How far `ACPClient`'s notification task has got: the last notification it took, and the
+/// updates it passed on. A reply waits here until every notification before it has been
+/// taken, so the update it names is on `sessionUpdates` already.
+final class UpdateProgress: Sendable {
+    private struct State {
+        var taken: UInt64 = 0
+        /// The updates passed on most recently, oldest first, for a reply that asks after the
+        /// task has moved on past it.
+        var recentUpdates: [UInt64] = []
+        /// The newest update no longer in `recentUpdates`, or zero.
+        var olderUpdate: UInt64 = 0
+        var finished = false
+        var waiters: [(through: UInt64, continuation: CheckedContinuation<UInt64, Never>)] = []
+
+        /// The last update at or before `sequence`. Past the recent ones, the newest older
+        /// update stands in: one already passed on, if perhaps later than asked.
+        func lastUpdate(through sequence: UInt64) -> UInt64 {
+            recentUpdates.last { $0 <= sequence } ?? olderUpdate
+        }
+    }
+
+    static let recentLimit = 64
+    private let state = Mutex(State())
+
+    func took(_ sequence: UInt64, update: Bool) {
+        let ready = state.withLock { state in
+            state.taken = sequence
+            if update {
+                state.recentUpdates.append(sequence)
+                if state.recentUpdates.count > Self.recentLimit { state.olderUpdate = state.recentUpdates.removeFirst() }
+            }
+            let ready = state.waiters.filter { $0.through <= sequence }
+            state.waiters.removeAll { $0.through <= sequence }
+            return ready.map { ($0.continuation, state.lastUpdate(through: $0.through)) }
+        }
+        for (continuation, lastUpdate) in ready { continuation.resume(returning: lastUpdate) }
+    }
+
+    /// The connection closed: nothing more will be taken.
+    func finish() {
+        let waiters = state.withLock { state in
+            state.finished = true
+            defer { state.waiters = [] }
+            return state.waiters.map { ($0.continuation, state.lastUpdate(through: $0.through)) }
+        }
+        for (continuation, lastUpdate) in waiters { continuation.resume(returning: lastUpdate) }
+    }
+
+    /// The last update passed on at or before `sequence`, once the notification there, and so
+    /// every one before it, has been taken.
+    func lastUpdate(through sequence: UInt64) async -> UInt64 {
+        await withCheckedContinuation { continuation in
+            let lastUpdate: UInt64? = state.withLock { state in
+                guard state.finished || state.taken >= sequence else {
+                    state.waiters.append((sequence, continuation))
+                    return nil
+                }
+                return state.lastUpdate(through: sequence)
+            }
+            if let lastUpdate { continuation.resume(returning: lastUpdate) }
         }
     }
 }

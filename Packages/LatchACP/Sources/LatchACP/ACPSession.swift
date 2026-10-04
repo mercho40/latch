@@ -36,14 +36,23 @@ public struct ACPTextContent: Codable, Equatable, Sendable {
 public struct ACPPromptResponse: Codable, Equatable, Sendable {
     public let stopReason: String
     public let meta: ACPJSONValue?
+    /// Where the turn's session updates end, in the connection's ingress sequence: the last
+    /// update `ACPClient` put on `sessionUpdates` before this reply came in, or zero if there
+    /// was none; it is there by the time the reply is returned. The reply and the updates
+    /// travel separately, so whoever relays both waits for this one before ending the turn.
+    /// Set by `ACPClient`, which replaces any value on the wire; nil where no connection
+    /// answered, such as a server's account of a turn.
+    public let updatesThrough: UInt64?
 
-    public init(stopReason: String, meta: ACPJSONValue? = nil) {
+    public init(stopReason: String, meta: ACPJSONValue? = nil, updatesThrough: UInt64? = nil) {
         self.stopReason = stopReason
         self.meta = meta
+        self.updatesThrough = updatesThrough
     }
 
     private enum CodingKeys: String, CodingKey {
         case stopReason
+        case updatesThrough
         case meta = "_meta"
     }
 }

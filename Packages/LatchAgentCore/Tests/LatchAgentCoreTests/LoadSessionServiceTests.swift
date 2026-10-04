@@ -38,7 +38,8 @@ final class LoadSessionServiceTests: XCTestCase {
             XCTAssertEqual(notification.sessionId, "saved")
             XCTAssertEqual(notification.localSequence, 2)
             let continued = try await service.execute(.prompt(runtimeID: id, text: "continue mock session"))
-            XCTAssertEqual(continued, .promptCompleted(runtimeID: id, response: ACPPromptResponse(stopReason: "end_turn")))
+            // This turn says nothing, so its updates end where the load's history did.
+            XCTAssertEqual(continued, .promptCompleted(runtimeID: id, response: ACPPromptResponse(stopReason: "end_turn", updatesThrough: 2)))
             await service.shutdown()
         } catch {
             await service.shutdown()

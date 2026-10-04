@@ -75,7 +75,7 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         second.event(3, .turnEnded(turnID: turnID, stopReason: "end_turn", error: nil))
 
         let result = try await outcome
-        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil))
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil, deliveredThrough: 3))
         assertEqual(try await observer.events.next(), .reattached(LatchRemoteAttachment(record: record, backlogFrom: 3, truncated: false)))
         assertEqual(try await observer.events.next(), .event(sequence: 3, .turnEnded(turnID: turnID, stopReason: "end_turn", error: nil)))
         _ = try await observer.waitForLink { $0 == .connected }
@@ -104,7 +104,7 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         second.event(2, .turnEnded(turnID: turnID, stopReason: nil, error: failure))
 
         let result = try await outcome
-        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: nil, error: failure))
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: nil, error: failure, deliveredThrough: 2))
     }
 
     func testReconnectingElsewhereCarriesThePromptTheCursorAndTheTurnOver() async throws {
@@ -128,7 +128,7 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         second.reply(resent.id, .promptAccepted(turnID: turnID))
         second.event(2, .turnEnded(turnID: turnID, stopReason: "end_turn", error: nil))
         let result = try await outcome
-        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil))
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil, deliveredThrough: 2))
         XCTAssertEqual(channel.linkState, .connected)
         // The old connection's late reply changes nothing.
         first.reply(unanswered.id, .promptAccepted(turnID: turnID))
@@ -243,7 +243,7 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         second.event(81, .permissionClosed(requestID: later))
 
         let result = try await outcome
-        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "cancelled", error: nil))
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "cancelled", error: nil, deliveredThrough: 81))
         assertEqual(try await observer.events.next(), .reattached(LatchRemoteAttachment(record: record, backlogFrom: 5, truncated: true)))
         assertEqual(try await observer.events.next(), .gap)
         assertEqual(try await observer.events.next(), .event(sequence: 80, .permissionClosed(requestID: turnID)))
@@ -278,7 +278,7 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         second.event(3, .turnEnded(turnID: turnID, stopReason: "end_turn", error: nil))
 
         let (result, deliveredWhenReturned) = try await outcome
-        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil))
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil, deliveredThrough: 3))
         // The turn's events, its end included, were delivered before prompt() returned.
         XCTAssertEqual(deliveredWhenReturned, 3)
     }
@@ -529,6 +529,42 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         XCTAssertEqual(channel.lastDeliveredSequence, 2)
     }
 
+    /// An attach whose record shows a turn ended, with nothing after its cursor, places the end
+    /// at that cursor, which a session attaching from there has taken in already.
+    func testATurnEndedInAnAttachsRecordIsPlacedAtItsCursor() async throws {
+        let channel = channel!
+        let turnID = UUID()
+        let ended = LatchRemoteTurnRecord(turnID: turnID, state: .ended, stopReason: "end_turn")
+        _ = try await attached(after: 9, record: Fixture.record(turns: [ended], lastSequence: 7))
+        let result = try await withTimeout { try await channel.awaitTurn(turnID) }
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil, deliveredThrough: 7))
+    }
+
+    /// A reattach whose record shows the turn ended, after the journal lost everything since the
+    /// cursor, places the end where the events had got to: nothing more of the turn is coming.
+    func testATurnEndedWhileItsJournalWasEvictedIsPlacedAtTheOldCursor() async throws {
+        let channel = channel!
+        let turnID = UUID()
+        let first = try await attached(record: Fixture.record(activeTurnID: turnID))
+        async let outcome = withTimeout { try await channel.awaitTurn(turnID) }
+        let closed = UUID()
+        first.event(1, .turnStarted(turnID: turnID, text: "x", attachments: []))
+        first.event(2, .permissionClosed(requestID: closed))
+        assertEqual(try await observer.nextEvent(), .event(sequence: 1, .turnStarted(turnID: turnID, text: "x", attachments: [])))
+        assertEqual(try await observer.nextEvent(), .event(sequence: 2, .permissionClosed(requestID: closed)))
+        first.drop()
+
+        let second = try await server.nextConnection()
+        try await second.acceptHello()
+        let reattach = try await second.nextRequest()
+        XCTAssertEqual(reattach.command, .attach(runtimeID: Fixture.runtimeID, after: 2))
+        let ended = LatchRemoteTurnRecord(turnID: turnID, state: .ended, stopReason: "end_turn")
+        second.reply(reattach.id, .attached(record: Fixture.record(turns: [ended], lastSequence: 9), backlogFrom: 10, truncated: true))
+
+        let result = try await outcome
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil, deliveredThrough: 2))
+    }
+
     func testATurnThatEndsBeforeItsResentPromptIsAcceptedStillCompletes() async throws {
         let channel = channel!
         let turnID = UUID()
@@ -549,7 +585,7 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         second.reply(resent.id, .promptAccepted(turnID: turnID))
 
         let result = try await outcome
-        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil))
+        XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil, deliveredThrough: 2))
     }
 
     func testCommandsWaitForTheReattachReply() async throws {

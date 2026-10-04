@@ -164,12 +164,13 @@ public final class ACPJSONRPCConnection: Sendable {
         try await requestWithSequence(method, params: params, as: resultType).response
     }
 
-    /// Returns the response and its connection-local ingress sequence, assigned before delivery.
+    /// Returns the response and its connection-local ingress sequence, assigned before delivery,
+    /// with the sequence of the last notification that came in before it (zero if none has).
     public func requestWithSequence<Result: Decodable & Sendable>(
         _ method: String,
         params: ACPJSONValue? = nil,
         as resultType: Result.Type = Result.self
-    ) async throws -> (response: Result, sequence: UInt64) {
+    ) async throws -> (response: Result, sequence: UInt64, notifiedThrough: UInt64) {
         let pending = try await core.makePendingRequest(method: method, params: params)
 
         do {
@@ -194,7 +195,7 @@ public final class ACPJSONRPCConnection: Sendable {
             }
         }
 
-        return (try value.response.decode(resultType), value.sequence)
+        return (try value.response.decode(resultType), value.sequence, value.notifiedThrough)
     }
 
     public func notify(_ method: String, params: ACPJSONValue? = nil) async throws {
@@ -305,7 +306,7 @@ private extension ACPJSONRPCID {
 }
 
 private extension ACPJSONRPCConnection {
-    typealias SequencedResponse = (response: ACPJSONValue, sequence: UInt64)
+    typealias SequencedResponse = (response: ACPJSONValue, sequence: UInt64, notifiedThrough: UInt64)
 
     struct PendingRequest: Sendable {
         let id: ACPJSONRPCID
@@ -323,6 +324,7 @@ private extension ACPJSONRPCConnection {
         private var state = State.idle
         private var nextRequestID: Int64 = 1
         private var ingressSequence: UInt64 = 0
+        private var lastNotificationSequence: UInt64 = 0
         private var pendingRequests: [
             ACPJSONRPCID: AsyncThrowingStream<SequencedResponse, Error>.Continuation
         ] = [:]
@@ -423,6 +425,7 @@ private extension ACPJSONRPCConnection {
                     return ACPJSONRPCRequest(id: id, method: method, params: object["params"])
                 }
 
+                lastNotificationSequence = ingressSequence
                 notificationContinuation.yield(
                     ACPJSONRPCNotification(method: method, params: object["params"], sequence: ingressSequence)
                 )
@@ -461,7 +464,7 @@ private extension ACPJSONRPCConnection {
                 return nil
             }
 
-            continuation.yield((response: result, sequence: ingressSequence))
+            continuation.yield((response: result, sequence: ingressSequence, notifiedThrough: lastNotificationSequence))
             continuation.finish()
             return nil
         }

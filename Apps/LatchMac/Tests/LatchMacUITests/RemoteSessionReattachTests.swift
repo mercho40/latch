@@ -350,7 +350,6 @@ final class RemoteSessionReattachTests: XCTestCase {
         try await LoopbackServer.run { server in
             try await WindowFixture.run { fixture in
                 let (window, session) = try await firstRun(fixture, server)
-                // The turn's end can overtake its last chunks.
                 await session.model.send("hello")
                 try await fixture.settle { self.texts(session.model) == ["hello", "onetwothree"] }
                 await session.model.send("again")
@@ -463,7 +462,10 @@ final class RemoteSessionReattachTests: XCTestCase {
                 try await fixture.settle({ server.lines(in: "flood.log") == 1 }, timeout: 10)
 
                 let relaunched = try await relaunch(fixture, server)
-                try await fixture.settle({ self.texts(relaunched.model).last?.hasSuffix("end") == true }, timeout: 15)
+                // The turn ends at its `turnEnded`, just after its last words.
+                try await fixture.settle({
+                    self.texts(relaunched.model).last?.hasSuffix("end") == true && relaunched.model.phase == .ready
+                }, timeout: 15)
                 let texts = texts(relaunched.model)
                 XCTAssertEqual(Array(texts.prefix(3)), ["flood please", "start", Self.lostNotice],
                                "The saved transcript stays, and the gap is marked")
@@ -512,7 +514,6 @@ final class RemoteSessionReattachTests: XCTestCase {
             try await WindowFixture.run { fixture in
                 let (window, session) = try await firstRun(fixture, server)
                 await session.model.send("hello")
-                // The turn's end can overtake its last chunks.
                 try await fixture.settle { self.texts(session.model) == ["hello", "onetwothree"] }
                 let id = try await server.onlyRuntime()
                 XCTAssertEqual(session.savedSession.remote?.runtimeID, id.rawValue)

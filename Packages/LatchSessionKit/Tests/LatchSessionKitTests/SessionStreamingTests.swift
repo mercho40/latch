@@ -68,6 +68,48 @@ final class SessionStreamingTests: XCTestCase {
         XCTAssertEqual(model.messages, finalHistory)
     }
 
+    /// A local turn's reply can overtake its last updates on their way through the service. The
+    /// turn goes on until the update the reply names is in, and ends with it.
+    @MainActor func testALocalTurnEndsOnceTheUpdateItsReplyNamesIsIn() async throws {
+        let started = expectation(description: "Prompt started")
+        let client = StreamingClient(promptStarted: started)
+        let model = await connected(client)
+        let runtimeValue = await client.runtime
+        let runtime = try XCTUnwrap(runtimeValue)
+        var atReady: [String]?
+        model.onChange = { if atReady == nil, model.phase == .ready { atReady = model.messages.map(\.text) } }
+        defer { model.onChange = nil }
+
+        let prompt = Task { await model.send("Question") }
+        await fulfillment(of: [started], timeout: 3)
+        await client.text(runtime, "Hello", sequence: 12)
+        await drain(client, runtime: runtime)
+        await client.completePrompt(updatesThrough: 13)
+        try await eventually("the reply held") { model.turnEndIsWaiting }
+        XCTAssertEqual(model.phase, .prompting)
+
+        await client.text(runtime, " world", sequence: 13)
+        await prompt.value
+        XCTAssertEqual(atReady, ["Question", "Hello world"])
+        XCTAssertEqual(model.status, "Ready · end_turn")
+        await model.disconnect()
+    }
+
+    /// Disconnecting while a local turn's reply waits for its last update lets go of it.
+    @MainActor func testDisconnectingLetsGoOfALocalReplyWaitingForItsLastUpdate() async throws {
+        let started = expectation(description: "Prompt started")
+        let client = StreamingClient(promptStarted: started)
+        let model = await connected(client)
+        let prompt = Task { await model.send("Question") }
+        await fulfillment(of: [started], timeout: 3)
+        await client.completePrompt(updatesThrough: 13)
+        try await eventually("the reply held") { model.turnEndIsWaiting }
+        await model.disconnect()
+        await prompt.value
+        XCTAssertFalse(model.turnEndIsWaiting)
+        XCTAssertEqual(model.phase, .disconnected)
+    }
+
     @MainActor func testConfigurationPermissionAndCancelAreStateNotificationsWithoutTranscriptDelay() async throws {
         let started = expectation(description: "Prompt started")
         let client = StreamingClient(promptStarted: started)
@@ -273,11 +315,13 @@ private actor StreamingClient: AgentServiceClient {
             response: ACPSetSessionConfigOptionResponse(configOptions: [], localSequence: 12)))
     }
 
-    func completePrompt(reason: String = "end_turn") {
+    func completePrompt(reason: String = "end_turn", updatesThrough: UInt64? = nil) {
         guard let runtime else { return }
         let pending = pendingPrompt
         pendingPrompt = nil
-        pending?.resume(returning: .promptCompleted(runtimeID: runtime, response: ACPPromptResponse(stopReason: reason)))
+        pending?.resume(returning: .promptCompleted(
+            runtimeID: runtime, response: ACPPromptResponse(stopReason: reason, updatesThrough: updatesThrough)
+        ))
     }
 
     func barrier(runtime: AgentRuntimeID, received: XCTestExpectation) {

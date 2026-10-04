@@ -280,7 +280,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
             if let failure = core.failure { throw failure }
             guard core.attached else { throw LatchRemoteClientError.notAttached }
             if core.exited {
-                shot.finish(.success(Self.exitedOutcome(turnID)))
+                shot.finish(.success(Self.exitedOutcome(turnID, deliveredThrough: core.cursor.last)))
                 return
             }
             core.turnWaiters[turnID, default: [:]][waiterID] = shot
@@ -673,7 +673,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
     private func runtimeExited(_ core: inout Core) {
         core.exited = true
         for turnID in Array(core.turnWaiters.keys) {
-            turnEnded(Self.exitedOutcome(turnID), &core)
+            turnEnded(Self.exitedOutcome(turnID, deliveredThrough: core.cursor.last), &core)
         }
     }
 
@@ -688,8 +688,11 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         }
     }
 
+    /// The first account of a turn's end is the one kept, with where the events had got to.
     private func turnEnded(_ outcome: LatchRemoteTurnOutcome, _ core: inout Core) {
         if core.endedTurns[outcome.turnID] == nil {
+            var outcome = outcome
+            outcome.deliveredThrough = core.cursor.last
             core.endedTurns[outcome.turnID] = outcome
             core.endedTurnOrder.append(outcome.turnID)
             if core.endedTurnOrder.count > Self.endedTurnLimit {
@@ -703,11 +706,12 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         }
     }
 
-    private static func exitedOutcome(_ turnID: UUID) -> LatchRemoteTurnOutcome {
+    private static func exitedOutcome(_ turnID: UUID, deliveredThrough: UInt64) -> LatchRemoteTurnOutcome {
         LatchRemoteTurnOutcome(
             turnID: turnID,
             stopReason: nil,
-            error: LatchRemoteError(code: .runtimeExited, message: "The agent exited before the turn ended.")
+            error: LatchRemoteError(code: .runtimeExited, message: "The agent exited before the turn ended."),
+            deliveredThrough: deliveredThrough
         )
     }
 

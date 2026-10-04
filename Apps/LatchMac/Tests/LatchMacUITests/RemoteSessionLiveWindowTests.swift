@@ -121,8 +121,7 @@ final class RemoteSessionLiveWindowTests: XCTestCase {
                 XCTAssertEqual(session.model.status, "Ready · end_turn")
                 XCTAssertNil(session.model.errorMessage)
                 XCTAssertTrue(session.banner.isHidden)
-                // The turn's outcome and its last events travel separately; wait for the events.
-                try await fixture.settle({ self.texts(session.model).last == "done" }, timeout: 5)
+                // A turn ends only with its events, so they are all in.
                 XCTAssertEqual(texts(session.model), ["tools please", "reading", "Read notes · completed", "done"])
                 let runtime = try await server.onlyRuntime()
                 XCTAssertEqual(runtime, id, "No second agent")

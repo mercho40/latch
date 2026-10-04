@@ -83,6 +83,9 @@ public protocol AgentServiceClient: AnyObject, Sendable {
     /// Waits for a turn that is already running, such as the one an attach's record shows,
     /// and answers as `prompt` does.
     func awaitTurn(runtimeID: AgentRuntimeID, turnID: UUID) async throws -> LatchAgentResponse
+    /// Runs `blocks` as `prompt` does, or without them waits for the running turn as
+    /// `awaitTurn` does, and says where the turn's events end.
+    func endOfTurn(runtimeID: AgentRuntimeID, turnID: UUID, sending blocks: [ACPPromptBlock]?) async -> TurnEnd
     /// Stops following a runtime and leaves it running, for another run of Latch to attach
     /// to. Best effort, and never a stop.
     func detach(runtimeID: AgentRuntimeID) async
@@ -118,9 +121,34 @@ extension AgentServiceClient {
         throw RemoteSessionNotConnected()
     }
 
+    public func endOfTurn(runtimeID: AgentRuntimeID, turnID: UUID, sending blocks: [ACPPromptBlock]?) async -> TurnEnd {
+        do {
+            guard let blocks else { return TurnEnd(.success(try await awaitTurn(runtimeID: runtimeID, turnID: turnID))) }
+            return TurnEnd(.success(try await prompt(runtimeID: runtimeID, turnID: turnID, blocks: blocks)))
+        } catch {
+            return TurnEnd(.failure(error))
+        }
+    }
+
     public func detach(runtimeID: AgentRuntimeID) async {}
 
     public func serverSettingsChangedSinceLastChannel() async -> Bool { false }
+}
+
+/// How a turn ended, as `SessionModel` takes it in. The outcome travels apart from the turn's
+/// events, so the session ends the turn only once it has taken in as many as the end names:
+/// on a server `journaledThrough`, and on this Mac the reply's `updatesThrough`.
+public struct TurnEnd: Sendable {
+    public var result: Result<LatchAgentResponse, any Error>
+    /// The journal sequence `remoteEvents` had delivered when the end was known: what the
+    /// server journaled of the turn comes at or before it. Nil without a journal, or when the
+    /// turn never ended there, as when the server refused the prompt.
+    public var journaledThrough: UInt64?
+
+    public init(_ result: Result<LatchAgentResponse, any Error>, journaledThrough: UInt64? = nil) {
+        self.result = result
+        self.journaledThrough = journaledThrough
+    }
 }
 
 /// The server no longer has the runtime a session was bound to: it restarted, or reaped or

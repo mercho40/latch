@@ -317,7 +317,7 @@ final class RemoteServerTests: XCTestCase {
             try await client.ok(.prompt(runtimeID: id, turnID: second, blocks: [.text("slow")]))
 
             let attach = client.request(.attach(runtimeID: id, after: 0))
-            // A turn's last chunks may follow its `turnEnded`.
+            // The whole second turn: its end, and every chunk before it.
             var ended = false
             var chunks = 0
             let frames = try await client.readFrames(until: "the second turn, whole") { frame in

@@ -81,7 +81,9 @@ public enum LatchRemoteEvent: Equatable, Sendable {
     case permissionRequested(requestID: UUID, request: ACPPermissionRequest)
     case permissionClosed(requestID: UUID)
     case turnStarted(turnID: UUID, text: String, attachments: [LatchRemoteAttachmentSummary])
-    /// Can precede the turn's last few `sessionUpdate`s; clients keep appending after it.
+    /// Follows every `sessionUpdate` the agent sent before it answered the prompt, unless it
+    /// answered with an error, which says nothing of where they end. That, and older servers,
+    /// can leave the last few after it, so clients keep appending after it.
     case turnEnded(turnID: UUID, stopReason: String?, error: LatchRemoteError?)
     case configurationSet(LatchRemoteConfigurationSet)
     /// The last event of a runtime.

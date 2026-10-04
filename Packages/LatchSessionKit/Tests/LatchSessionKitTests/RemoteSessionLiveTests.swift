@@ -443,8 +443,7 @@ final class RemoteSessionLiveTests: XCTestCase {
             await sending.value
             XCTAssertEqual(model.status, "Ready · end_turn")
             XCTAssertNil(model.errorMessage)
-            // The turn's outcome and its last events travel separately; wait for the events.
-            try await eventually("the last chunk") { self.texts(model).last == "done" }
+            // A turn ends only with its events, so they are all in.
             XCTAssertEqual(texts(model), ["tools please", "reading", "Read notes · completed", "done"])
             let runtime = try await server.onlyRuntime()
             XCTAssertEqual(runtime, id)

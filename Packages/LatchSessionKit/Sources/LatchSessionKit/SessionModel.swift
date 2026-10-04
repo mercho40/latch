@@ -100,6 +100,9 @@ public final class SessionModel {
     public private(set) var turnID: UUID?
     /// The last journal sequence of this runtime that has been taken in. Zero on this Mac.
     public private(set) var appliedSequence: UInt64 = 0
+    /// The connection sequence of the last session update taken in from this Mac's service,
+    /// which a local turn's reply names as where its updates end. Zero on a server.
+    private var updatesTakenThrough: UInt64 = 0
     /// A remote runtime this session is not following yet, or no longer: restored with the
     /// session, or kept when Latch quit. The next remote connection attaches to it rather than
     /// launching another.
@@ -126,6 +129,12 @@ public final class SessionModel {
     private var adopting = false
     /// The attach waiting for its record to be taken in, so it returns with the session ready.
     private var attachWaiter: CheckedContinuation<Void, Never>?
+    /// A turn whose outcome came before the events it names were all taken in; see
+    /// `finishTurn`. The step that takes in the last of them ends it.
+    private var endingTurn: (turn: UUID, result: Result<LatchAgentResponse, any Error>, through: UInt64,
+                             resume: CheckedContinuation<Void, Never>)?
+    /// For tests: a turn's outcome is in and its last events are not.
+    var turnEndIsWaiting: Bool { endingTurn != nil }
     /// Where the transcript stood when the running turn began; see `remoteBinding`.
     private var turnBoundary: SavedSession.RemoteBinding?
     /// Turns whose prompts the transcript already shows, so their `turnStarted` is not shown
@@ -187,7 +196,10 @@ public final class SessionModel {
                                           boundaryMessageID: history.messages.last?.id,
                                           showsReplayedHistory: showsReplayedHistory ? true : nil)
     }
-    private var generation = UUID()
+    private var generation = UUID() {
+        // Whatever moved the session on lets go of a turn's end still waiting for its events.
+        didSet { releaseEndingTurn() }
+    }
     private var promptGeneration = UUID()
     private var authenticationStop: (token: UUID, task: Task<Void, Never>)?
     private var configurationSequence: UInt64 = 0
@@ -627,13 +639,9 @@ public final class SessionModel {
             let activity = ProcessInfo.processInfo.beginActivity(
                 options: .userInitiatedAllowingIdleSystemSleep, reason: "Agent prompt in flight")
             defer { ProcessInfo.processInfo.endActivity(activity) }
-            let result: Result<LatchAgentResponse, any Error>
-            do {
-                if let blocks { result = .success(try await client.prompt(runtimeID: id, turnID: turn, blocks: blocks)) }
-                else { result = .success(try await client.awaitTurn(runtimeID: id, turnID: turn)) }
-            } catch { result = .failure(error) }
-            if let blocks { self?.keepIfInterrupted(turn, blocks: blocks, result, prompting: prompting) }
-            await self?.finishTurn(turn, result, generation: token)
+            let end = await client.endOfTurn(runtimeID: id, turnID: turn, sending: blocks)
+            if let blocks { self?.keepIfInterrupted(turn, blocks: blocks, end.result, prompting: prompting) }
+            await self?.finishTurn(turn, end, generation: token)
         }
     }
 
@@ -712,10 +720,11 @@ public final class SessionModel {
         if knownTurns.count > 64 { knownTurns.removeFirst() }
     }
 
-    /// What an attach's record said that shows only once the backlog has delivered everything
-    /// before it: a prompt that never reached the server, and an exit. An `exited` event in the
-    /// backlog shows the exit first, and this finds nothing.
+    /// What shows only once the events before it are taken in: the end of a turn whose outcome
+    /// came first, and what an attach's record said, a prompt that never reached the server and
+    /// an exit. An `exited` event in the backlog shows the exit first, and this finds nothing.
     private func caughtUp() {
+        endTurnIfTakenIn()
         if let unsent = unsentTurn, appliedSequence >= unsent.through {
             unsentTurn = nil
             history.appendNotice(unsent.atQuit ? Self.promptNotSent : Self.promptNotSentOverLink)
@@ -756,6 +765,7 @@ public final class SessionModel {
         sessionID = resumingID
         loadedThroughSequence = nil
         appliedSequence = 0
+        updatesTakenThrough = 0
         // The transcript is this session's own, and a load replays what it already shows.
         showsReplayedHistory = false
         forgetRemoteRuntime()
@@ -927,11 +937,9 @@ public final class SessionModel {
         }
         publishHistory()
         onChange?()
-        let result: Result<LatchAgentResponse, any Error>
-        do { result = .success(try await client.prompt(runtimeID: id, turnID: turn, blocks: blocks)) }
-        catch { result = .failure(error) }
-        keepIfInterrupted(turn, blocks: blocks, result, prompting: prompting)
-        await finishTurn(turn, result, generation: token)
+        let end = await client.endOfTurn(runtimeID: id, turnID: turn, sending: blocks)
+        keepIfInterrupted(turn, blocks: blocks, end.result, prompting: prompting)
+        await finishTurn(turn, end, generation: token)
     }
 
     /// A prompt whose link failed under it may never have reached the server; see
@@ -949,9 +957,14 @@ public final class SessionModel {
 
     /// How a turn ends, whether `send` started it or an attach found it running. Nothing
     /// changes once the session has moved on to another runtime or another turn.
-    private func finishTurn(_ turn: UUID, _ result: Result<LatchAgentResponse, any Error>, generation token: UUID) async {
+    ///
+    /// The outcome travels apart from the turn's events and can overtake the last of them, so
+    /// the turn goes on until those the outcome names are taken in, and is not shown ended, or
+    /// announced, without them. The step that takes in the last one ends it, before anything
+    /// after it. A failure from this Mac's service names none, and ends the turn at once.
+    private func finishTurn(_ turn: UUID, _ end: TurnEnd, generation token: UUID) async {
         guard generation == token, turnID == turn else { return }
-        switch result {
+        switch end.result {
         case .failure(is RemoteTurnInterrupted):
             // The link failed under the turn, not the turn: the session ends next and keeps
             // the turn, where it stands, for a re-attach to follow.
@@ -959,16 +972,55 @@ public final class SessionModel {
         case .failure(is RemoteAgentExited):
             // The runtime's exit follows on the same stream and says how it ended.
             return
-        default:
+        case let .failure(error) where Self.requiresAuthentication(error):
+            // The runtime is stopped at once, and whatever else the turn said goes with it.
             noteTurnEnded()
+            _ = await handleAuthenticationFailure(error)
+            return
+        default:
+            break
         }
+        if let through = eventsThrough(of: end), takenThrough < through {
+            releaseEndingTurn()
+            await withCheckedContinuation { endingTurn = (turn, end.result, through, $0) }
+            return
+        }
+        completeTurn(end.result)
+    }
+
+    /// Where a turn's events end, counted as `takenThrough` counts them.
+    private func eventsThrough(of end: TurnEnd) -> UInt64? {
+        if runtimeIsRemote { return end.journaledThrough }
+        guard case let .success(.promptCompleted(_, response)) = end.result else { return nil }
+        return response.updatesThrough
+    }
+
+    /// How far this session has taken in events: a server's journal, or this Mac's connection
+    /// to the agent.
+    private var takenThrough: UInt64 { runtimeIsRemote ? appliedSequence : updatesTakenThrough }
+
+    /// Ends the turn waiting for its last events once they are in.
+    private func endTurnIfTakenIn() {
+        guard let ending = endingTurn, takenThrough >= ending.through else { return }
+        endingTurn = nil
+        if ending.turn == turnID { completeTurn(ending.result) }
+        ending.resume.resume()
+    }
+
+    private func releaseEndingTurn() {
+        let ending = endingTurn
+        endingTurn = nil
+        ending?.resume.resume()
+    }
+
+    private func completeTurn(_ result: Result<LatchAgentResponse, any Error>) {
+        noteTurnEnded()
         switch result {
         case let .success(.promptCompleted(_, response)):
             status = response.stopReason == "cancelled" ? "Cancelled" : "Ready · \(response.stopReason)"
         case .success:
             break
         case let .failure(error):
-            if await handleAuthenticationFailure(error) { return }
             errorMessage = error.localizedDescription
             status = "Prompt failed"
         }
@@ -985,12 +1037,14 @@ public final class SessionModel {
         onChange?()
     }
 
+    private static func requiresAuthentication(_ error: any Error) -> Bool {
+        (error as? ACPJSONRPCErrorObject)?.code == -32000 || (error as? LatchAgentFailure)?.code == .authenticationRequired
+    }
+
     /// An SDK can cache its account for the life of a session. Never keep a rejected
     /// authenticated session ready, or reselecting its harness would reuse that stale state.
     private func handleAuthenticationFailure(_ error: any Error) async -> Bool {
-        let requiresAuthentication = (error as? ACPJSONRPCErrorObject)?.code == -32000
-            || (error as? LatchAgentFailure)?.code == .authenticationRequired
-        guard requiresAuthentication else { return false }
+        guard Self.requiresAuthentication(error) else { return false }
         let token = UUID()
         generation = token
         let id = runtimeID
@@ -1021,7 +1075,9 @@ public final class SessionModel {
     }
 
     public func cancel() async {
-        guard phase == .prompting, !cancellationRequested, let id = runtimeID else { return }
+        // A turn waiting only for its last events is over where it ran; a cancel now could only
+        // reach the next one, perhaps another client's.
+        guard phase == .prompting, !cancellationRequested, endingTurn == nil, let id = runtimeID else { return }
         let token = generation
         cancellationRequested = true
         permissions.cancelAll()
@@ -1067,7 +1123,8 @@ public final class SessionModel {
         guard permissionTasks[requestID] == nil else { return }
         // Every client of a server's runtime sees its requests. One raised while this session
         // runs no turn belongs to another client's, so it is theirs to answer, not to refuse.
-        if client.isRemote, phase != .prompting { return }
+        // Nor is one taken in while this session's ended turn waits for its last events.
+        if client.isRemote, phase != .prompting || endingTurn != nil { return }
         let token = promptGeneration
         let task = Task { @MainActor [weak self] in
             var outcome = ACPPermissionOutcome.cancelled
@@ -1089,9 +1146,18 @@ public final class SessionModel {
         permissionTasks.removeValue(forKey: requestID)?.cancel()
     }
 
+    /// A session update from this Mac's service is in, shown or not: a local turn's end may be
+    /// waiting for it.
+    private func tookIn(_ notification: ACPSessionNotification) {
+        guard !runtimeIsRemote, let sequence = notification.localSequence else { return }
+        updatesTakenThrough = max(updatesTakenThrough, sequence)
+        endTurnIfTakenIn()
+    }
+
     private func receive(_ event: LatchAgentEvent) {
         switch event {
         case let .sessionUpdate(id, notification) where id == runtimeID:
+            defer { tookIn(notification) }
             if phase == .connecting, isStateUpdate(notification) {
                 // The event task may run before session/new's continuation. Keep a bounded
                 // buffer, then replay only this session's snapshots newer than its reply.

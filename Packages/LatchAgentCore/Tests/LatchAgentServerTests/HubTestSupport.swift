@@ -139,11 +139,14 @@ final class HubTestbed {
     /// For requests whose connection does not matter.
     let control: RemoteConnectionID
 
+    /// Without `startsEvents` the hub reads none of the service's events until a test calls
+    /// `hub.start()`; they wait on the service's stream meanwhile.
     init(
         configuration: RemoteRuntimeHubConfiguration = RemoteRuntimeHubConfiguration(),
         launchEnvironment: (@Sendable () -> AgentLaunchEnvironment)? = nil,
         homeDirectory: String? = nil,
-        lifecycle: (@Sendable (AgentRuntimeID, RemoteRuntimeLifecycleEvent) -> Void)? = nil
+        lifecycle: (@Sendable (AgentRuntimeID, RemoteRuntimeLifecycleEvent) -> Void)? = nil,
+        startsEvents: Bool = true
     ) async throws {
         workspace = FileManager.default.temporaryDirectory
             .appendingPathComponent("latch-hub-\(UUID().uuidString)")
@@ -164,7 +167,7 @@ final class HubTestbed {
             lifecycle: lifecycle
         )
         control = hub.openConnection(wake: {})
-        await hub.start()
+        if startsEvents { await hub.start() }
     }
 
     func close() async {
@@ -360,10 +363,12 @@ func withTestbed(
     configuration: RemoteRuntimeHubConfiguration = RemoteRuntimeHubConfiguration(),
     launchEnvironment: (@Sendable () -> AgentLaunchEnvironment)? = nil,
     homeDirectory: String? = nil,
+    startsEvents: Bool = true,
     _ body: (HubTestbed) async throws -> Void
 ) async throws {
     let testbed = try await HubTestbed(
-        configuration: configuration, launchEnvironment: launchEnvironment, homeDirectory: homeDirectory
+        configuration: configuration, launchEnvironment: launchEnvironment, homeDirectory: homeDirectory,
+        startsEvents: startsEvents
     )
     do {
         try await body(testbed)

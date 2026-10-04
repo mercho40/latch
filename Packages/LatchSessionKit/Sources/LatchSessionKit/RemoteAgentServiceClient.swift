@@ -228,20 +228,29 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         }
     }
 
-    /// Waits for the turn across reconnects; the channel sends the prompt again under the same
-    /// turn ID if the first attempt's reply was lost, and the server runs it once.
     public func prompt(runtimeID: AgentRuntimeID, turnID: UUID, blocks: [ACPPromptBlock]) async throws -> LatchAgentResponse {
-        let (channel, server) = try current(runtimeID)
-        let outcome = try await awaitingTurn(on: channel, server: server) {
-            try await channel.prompt(turnID: turnID, blocks: blocks)
-        }
-        return try Self.completion(of: outcome, runtimeID: runtimeID)
+        try await endOfTurn(runtimeID: runtimeID, turnID: turnID, sending: blocks).result.get()
     }
 
     public func awaitTurn(runtimeID: AgentRuntimeID, turnID: UUID) async throws -> LatchAgentResponse {
-        let (channel, server) = try current(runtimeID)
-        let outcome = try await awaitingTurn(on: channel, server: server) { try await channel.awaitTurn(turnID) }
-        return try Self.completion(of: outcome, runtimeID: runtimeID)
+        try await endOfTurn(runtimeID: runtimeID, turnID: turnID, sending: nil).result.get()
+    }
+
+    /// Waits for the turn across reconnects; the channel sends the prompt again under the same
+    /// turn ID if the first attempt's reply was lost, and the server runs it once. The end
+    /// comes with where the channel's events had got to when the channel learned of it.
+    public func endOfTurn(runtimeID: AgentRuntimeID, turnID: UUID, sending blocks: [ACPPromptBlock]?) async -> TurnEnd {
+        let outcome: LatchRemoteTurnOutcome
+        do {
+            let (channel, server) = try current(runtimeID)
+            outcome = try await awaitingTurn(on: channel, server: server) {
+                guard let blocks else { return try await channel.awaitTurn(turnID) }
+                return try await channel.prompt(turnID: turnID, blocks: blocks)
+            }
+        } catch {
+            return TurnEnd(.failure(error))
+        }
+        return TurnEnd(Result { try Self.completion(of: outcome, runtimeID: runtimeID) }, journaledThrough: outcome.deliveredThrough)
     }
 
     /// Waits for a turn. A channel that fails for good under it, rather than being closed

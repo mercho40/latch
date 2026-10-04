@@ -162,7 +162,8 @@ final class LatchAgentServiceTests: XCTestCase {
             prompt,
             .promptCompleted(
                 runtimeID: runtimeID,
-                response: ACPPromptResponse(stopReason: "cancelled")
+                // The reply says where the turn's updates end: at "working".
+                response: ACPPromptResponse(stopReason: "cancelled", updatesThrough: 5)
             )
         )
 
@@ -207,7 +208,7 @@ final class LatchAgentServiceTests: XCTestCase {
         XCTAssertEqual(closedRequestID, requestID)
         let completed = try await promptTask.value
         XCTAssertEqual(completed, .promptCompleted(
-            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "end_turn")
+            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "end_turn", updatesThrough: 0)
         ))
 
         // Closed requests cannot be answered twice.
@@ -263,7 +264,7 @@ final class LatchAgentServiceTests: XCTestCase {
         XCTAssertEqual(closedRequestID, requestID)
         let completed = try await promptTask.value
         XCTAssertEqual(completed, .promptCompleted(
-            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "end_turn")
+            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "end_turn", updatesThrough: 0)
         ))
         _ = try await service.execute(.stopRuntime(id: runtimeID))
     }
@@ -289,7 +290,7 @@ final class LatchAgentServiceTests: XCTestCase {
         XCTAssertEqual(chunk.text, "answered")
         let completed = try await promptTask.value
         XCTAssertEqual(completed, .promptCompleted(
-            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "cancelled")
+            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "cancelled", updatesThrough: 4)
         ))
         _ = try await service.execute(.stopRuntime(id: runtimeID))
     }
@@ -314,7 +315,7 @@ final class LatchAgentServiceTests: XCTestCase {
         XCTAssertEqual(closedRequestID, requestID)
         let completed = try await promptTask.value
         XCTAssertEqual(completed, .promptCompleted(
-            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "cancelled")
+            runtimeID: runtimeID, response: ACPPromptResponse(stopReason: "cancelled", updatesThrough: 0)
         ))
         _ = try await service.execute(.stopRuntime(id: runtimeID))
     }

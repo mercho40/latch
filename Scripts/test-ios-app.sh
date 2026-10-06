@@ -303,7 +303,7 @@ fi
 # text size: <device>-<screen>-<appearance>[-<size>].png. Debug only, as the fixtures are.
 if [[ -n "$screenshots" && "$configuration" == Debug ]]; then
     mkdir -p "$screenshots"
-    shell_screens='onboarding sessions new-session servers server-add server-edit banner'
+    shell_screens='onboarding sessions new-session servers server-add server-add-manual scanner server-edit banner'
     session_screens='conversation markdown streaming photos slash permission question plan-approval reconnecting error empty subagents plan queue resume'
     large_screens='sessions conversation streaming permission question new-session'
     large_size=accessibility-extra-large

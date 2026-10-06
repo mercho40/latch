@@ -88,10 +88,14 @@ final class ServerEditorTests: XCTestCase {
     func testAPairingLinkAsksForACheckRatherThanAPaste() throws {
         let manual = editor()
         XCTAssertFalse(manual.fromLink)
+        XCTAssertEqual(manual.indexPath(of: .pairCommand), IndexPath(row: 0, section: 0))
+        XCTAssertEqual(manual.indexPath(of: .pair), IndexPath(row: 0, section: 1))
         let sections = manual.tableView.numberOfSections
         let linked = editor(pairing: try LatchRemotePairing(host: "vps.example", token: token))
         XCTAssertTrue(linked.fromLink)
-        XCTAssertEqual(linked.tableView.numberOfSections, sections - 1)
+        XCTAssertEqual(linked.tableView.numberOfSections, sections - 2)
+        XCTAssertNil(linked.indexPath(of: .pairCommand))
+        XCTAssertNil(linked.indexPath(of: .pair))
         XCTAssertEqual(linked.tableView(linked.tableView, titleForHeaderInSection: 0), "Server",
                        "The note goes in the footer, in the footnote style Edit Server uses")
         let footer = linked.tableView(linked.tableView, viewForFooterInSection: 0) as? UITableViewHeaderFooterView
@@ -239,18 +243,21 @@ final class ServerEditorTests: XCTestCase {
         await answered.testFinished()
         XCTAssertEqual(answered.testResult?.text, "vps · Ubuntu 24.04 · Latch 0.1.0")
         XCTAssertEqual(answered.testResult?.succeeded, true)
-        // The result is a row of its own under the button, right after the server's fields.
+        // The result is a row of its own under the button, right after the server's fields
+        // and how it is reached.
         let table = answered.tableView!
-        XCTAssertEqual(table.numberOfRows(inSection: 2), 2)
-        let button = table.dataSource?.tableView(table, cellForRowAt: IndexPath(row: 0, section: 2))
+        let section = try XCTUnwrap(answered.indexPath(of: .test)).section
+        XCTAssertEqual(answered.indexPath(of: .unencrypted)?.section, section - 1)
+        XCTAssertEqual(table.numberOfRows(inSection: section), 2)
+        let button = table.dataSource?.tableView(table, cellForRowAt: IndexPath(row: 0, section: section))
         XCTAssertEqual((button?.contentConfiguration as? UIListContentConfiguration)?.text, "Test Connection")
         XCTAssertNil((button?.contentConfiguration as? UIListContentConfiguration)?.image)
-        let result = table.dataSource?.tableView(table, cellForRowAt: IndexPath(row: 1, section: 2))
+        let result = table.dataSource?.tableView(table, cellForRowAt: IndexPath(row: 1, section: section))
         XCTAssertEqual((result?.contentConfiguration as? UIListContentConfiguration)?.text, "vps · Ubuntu 24.04 · Latch 0.1.0")
         // A change to the connection makes the result stale.
         type("7801", into: answered.portField)
         XCTAssertNil(answered.testResult)
-        XCTAssertEqual(table.numberOfRows(inSection: 2), 1)
+        XCTAssertEqual(table.numberOfRows(inSection: section), 1)
 
         let refused = editor(check: { _ in throw LatchRemoteClientError.destinationNotAllowed(address: "203.0.113.5") })
         refused.applyPairing("latch://vps.example?token=\(token.rawValue)")
@@ -258,6 +265,204 @@ final class ServerEditorTests: XCTestCase {
         await refused.testFinished()
         XCTAssertEqual(refused.testResult?.succeeded, false)
         XCTAssertTrue(refused.testResult?.text.contains("Allow unencrypted network") == true)
+    }
+
+    // MARK: Add
+
+    /// Add tries the server first, so one that answers is saved under the name it gives
+    /// itself, and the user is never left with a server they only find out later is wrong.
+    func testAddTriesTheServerThenSavesItUnderItsOwnName() async throws {
+        let store = InMemoryServerStore()
+        let checks = CheckCount()
+        let editor = editor(store, check: { [info] _ in
+            await checks.add()
+            return info
+        })
+        var saved: ServerProfile?
+        editor.onSave = { saved = $0 }
+        editor.applyPairing("latch://vps.tailnet.ts.net?token=\(token.rawValue)")
+        editor.confirm()
+        XCTAssertTrue(editor.isConnecting)
+        XCTAssertEqual(editor.navigationItem.rightBarButtonItem?.accessibilityLabel, "Connecting")
+        XCTAssertTrue(store.servers.isEmpty, "Nothing is saved while the server is tried")
+        await editor.confirmFinished()
+        XCTAssertEqual(checks.value, 1)
+        XCTAssertFalse(editor.isConnecting)
+        let server = try XCTUnwrap(store.servers.first)
+        XCTAssertEqual(server.name, "vps")
+        XCTAssertEqual(server.host, "vps.tailnet.ts.net")
+        XCTAssertEqual(saved, server)
+    }
+
+    /// A server that does not answer says why, and is added only if the user says so: it may
+    /// simply not be up yet.
+    func testAddThatCannotConnectSaysWhyAndSavesNothing() async throws {
+        let store = InMemoryServerStore()
+        let linked = editor(store, pairing: try LatchRemotePairing(host: "203.0.113.5", token: token), check: { _ in
+            throw LatchRemoteClientError.destinationNotAllowed(address: "203.0.113.5")
+        })
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = linked
+        window.isHidden = false
+        defer { window.isHidden = true }
+        linked.confirm()
+        await linked.confirmFinished()
+        XCTAssertTrue(store.servers.isEmpty)
+        XCTAssertEqual(linked.testResult?.succeeded, false)
+        let alert = try XCTUnwrap(linked.offeredAlert)
+        XCTAssertEqual(alert.title, "Can’t Connect")
+        XCTAssertEqual(alert.message, "Latch did not send the token: 203.0.113.5 is neither this device nor on a "
+            + "Tailscale network. Check the host, and that Tailscale is connected.")
+        XCTAssertEqual(alert.actions.map(\.title), ["Cancel", "Add Anyway"])
+        XCTAssertEqual(alert.preferredAction?.title, "Cancel")
+        XCTAssertTrue(linked.saveItem.isEnabled, "Add is back, to try again")
+        XCTAssertTrue(linked.navigationItem.rightBarButtonItem === linked.saveItem)
+    }
+
+    /// Nothing to try: a new name or custom command changes nothing about the connection, and
+    /// Test Connection already reached the server as entered.
+    func testSavingWithoutAChangeOfConnectionOrAfterATestDoesNotTryAgain() async throws {
+        let checks = CheckCount()
+        let check: ServerCheck = { [info] _ in
+            await checks.add()
+            return info
+        }
+        let original = ServerProfile(name: "vps", host: "vps.example", token: token)
+        let store = InMemoryServerStore([original])
+        let editing = editor(store, editing: original, check: check)
+        type("Build box", into: editing.nameField)
+        editing.confirm()
+        XCTAssertFalse(editing.isConnecting)
+        XCTAssertEqual(store.servers.first?.name, "Build box")
+
+        let adding = editor(store, check: check)
+        adding.applyPairing("latch://mini.example?token=\(token.rawValue)")
+        adding.testConnection()
+        await adding.testFinished()
+        XCTAssertEqual(checks.value, 1)
+        adding.confirm()
+        XCTAssertFalse(adding.isConnecting)
+        XCTAssertEqual(checks.value, 1)
+        XCTAssertEqual(store.servers.map(\.host), ["vps.example", "mini.example"])
+    }
+
+    /// A change of address while Add tries the server stops it: it was trying another server.
+    func testEditingWhileAddTriesTheServerStopsIt() async throws {
+        let store = InMemoryServerStore()
+        let editor = editor(store, check: { [info] _ in
+            try await Task.sleep(for: .milliseconds(200))
+            return info
+        })
+        editor.applyPairing("latch://vps.example?token=\(token.rawValue)")
+        editor.confirm()
+        XCTAssertTrue(editor.isConnecting)
+        type("other.example", into: editor.hostField)
+        XCTAssertFalse(editor.isConnecting)
+        XCTAssertTrue(editor.navigationItem.rightBarButtonItem === editor.saveItem)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertTrue(store.servers.isEmpty)
+    }
+
+    /// Cancel while Add tries the server saves nothing, even if it answers as the sheet goes.
+    func testCancelStopsAdd() async throws {
+        let store = InMemoryServerStore()
+        let editor = editor(store, check: { [info] _ in
+            try await Task.sleep(for: .milliseconds(100))
+            return info
+        })
+        editor.applyPairing("latch://vps.example?token=\(token.rawValue)")
+        editor.confirm()
+        XCTAssertTrue(editor.isConnecting)
+        editor.cancel()
+        XCTAssertFalse(editor.isConnecting)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(store.servers.isEmpty)
+    }
+
+    // MARK: Entering a server
+
+    /// The Host field takes what people have at hand: an address with its port, or the URL
+    /// of a server behind a Cloudflare Tunnel. Done with the field, it is split into the
+    /// fields Add uses.
+    func testTheHostFieldTakesAnAddressOrAProxysURL() throws {
+        let editor = editor()
+        type(token.rawValue, into: editor.tokenField)
+        type("vps.example:7801", into: editor.hostField)
+        XCTAssertEqual(editor.nameField.text, "vps.example")
+        var profile = try editor.entry.get()
+        XCTAssertEqual(profile.address, "vps.example:7801")
+        editor.hostField.sendActions(for: .editingDidEnd)
+        XCTAssertEqual(editor.hostField.text, "vps.example")
+        XCTAssertEqual(editor.portField.text, "7801")
+
+        type("https://latch.example.com/", into: editor.hostField)
+        profile = try editor.entry.get()
+        XCTAssertEqual(profile.transport, .webSocket)
+        XCTAssertEqual(profile.address, "wss://latch.example.com:7801", "A port of the user's own stays")
+        type("7428", into: editor.portField)
+        type("https://latch.example.com/", into: editor.hostField)
+        XCTAssertEqual(try editor.entry.get().address, "wss://latch.example.com", "The direct default follows to 443")
+        editor.hostField.sendActions(for: .editingDidEnd)
+        XCTAssertEqual(editor.hostField.text, "latch.example.com")
+        XCTAssertEqual(editor.portField.text, "443")
+        XCTAssertEqual(editor.transport, .webSocket)
+        XCTAssertEqual(editor.transportButton.configuration?.title, "TLS Proxy")
+        XCTAssertEqual(editor.nameField.text, "latch.example.com")
+
+        XCTAssertEqual(ServerEditorViewController.address(" wss://Latch.example.com:8443/path?x=1 "),
+                       .init(host: "Latch.example.com", port: 8443, transport: .webSocket))
+        XCTAssertEqual(ServerEditorViewController.address("[fd7a:115c:a1e0::1]:7801"),
+                       .init(host: "fd7a:115c:a1e0::1", port: 7801))
+        XCTAssertEqual(ServerEditorViewController.address("[fd7a:115c:a1e0::1]"), .init(host: "fd7a:115c:a1e0::1"))
+        XCTAssertEqual(ServerEditorViewController.address("fd7a:115c:a1e0::1"), .init(host: "fd7a:115c:a1e0::1"),
+                       "An unbracketed IPv6 address has no port to split off")
+        XCTAssertEqual(ServerEditorViewController.address("vps:0"), .init(host: "vps:0"), "Not a port: left for the check")
+        XCTAssertEqual(ServerEditorViewController.address("vps.example"), .init(host: "vps.example"))
+    }
+
+    /// The whole pairing link pasted where the host goes fills the form, as Paste would.
+    func testAPairingLinkPastedIntoTheHostFillsEverything() throws {
+        let editor = editor()
+        type("latch://latch.example.com:443?transport=wss&token=\(token.rawValue)", into: editor.hostField)
+        XCTAssertEqual(editor.hostField.text, "latch.example.com")
+        XCTAssertEqual(editor.tokenField.text, token.rawValue)
+        XCTAssertEqual(editor.transport, .webSocket)
+        XCTAssertEqual(editor.pasteMessage, "Filled in from the pairing string.")
+        XCTAssertEqual(try editor.entry.get().address, "wss://latch.example.com")
+    }
+
+    /// A code scanned in the sheet fills it as a paste does, and saves nothing.
+    func testAScannedCodeFillsTheForm() throws {
+        let store = InMemoryServerStore()
+        let editor = editor(store)
+        editor.applyScanned(try LatchRemotePairing(host: "vps.example", port: 7801, token: token))
+        XCTAssertEqual(editor.hostField.text, "vps.example")
+        XCTAssertEqual(editor.portField.text, "7801")
+        XCTAssertEqual(editor.tokenField.text, token.rawValue)
+        XCTAssertEqual(editor.pasteMessage, "Filled in from the pairing code.")
+        XCTAssertTrue(editor.saveItem.isEnabled)
+        XCTAssertTrue(store.servers.isEmpty)
+    }
+
+    /// The command to run on the server heads the sheet, ready to copy: with a placeholder for
+    /// a new server, and for one being edited, as it was saved, for a new code after a rotation.
+    func testThePairingCommandHeadsTheSheetAndCopies() throws {
+        let adding = editor()
+        XCTAssertEqual(adding.pairingCommand, "latch-server pair --host <name> --qr")
+        var copied: [String] = []
+        adding.copyToPasteboard = { copied.append($0) }
+        let row = try XCTUnwrap(adding.indexPath(of: .pairCommand))
+        adding.tableView(adding.tableView, didSelectRowAt: row)
+        XCTAssertEqual(copied, ["latch-server pair --host <name> --qr"])
+        let cell = adding.tableView.dataSource?.tableView(adding.tableView, cellForRowAt: row)
+        XCTAssertEqual(cell?.accessibilityValue, "Copied")
+
+        let proxied = ServerProfile(name: "dev", host: "latch.example.com", port: 8443, transport: .webSocket, token: token)
+        let editing = editor(InMemoryServerStore([proxied]), editing: proxied)
+        XCTAssertEqual(editing.pairingCommand, "latch-server pair --host latch.example.com --wss --port 8443 --qr")
+        let direct = ServerProfile(name: "vps", host: "vps.tailnet.ts.net", token: token)
+        XCTAssertEqual(editor(InMemoryServerStore([direct]), editing: direct).pairingCommand,
+                       "latch-server pair --host vps.tailnet.ts.net --qr")
     }
 
     // MARK: Pairing links

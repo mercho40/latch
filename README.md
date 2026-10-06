@@ -21,7 +21,7 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
 - **A fast native transcript.** Incremental Markdown rendering keeps a streamed frame cheap however long the answer gets, with ⌘F find, per-message copy, and system fonts and colors throughout.
 - **Process isolation.** Agents run under an XPC service embedded in the app, not in the UI process. The service admits only the app's own code signature.
 - **Agents on a server.** Run [`latch-server`](docs/server.md) on a Linux or macOS machine and connect to it over Tailscale, an SSH tunnel, or a Cloudflare Tunnel. Its agents keep running when the Mac sleeps or changes network, and when Latch quits; Latch catches up when it reconnects or next opens.
-- **An iPhone and iPad app.** [Latch for iPhone and iPad](docs/ios.md) drives agents on a `latch-server`: it lists their sessions, takes up one another device started, streams replies, sends prompts and photos, and answers approvals. Pair it by scanning the code `latch-server pair --host NAME --qr` prints with the Camera. You build it yourself.
+- **An iPhone and iPad app.** [Latch for iPhone and iPad](docs/ios.md) drives agents on a `latch-server`: it lists their sessions, takes up one another device started, streams replies, sends prompts and photos, and answers approvals. Pair it by scanning the code `latch-server pair --host NAME --qr` prints, in the app or with the Camera. You build it yourself.
 
 ## What does not exist yet
 

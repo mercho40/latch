@@ -42,6 +42,7 @@ INFOPLIST_KEY_CFBundleDisplayName = Latch
 INFOPLIST_KEY_LSApplicationCategoryType = public.app-category.developer-tools
 INFOPLIST_KEY_NSHumanReadableCopyright = Copyright © 2026 Latch contributors
 INFOPLIST_KEY_NSLocalNetworkUsageDescription = Latch connects to a latch-server on your network or tailnet, where your agents run.
+INFOPLIST_KEY_NSCameraUsageDescription = Latch uses the camera to scan the pairing code latch-server shows.
 INFOPLIST_KEY_UILaunchScreen_Generation = YES
 INFOPLIST_KEY_UIApplicationSceneManifest_Generation = NO
 INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES

@@ -3,9 +3,11 @@ import LatchSessionKit
 import UIKit
 import UniformTypeIdentifiers
 
-/// Add Server and Edit Server: paste what `latch-server pair` prints, which fills in
-/// everything, or enter the server by hand. The token field is secure and, when editing,
-/// empty: left so, the token stays as it was. Nothing is saved until Add or Save.
+/// Add Server and Edit Server: scan the code `latch-server pair --qr` shows, or paste the link
+/// it prints, which fills in everything, or enter the server by hand. The Host field takes an
+/// address with its port, or a TLS proxy's URL, as well as a bare host. The token field is
+/// secure and, when editing, empty: left so, the token stays as it was. Add tries the server
+/// before saving it; nothing is saved until Add or Save.
 final class ServerEditorViewController: UITableViewController, UITextFieldDelegate {
     /// Called after the server was saved.
     var onSave: ((ServerProfile) -> Void)?
@@ -32,17 +34,36 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     let unencryptedSwitch = UISwitch()
     let commandField = UITextField()
     let pasteControl: UIPasteControl
+    let scanButton = UIButton(configuration: .filled())
     private(set) lazy var saveItem = UIBarButtonItem(title: originalID == nil ? "Add" : "Save",
-                                                     primaryAction: UIAction { [weak self] _ in self?.save() })
+                                                     primaryAction: UIAction { [weak self] _ in self?.confirm() })
+    /// In the bar instead of Add or Save while the server is tried.
+    private lazy var connectingItem: UIBarButtonItem = {
+        let spinner = UIActivityIndicatorView(style: .medium)
+        spinner.startAnimating()
+        let item = UIBarButtonItem(customView: spinner)
+        item.accessibilityLabel = "Connecting"
+        return item
+    }()
+    /// Copies the pairing command; tests replace it.
+    var copyToPasteboard: (String) -> Void = { UIPasteboard.general.string = $0 }
     /// What the last paste did, under the Paste button.
     private(set) var pasteMessage: String?
     /// What the last Test Connection found, for the fields as they were then.
     private(set) var testResult: (text: String, succeeded: Bool)?
     private(set) var isTesting = false
     private var testTask: Task<Void, Never>?
+    /// Add or Save trying the server before it saves.
+    private(set) var isConnecting = false
+    private var connectTask: Task<Void, Never>?
+    /// Where the server being edited was saved as reached, for the pairing command.
+    private var saved: (host: String, port: UInt16, transport: LatchRemoteTransport)?
+    /// The pairing command was just copied: its row says so for a moment.
+    private var copied = false
     /// The name follows the host until the user types one of their own.
     private var nameEdited = false
     static let filledMessage = "Filled in from the pairing string."
+    static let scannedMessage = "Filled in from the pairing code."
 
     /// Adding, optionally filled in from a pairing link.
     convenience init(store: any PhoneServerStore, pairing: LatchRemotePairing? = nil, check: @escaping ServerCheck) {
@@ -66,7 +87,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     convenience init(store: any PhoneServerStore, restoring stored: ServerProfile.Stored,
                      pairing: LatchRemotePairing? = nil, check: @escaping ServerCheck) {
         self.init(store: store, id: stored.id, token: nil, check: check, note: pairing == nil
-            ? "The token for \(stored.name) is not on this device. Paste a pairing string or enter the token."
+            ? "The token for \(stored.name) is not on this device. Scan or paste a pairing code, or enter the token."
             : "The token for \(stored.name) is not on this device. Save to use the one from this link.")
         load(stored)
         if let pairing { fillFromLink(pairing) }
@@ -91,6 +112,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     private func load(_ stored: ServerProfile.Stored) {
+        saved = (stored.host, stored.port, stored.transport)
         nameField.text = stored.name
         transport = stored.transport
         hostField.text = stored.host
@@ -105,7 +127,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     override func viewDidLoad() {
         super.viewDidLoad()
         navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .cancel, primaryAction: UIAction { [weak self] _ in
-            self?.dismiss(animated: true)
+            self?.cancel()
         })
         if #available(iOS 26.0, *) { saveItem.style = .prominent } else { saveItem.style = .done }
         navigationItem.rightBarButtonItem = saveItem
@@ -142,7 +164,17 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         portField.accessibilityLabel = "Port"
         tokenField.accessibilityLabel = "Token"
         commandField.accessibilityLabel = "Custom agent command"
+        // An address typed with its port, or a proxy's URL, is split into the fields once the
+        // user is done with it; until then the entry reads it as it is.
+        hostField.addAction(UIAction { [weak self] _ in self?.normalizeAddress() }, for: .editingDidEnd)
         unencryptedSwitch.addAction(UIAction { [weak self] _ in self?.clearTestResult() }, for: .valueChanged)
+        var scan = scanButton.configuration ?? .filled()
+        scan.title = "Scan Code"
+        scan.image = UIImage(systemName: "qrcode.viewfinder")
+        scan.imagePadding = 6
+        scan.cornerStyle = .capsule
+        scanButton.configuration = scan
+        scanButton.addAction(UIAction { [weak self] _ in self?.scan() }, for: .primaryActionTriggered)
         transportButton.showsMenuAsPrimaryAction = true
         transportButton.accessibilityLabel = "Connection"
         updateTransportMenu()
@@ -193,11 +225,15 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     /// The server the fields describe, or why they do not describe one yet.
     var entry: Result<ServerProfile, EntryProblem> {
-        let host = (hostField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = Self.address(hostField.text ?? "")
+        let host = address.host
         guard !host.isEmpty else { return .failure(.incomplete) }
-        guard let port = UInt16((portField.text ?? "").trimmingCharacters(in: .whitespaces)), port > 0 else {
-            return .failure(.port)
-        }
+        let transport = address.transport ?? self.transport
+        var port = UInt16((portField.text ?? "").trimmingCharacters(in: .whitespaces))
+        // A proxy's URL in the Host field brings its connection's port, as choosing it would.
+        if transport != self.transport, port == self.transport.defaultPort { port = transport.defaultPort }
+        if let typed = address.port { port = typed }
+        guard let port, port > 0 else { return .failure(.port) }
         let tokenText = (tokenField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let token: LatchRemoteToken
         if tokenText.isEmpty, let originalToken {
@@ -229,10 +265,67 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         }
     }
 
+    /// What the Host field says: a host, with the port when it is typed as `host:port`, and a
+    /// TLS proxy when it is typed as a `wss://` or `https://` URL, whose path is dropped.
+    struct Address: Equatable {
+        var host: String
+        var port: UInt16?
+        var transport: LatchRemoteTransport?
+    }
+
+    static func address(_ text: String) -> Address {
+        var rest = Substring(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        var transport: LatchRemoteTransport?
+        if let scheme = ["wss://", "https://"].first(where: { rest.lowercased().hasPrefix($0) }) {
+            rest = rest.dropFirst(scheme.count)
+            transport = .webSocket
+            if let end = rest.firstIndex(where: { "/?#".contains($0) }) { rest = rest[..<end] }
+        }
+        func port(_ digits: Substring) -> UInt16? {
+            guard (1...5).contains(digits.count), digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let value = UInt16(digits), value > 0 else { return nil }
+            return value
+        }
+        if rest.hasPrefix("["), let close = rest.firstIndex(of: "]") {
+            let inside = rest[rest.index(after: rest.startIndex)..<close]
+            let after = rest[rest.index(after: close)...]
+            if after.isEmpty { return Address(host: String(inside), transport: transport) }
+            if after.hasPrefix(":"), let value = port(after.dropFirst()) {
+                return Address(host: String(inside), port: value, transport: transport)
+            }
+        } else if let colon = rest.firstIndex(of: ":"), rest.lastIndex(of: ":") == colon,
+                  let value = port(rest[rest.index(after: colon)...]) {
+            return Address(host: String(rest[..<colon]), port: value, transport: transport)
+        }
+        return Address(host: String(rest), transport: transport)
+    }
+
+    /// Splits what the Host field says into the fields it belongs in, so they show what Add
+    /// will use.
+    private func normalizeAddress() {
+        let text = hostField.text ?? ""
+        let address = Self.address(text)
+        guard address.port != nil || address.transport != nil || address.host != text else { return }
+        if let transport = address.transport { choose(transport) }
+        hostField.text = address.host
+        if let port = address.port { portField.text = String(port) }
+        if !nameEdited { nameField.text = address.host }
+        clearTestResult()
+        refresh()
+    }
+
     private func fieldChanged(_ field: UITextField) {
         switch field {
         case nameField: nameEdited = !(nameField.text ?? "").isEmpty
-        case hostField: if !nameEdited { nameField.text = hostField.text }
+        case hostField:
+            // A whole pairing link pasted into the host fills everything, as Paste does.
+            let text = (hostField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.lowercased().hasPrefix("latch://"), let pairing = try? LatchRemotePairing(parsing: text) {
+                fill(from: pairing)
+                pasteMessage = Self.filledMessage
+            } else if !nameEdited {
+                nameField.text = Self.address(text).host
+            }
         default: break
         }
         if field !== nameField, field !== commandField { clearTestResult() }
@@ -250,6 +343,21 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         }
         clearTestResult()
         refresh()
+    }
+
+    /// Scan Code: the camera over this sheet. What the code holds fills the form as a paste
+    /// does, and is saved only on Add or Save.
+    func scan() {
+        let sheet = PairingScannerViewController.sheet { [weak self] pairing in self?.applyScanned(pairing) }
+        (navigationController ?? self).present(sheet, animated: true)
+    }
+
+    func applyScanned(_ pairing: LatchRemotePairing) {
+        fill(from: pairing)
+        pasteMessage = Self.scannedMessage
+        clearTestResult()
+        refresh()
+        UIAccessibility.post(notification: .announcement, argument: Self.scannedMessage)
     }
 
     /// A link has filled in everything a paste would, so the sheet asks for a check instead
@@ -284,7 +392,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     }
 
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        let order = [nameField, hostField, portField, tokenField, commandField]
+        let order = [hostField, tokenField, nameField, portField, commandField]
         if let index = order.firstIndex(of: textField), index + 1 < order.count {
             order[index + 1].becomeFirstResponder()
         } else {
@@ -296,18 +404,22 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     private func refresh() {
         saveItem.isEnabled = store.fileProblem == nil && (try? entry.get()) != nil
         guard isViewLoaded else { return }
+        let item = isConnecting ? connectingItem : saveItem
+        if navigationItem.rightBarButtonItem !== item { navigationItem.rightBarButtonItem = item }
         for (row, footer) in footers { footer.contentConfiguration = footerContent(for: row) }
+        // The result's row first: an update with the table a row short of the layout raises an
+        // exception, which inside a task's code corrupts it rather than failing cleanly.
+        refreshTestRow()
         UIView.performWithoutAnimation {
             tableView.beginUpdates()
             tableView.endUpdates()
         }
-        refreshTestRow()
     }
 
     // MARK: Test Connection
 
     func testConnection() {
-        guard case let .success(profile) = entry else { return }
+        guard !isConnecting, case let .success(profile) = entry else { return }
         testTask?.cancel()
         isTesting = true
         testResult = nil
@@ -373,11 +485,18 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     /// Waits for Test Connection to finish, for tests.
     func testFinished() async { await testTask?.value }
 
-    /// A result describes the fields it was run with; after a change it would mislead.
+    /// A result describes the fields it was run with; after a change it would mislead, and
+    /// Add stops trying a server that is no longer the one entered.
     private func clearTestResult() {
         testTask?.cancel()
         testTask = nil
         isTesting = false
+        if isConnecting {
+            connectTask?.cancel()
+            connectTask = nil
+            isConnecting = false
+            refresh()
+        }
         guard testResult != nil else { return refreshTestRow() }
         testResult = nil
         refreshTestRow()
@@ -429,6 +548,75 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     // MARK: Finishing
 
+    /// Add, and Save after a change to how the server is reached: the server is tried first,
+    /// so one that answers is saved under the name it gives itself, and one that does not
+    /// says why before anything is saved. The user may save it anyway: a server can be added
+    /// before it is up. As with Test Connection, a server from a link is reached only now.
+    func confirm() {
+        guard !isConnecting, case let .success(profile) = entry else { return }
+        let unchanged = originalID.flatMap(store.server(id:)).map { $0.connects(like: profile) } ?? false
+        if unchanged || testResult?.succeeded == true { return save() }
+        testTask?.cancel()
+        testTask = nil
+        isTesting = false
+        isConnecting = true
+        refresh()
+        UIAccessibility.post(notification: .announcement, argument: "Connecting to \(profile.host)")
+        let check = check
+        let options = profile.connectionOptions
+        let fromLink = fromLink
+        connectTask = Task { [weak self] in
+            var info: LatchRemoteServerInfo?
+            var reason = ""
+            do {
+                info = try await check(options)
+            } catch {
+                reason = ServerCheckText.failure(error, offeringUnencryptedNetwork: !fromLink)
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.isConnecting = false
+            self.connectTask = nil
+            if let info {
+                self.testResult = (ServerCheckText.summary(info), true)
+                if !self.nameEdited, let name = self.adoptableName(info.hostname) { self.nameField.text = name }
+                self.refresh()
+                self.save()
+            } else {
+                self.testResult = (reason, false)
+                self.refresh()
+                self.offerToSaveAnyway(because: reason)
+            }
+        }
+    }
+
+    /// Cancel stops Add trying the server, which would otherwise save it should it answer
+    /// while the sheet goes.
+    func cancel() {
+        testTask?.cancel()
+        connectTask?.cancel()
+        connectTask = nil
+        isConnecting = false
+        dismiss(animated: true)
+    }
+
+    /// Waits for Add or Save to finish trying the server, for tests.
+    func confirmFinished() async { await connectTask?.value }
+
+    private func offerToSaveAnyway(because reason: String) {
+        let alert = UIAlertController(title: "Can’t Connect", message: reason, preferredStyle: .alert)
+        let cancel = UIAlertAction(title: "Cancel", style: .cancel)
+        alert.addAction(cancel)
+        alert.addAction(UIAlertAction(title: originalID == nil ? "Add Anyway" : "Save Anyway", style: .default) { [weak self] _ in
+            self?.save()
+        })
+        alert.preferredAction = cancel
+        present(alert, animated: true)
+        offeredAlert = alert
+    }
+
+    /// The last Save Anyway alert, for tests.
+    private(set) weak var offeredAlert: UIAlertController?
+
     func save() {
         guard case let .success(profile) = entry else { return }
         do {
@@ -440,6 +628,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
             return present(alert, animated: true)
         }
         testTask?.cancel()
+        connectTask?.cancel()
         let handler = onSave
         onSave = nil
         dismiss(animated: true)
@@ -464,13 +653,24 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     // MARK: Table
 
-    private enum Row { case paste, name, transport, host, port, token, test, testResult, unencrypted, command, remove }
+    enum Row { case pairCommand, pair, host, token, name, transport, port, unencrypted, test, testResult, command, remove }
 
-    /// Test Connection sits under the fields it tests. A link leaves nothing to paste.
+    /// The way in first: the command to run on the server, then Scan and Paste, which fill in
+    /// the rest. Under them what the user would otherwise type, the server's address and token,
+    /// and how it is reached; Test Connection sits under the fields it tests. A link leaves
+    /// nothing to scan or paste.
     private var layout: [[Row]] {
-        (fromLink ? [] : [[.paste]])
-            + [[.name, .transport, .host, .port, .token], testResult == nil ? [.test] : [.test, .testResult], [.unencrypted], [.command]]
+        (fromLink ? [] : [[.pairCommand], [.pair]])
+            + [[.host, .token, .name], [.transport, .port, .unencrypted], testResult == nil ? [.test] : [.test, .testResult],
+               [.command]]
             + (originalID == nil || !store.servers.contains { $0.id == originalID } ? [] : [[.remove]])
+    }
+
+    func indexPath(of row: Row) -> IndexPath? {
+        for (section, rows) in layout.enumerated() {
+            if let index = rows.firstIndex(of: row) { return IndexPath(row: index, section: section) }
+        }
+        return nil
     }
 
     private var cells: [Row: UITableViewCell] = [:]
@@ -481,7 +681,8 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch layout[section].first {
-        case .name?: "Server"
+        case .host?: "Server"
+        case .transport?: "Connection"
         case .command?: "Custom Agent"
         default: nil
         }
@@ -508,19 +709,66 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     private func footer(for row: Row) -> String? {
         switch row {
-        case .paste:
-            pasteMessage ?? note ?? (originalID == nil
-                ? "Copy what “latch-server pair” prints on the server, then paste it here. It fills in the rest."
-                : "Paste a new pairing string to replace the connection, host, port and token.")
-        case .name:
+        case .pairCommand:
+            originalID == nil
+                ? "Run this on the machine your agents run on, then scan the code it shows or paste the link it prints. Either fills in the rest."
+                : "After rotating the token, run this on the server, then scan the code or paste the link to replace the connection, host, port and token."
+        case .pair:
+            pasteMessage ?? note
+        case .host:
             if case let .failure(problem) = entry, let text = problem.text { text } else { fromLink ? note : nil }
-        case .unencrypted:
+        case .transport:
             transport == .tcp
-                ? "The token and everything the agent sends would cross that network in the clear. Use it only on a network you trust."
-                : "A TLS proxy always encrypts the connection, so this applies only to direct connections."
+                ? "Allow an unencrypted network only on one you trust: the token and everything the agent sends would cross it in the clear."
+                : "A TLS proxy, such as a Cloudflare Tunnel, always encrypts the connection, so Allow unencrypted network applies only to direct ones."
         case .command:
             "The command a Custom agent runs on this server, found on its PATH. Quotes work; shell expansion does not. Leave it empty to offer no Custom agent."
-        case .transport, .port, .host, .token, .test, .testResult, .remove: nil
+        case .token, .name, .port, .unencrypted, .test, .testResult, .remove: nil
+        }
+    }
+
+    /// `latch-server pair` for this server: the address it was saved at when editing, so a new
+    /// code after a rotated token comes out the same; otherwise a placeholder for the name.
+    var pairingCommand: String {
+        guard let saved else { return SessionsViewController.pairingCommand }
+        var words = ["latch-server", "pair", "--host", saved.host]
+        if saved.transport == .webSocket { words.append("--wss") }
+        if saved.port != saved.transport.defaultPort { words += ["--port", String(saved.port)] }
+        return (words + ["--qr"]).joined(separator: " ")
+    }
+
+    private func configureCommandCell(_ cell: UITableViewCell) {
+        var content = cell.defaultContentConfiguration()
+        // As the pairing explanation sets it: where it wraps, the break comes after "pair", so
+        // the options stay together, and never at a hyphen inside one.
+        let words = pairingCommand.split(separator: " ")
+        content.text = (words.prefix(2).joined(separator: " ") + " " + words.dropFirst(2).joined(separator: "\u{00A0}"))
+            .replacingOccurrences(of: "-", with: "-\u{2060}")
+        content.textProperties.font = ChromeFont.monospaced(.footnote)
+        content.textProperties.numberOfLines = 0
+        cell.contentConfiguration = content
+        let symbol = UIImageView(image: UIImage(systemName: copied ? "checkmark" : "doc.on.doc"))
+        symbol.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .body)
+        symbol.tintColor = copied ? .systemGreen : .tintColor
+        cell.accessoryView = symbol
+        cell.selectionStyle = .default
+        cell.accessibilityLabel = pairingCommand
+        cell.accessibilityHint = "Copies the command."
+        cell.accessibilityValue = copied ? "Copied" : nil
+        cell.accessibilityTraits = .button
+    }
+
+    /// The command is typed on another machine: copying it saves reading it off the screen.
+    func copyPairingCommand() {
+        copyToPasteboard(pairingCommand)
+        copied = true
+        if let cell = cells[.pairCommand] { configureCommandCell(cell) }
+        UIAccessibility.post(notification: .announcement, argument: "Copied")
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard let self else { return }
+            self.copied = false
+            if let cell = self.cells[.pairCommand] { self.configureCommandCell(cell) }
         }
     }
 
@@ -531,17 +779,32 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         cells[row] = cell
         cell.selectionStyle = .none
         switch row {
-        case .paste:
-            // The button alone, on the form's background, rather than a card around one button.
+        case .pairCommand: configureCommandCell(cell)
+        case .pair:
+            // The buttons alone, on the form's background, rather than a card around them;
+            // stacked at accessibility sizes, where side by side they would not fit.
             cell.backgroundConfiguration = .clear()
-            pasteControl.translatesAutoresizingMaskIntoConstraints = false
-            cell.contentView.addSubview(pasteControl)
+            let stack = UIStackView(arrangedSubviews: [scanButton, pasteControl])
+            stack.spacing = 12
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            cell.contentView.addSubview(stack)
             NSLayoutConstraint.activate([
-                pasteControl.centerXAnchor.constraint(equalTo: cell.contentView.centerXAnchor),
-                pasteControl.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 4),
-                pasteControl.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -4),
+                stack.centerXAnchor.constraint(equalTo: cell.contentView.centerXAnchor),
+                stack.leadingAnchor.constraint(greaterThanOrEqualTo: cell.contentView.layoutMarginsGuide.leadingAnchor),
+                stack.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 4),
+                stack.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -4),
+                scanButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
                 pasteControl.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
             ])
+            let update = { [weak stack] (traits: UITraitCollection) in
+                let stacked = traits.preferredContentSizeCategory.isAccessibilityCategory
+                stack?.axis = stacked ? .vertical : .horizontal
+                stack?.alignment = stacked ? .fill : .center
+            }
+            update(cell.traitCollection)
+            cell.registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (cell: UITableViewCell, _) in
+                update(cell.traitCollection)
+            }
         case .name: FormRow.field(in: cell, label: "Name", field: nameField)
         case .transport:
             var content = cell.defaultContentConfiguration()
@@ -576,6 +839,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         switch layout[indexPath.section][indexPath.row] {
+        case .pairCommand: copyPairingCommand()
         case .test: testConnection()
         case .remove: confirmRemoval()
         default: break

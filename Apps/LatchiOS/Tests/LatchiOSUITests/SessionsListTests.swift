@@ -168,10 +168,17 @@ final class SessionsListTests: XCTestCase {
         empty.loadViewIfNeeded()
         let pairing = empty.contentUnavailableConfiguration as? UIContentUnavailableConfiguration
         XCTAssertEqual(pairing?.text, "No Servers")
-        XCTAssertEqual(pairing?.button.title, "Add Server")
-        XCTAssertEqual(pairing?.secondaryButton.title, "Copy Command")
-        XCTAssertTrue(pairing?.secondaryAttributedText?.string.contains("Camera") == true)
+        XCTAssertEqual(pairing?.button.title, "Scan Pairing Code")
+        XCTAssertEqual(pairing?.secondaryButton.title, "Add Manually")
+        XCTAssertTrue(pairing?.secondaryAttributedText?.string.hasSuffix("Then scan the code it shows.") == true)
         XCTAssertEqual(SessionsViewController.pairingCommand, "latch-server pair --host <name> --qr")
+        var (scans, adds) = (0, 0)
+        empty.onScan = { scans += 1 }
+        empty.onAddServer = { adds += 1 }
+        pairing?.buttonProperties.primaryAction?.performWithSender(nil, target: nil)
+        XCTAssertEqual([scans, adds], [1, 0], "Scanning is the way in")
+        pairing?.secondaryButtonProperties.primaryAction?.performWithSender(nil, target: nil)
+        XCTAssertEqual([scans, adds], [1, 1])
 
         let (list, _, _) = makeList(servers: [Fake.server("vps")])
         var newSessions = 0

@@ -29,6 +29,8 @@ final class ServersViewController: UICollectionViewController {
     private var checked: [UUID: ServerProfile] = [:]
     /// Presents the editor; the root wires it so the sheet stacks over this one.
     var onEdit: ((ServerEditorViewController) -> Void)?
+    /// Scan Pairing Code, from the explanation shown while there is no server.
+    var onScan: (() -> Void)?
 
     init(store: any PhoneServerStore, check: @escaping ServerCheck) {
         self.store = store
@@ -145,7 +147,8 @@ final class ServersViewController: UICollectionViewController {
         snapshot.reconfigureItems(snapshot.itemIdentifiers.filter { dataSource.indexPath(for: $0) != nil })
         dataSource.apply(snapshot, animatingDifferences: view.window != nil)
         if store.servers.isEmpty, store.missingTokens.isEmpty, store.fileProblem == nil {
-            contentUnavailableConfiguration = SessionsViewController.noServers { [weak self] in self?.addServer() }
+            contentUnavailableConfiguration = SessionsViewController.noServers(
+                scan: { [weak self] in self?.onScan?() }, addServer: { [weak self] in self?.addServer() })
         } else {
             contentUnavailableConfiguration = nil
         }

@@ -157,6 +157,37 @@ final class ShellSnapshotTests: XCTestCase {
         }
     }
 
+    /// Add Server as Add Manually opens it: the command to run, Scan and Paste, and the
+    /// fields to type the server into instead.
+    func testServerEditorEmpty() async throws {
+        for appearance in appearances {
+            let (root, _) = root(servers: [], sessions: false)
+            let window = Snapshot.host(root, appearance: appearance, navigation: false)
+            await Snapshot.settle()
+            try await Snapshot.writeSheet(root.serverEditorSheet(), over: window, as: sheetKind, task: Self.task,
+                                          name: "server-add-empty", appearance: appearance) { _ in }
+            Snapshot.tearDown(window)
+        }
+    }
+
+    /// The camera cannot be drawn here: these are the scanner's explanations, as the
+    /// Simulator, which has none, and a denied camera show them.
+    func testPairingScanner() async throws {
+        for appearance in appearances {
+            for state in [PairingScannerViewController.State.unsupported, .denied] {
+                let (root, _) = root(servers: [], sessions: false)
+                let window = Snapshot.host(root, appearance: appearance, navigation: false)
+                await Snapshot.settle()
+                let scanner = PairingScannerViewController(state: state)
+                let sheet = UINavigationController(rootViewController: scanner)
+                try await Snapshot.writeSheet(sheet, over: window, as: sheetKind, task: Self.task,
+                                              name: "scanner-\(state == .denied ? "denied" : "unsupported")",
+                                              appearance: appearance) { _ in }
+                Snapshot.tearDown(window)
+            }
+        }
+    }
+
     func testServerEditorEditing() async throws {
         for appearance in appearances {
             let (root, _) = root(servers: [vps], sessions: true, check: { _ in

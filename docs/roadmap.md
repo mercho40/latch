@@ -121,7 +121,7 @@ A lightweight background service managed by `launchd` that:
 - Do not bundle the Tailscale SDK or make Tailscale a product dependency
 - Defer NAT traversal and a hosted relay until the local product is validated
 
-Built so far, ahead of the local-network work: a server reached over Tailscale or an SSH tunnel, with a bearer token and no encryption of its own. It runs on Linux as well as macOS. `latch-server pair --qr` prints the pairing string as a QR code the iPhone's Camera opens in Latch, but what it carries is the server's token, not a device key. Bonjour discovery, device keys and TLS are not built.
+Built so far, ahead of the local-network work: a server reached over Tailscale or an SSH tunnel, with a bearer token and no encryption of its own. It runs on Linux as well as macOS. `latch-server pair --qr` prints the pairing string as a QR code that Latch scans, or the iPhone's Camera opens in Latch, but what it carries is the server's token, not a device key. Bonjour discovery, device keys and TLS are not built.
 
 A future relay must never receive plaintext prompts, source code, tool output, or approval contents.
 
@@ -182,7 +182,7 @@ Not built: device keys and TLS; per-device tokens and revoking one device; a fol
 - [x] Prompt, cancel, approve, and deny actions
 - [x] Reconnection and basic offline state
 
-Built as a client of `latch-server` rather than of the Mac: a UIKit app for iPhone and iPad that lists each server's sessions, takes up runtimes another device started with their history, starts new ones, streams Markdown replies and tool activity, sends prompts and photos, switches model, effort and mode, answers permission requests, and catches up after suspension or a dropped link. Pairing is by the server's `latch://` string or its QR code, and the token is kept in the Keychain. See [Latch for iPhone and iPad](ios.md).
+Built as a client of `latch-server` rather than of the Mac: a UIKit app for iPhone and iPad that lists each server's sessions, takes up runtimes another device started with their history, starts new ones, streams Markdown replies and tool activity, sends prompts and photos, switches model, effort and mode, answers permission requests, and catches up after suspension or a dropped link. Pairing is by the server's `latch://` string or its QR code, scanned in the app or with the Camera, and the token is kept in the Keychain. See [Latch for iPhone and iPad](ios.md).
 
 Not built: Bonjour discovery; pairing with device keys and TLS; background push; an App Store or TestFlight build.
 

@@ -10,8 +10,9 @@ import UIKit
 /// `--ui-fixture <screen>`: the real app over made-up servers and sessions, with nothing read
 /// or saved and no network, so a screen can be captured with `xcrun simctl io screenshot` in
 /// any appearance and text size the Simulator is set to. Debug builds only. The shell's
-/// screens are onboarding, sessions, new-session, servers, server-add, server-edit and
-/// banner; `sessionScreens` are one session open, its agent scripted.
+/// screens are onboarding, sessions, new-session, servers, server-add (from a link),
+/// server-add-manual, scanner (which the Simulator cannot scan with), server-edit and banner;
+/// `sessionScreens` are one session open, its agent scripted.
 @MainActor
 enum UIFixture {
     static let argument = "--ui-fixture"
@@ -63,9 +64,10 @@ enum UIFixture {
     }
 
     static func root(for screen: String) -> RootViewController {
-        let store = InMemoryServerStore(screen == "onboarding" ? [] : [vps, mini, pi])
+        let empty = ["onboarding", "scanner", "server-add-manual"].contains(screen)
+        let store = InMemoryServerStore(empty ? [] : [vps, mini, pi])
         let library = SessionLibrary(servers: store, connector: ScriptedConnector(), store: nil, listRuntimes: runtimes)
-        if screen != "onboarding" { populate(library, now: Date(), scripted: sessionScreens.contains(screen)) }
+        if !empty { populate(library, now: Date(), scripted: sessionScreens.contains(screen)) }
         let defaults = UserDefaults(suiteName: "dev.latchapp.ios.fixture") ?? .standard
         let memory = ServerMemory(defaults: defaults)
         // vps's home is known, as after any handshake with it; Studio Mac never answered.
@@ -140,6 +142,8 @@ enum UIFixture {
             root.presentServerEditor(pairing: try? LatchRemotePairing(host: "vps.tailnet.ts.net", token: .generate()))
             try? await Task.sleep(for: .milliseconds(600))
             editor(in: root)?.testConnection()
+        case "server-add-manual": root.presentServerEditor()
+        case "scanner": root.presentScanner()
         case "server-edit":
             root.presentServerEditor(serverID: mini.id)
             try? await Task.sleep(for: .milliseconds(600))

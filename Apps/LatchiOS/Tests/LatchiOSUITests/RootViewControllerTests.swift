@@ -17,7 +17,8 @@ final class RootViewControllerTests: XCTestCase {
         root.placeholder.loadViewIfNeeded()
         let empty = try XCTUnwrap(root.placeholder.contentUnavailableConfiguration as? UIContentUnavailableConfiguration)
         XCTAssertEqual(empty.text, "No Servers")
-        XCTAssertEqual(empty.button.title, "Add Server")
+        XCTAssertEqual(empty.button.title, "Scan Pairing Code")
+        XCTAssertEqual(empty.secondaryButton.title, "Add Manually")
         XCTAssertNotNil(empty.buttonProperties.primaryAction)
         let window = UIWindow(frame: UIScreen.main.bounds)
         window.rootViewController = root
@@ -60,6 +61,28 @@ final class RootViewControllerTests: XCTestCase {
         root.sessions.addServer()
         XCTAssertEqual(delegate.addServerRequests, 1)
         XCTAssertTrue(delegate.links.isEmpty)
+    }
+
+    /// A code scanned in Latch is a link opened from the Camera app: the delegate confirms it
+    /// in Add Server, or offers to update the server it already has.
+    func testScanPairingCodeOpensTheScannerWhoseCodeReachesTheDelegate() throws {
+        let root = RootViewController()
+        let delegate = Delegate()
+        root.serverDelegate = delegate
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = root
+        window.isHidden = false
+        defer { window.isHidden = true }
+        root.sessions.scanPairingCode()
+        let navigation = try XCTUnwrap(root.presentedViewController as? UINavigationController)
+        let scanner = try XCTUnwrap(navigation.topViewController as? PairingScannerViewController)
+        XCTAssertEqual(scanner.title, "Scan Pairing Code")
+        XCTAssertTrue(delegate.links.isEmpty, "Opening the scanner reads nothing")
+        let pairing = try LatchRemotePairing(host: "vps.example", token: token)
+        // Called as the scanner does once it has gone, which never happens in the test host.
+        scanner.onScan?(pairing)
+        XCTAssertEqual(delegate.links, [.success(pairing)])
+        XCTAssertEqual(delegate.addServerRequests, 0)
     }
 
     func testAPairingLinkReachesTheDelegate() throws {

@@ -23,6 +23,8 @@ final class SessionsViewController: UICollectionViewController {
     }
 
     var onAddServer: (() -> Void)?
+    /// Scan Pairing Code, from the pairing explanation.
+    var onScan: (() -> Void)?
     /// New Session, on the given server when it came from that server's section.
     var onNewSession: ((UUID?) -> Void)?
     var onShowServers: (() -> Void)?
@@ -129,6 +131,8 @@ final class SessionsViewController: UICollectionViewController {
     }
 
     func addServer() { onAddServer?() }
+
+    func scanPairingCode() { onScan?() }
 
     @objc private func differentiateWithoutColorChanged() { reload(animated: false) }
 
@@ -342,7 +346,8 @@ final class SessionsViewController: UICollectionViewController {
             // Beside the session column, which explains pairing with the one Add Server, the
             // sidebar stays empty rather than say it twice. Alone, the list explains it.
             contentUnavailableConfiguration = splitViewController?.isCollapsed == false
-                ? nil : Self.noServers { [weak self] in self?.addServer() }
+                ? nil : Self.noServers(scan: { [weak self] in self?.scanPairingCode() },
+                                       addServer: { [weak self] in self?.addServer() })
         } else if library.sessions.isEmpty, library.servers.problem == nil,
                   library.servers.servers.allSatisfy({ library.adoptableRuntimes(on: $0.id).isEmpty }) {
             contentUnavailableConfiguration = Self.noSessions
@@ -351,23 +356,25 @@ final class SessionsViewController: UICollectionViewController {
         }
     }
 
-    static func noServers(addServer: @escaping () -> Void,
-                          copy: @escaping (String) -> Void = { UIPasteboard.general.string = $0 })
-        -> UIContentUnavailableConfiguration {
+    /// Scanning is the way in: the code holds everything Add Server asks for. Add Manually
+    /// opens the sheet for pasting the link or typing the server in, which also has the
+    /// command to copy.
+    static func noServers(scan: @escaping () -> Void, addServer: @escaping () -> Void) -> UIContentUnavailableConfiguration {
         var configuration = UIContentUnavailableConfiguration.empty()
         configuration.image = UIImage(systemName: "server.rack")
         configuration.text = "No Servers"
         configuration.secondaryAttributedText = pairingInstructions
         var button = UIButton.Configuration.filled()
-        button.title = "Add Server"
+        button.title = "Scan Pairing Code"
+        button.image = UIImage(systemName: "qrcode.viewfinder")
+        button.imagePadding = 6
         button.cornerStyle = .capsule
         configuration.button = button
-        configuration.buttonProperties.primaryAction = UIAction { _ in addServer() }
-        // The command is typed on another machine: copying it saves reading it off the screen.
+        configuration.buttonProperties.primaryAction = UIAction { _ in scan() }
         var secondary = UIButton.Configuration.plain()
-        secondary.title = "Copy Command"
+        secondary.title = "Add Manually"
         configuration.secondaryButton = secondary
-        configuration.secondaryButtonProperties.primaryAction = UIAction { _ in copy(pairingCommand) }
+        configuration.secondaryButtonProperties.primaryAction = UIAction { _ in addServer() }
         return configuration
     }
 
@@ -390,8 +397,7 @@ final class SessionsViewController: UICollectionViewController {
         text.append(NSAttributedString(string: command + "\n", attributes: [
             .font: ChromeFont.monospaced(.footnote), .foregroundColor: UIColor.label, .paragraphStyle: paragraph,
             .accessibilitySpeechPunctuation: true]))
-        text.append(NSAttributedString(string: "Scan the code it shows with the Camera, or paste the link it prints in Add Server.",
-                                       attributes: plain))
+        text.append(NSAttributedString(string: "Then scan the code it shows.", attributes: plain))
         return text
     }
 

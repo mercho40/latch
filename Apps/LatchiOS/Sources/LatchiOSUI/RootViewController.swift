@@ -85,6 +85,7 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
             guard let self else { return }
             serverDelegate?.rootViewControllerDidRequestAddServer(self)
         }
+        sessions.onScan = { [weak self] in self?.presentScanner() }
         sessions.onNewSession = { [weak self] serverID in self?.presentNewSession(serverID: serverID) }
         sessions.onShowServers = { [weak self] in self?.presentServers() }
         sessions.onServerSettings = { [weak self] id in self?.presentServerEditor(serverID: id) }
@@ -123,6 +124,16 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         guard let link = urls.lazy.compactMap(PairingLink.parse).first else { return }
         pendingLink = link
         deliverPendingLink()
+    }
+
+    /// Scan Pairing Code. A code read in Latch is a link opened from the Camera app, without
+    /// leaving Latch: the delegate takes it as one, after the scanner has gone.
+    func presentScanner() {
+        presentOnTop(PairingScannerViewController.sheet { [weak self] pairing in
+            guard let self else { return }
+            pendingLink = .success(pairing)
+            deliverPendingLink()
+        })
     }
 
     private func deliverPendingLink() {
@@ -231,6 +242,7 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         placeholder = SessionPlaceholderViewController()
         placeholder.hasServers = !servers.servers.isEmpty
         placeholder.onAddServer = { [weak self] in self?.sessions.addServer() }
+        placeholder.onScan = { [weak self] in self?.presentScanner() }
         placeholder.onNewSession = { [weak self] in self?.presentNewSession() }
         return placeholder
     }
@@ -307,6 +319,7 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
         controller.onEdit = { [weak navigation] editor in
             navigation?.present(ServerEditorViewController.sheet(editor), animated: true)
         }
+        controller.onScan = { [weak self] in self?.presentScanner() }
         return navigation
     }
 
@@ -525,6 +538,7 @@ final class SessionPlaceholderViewController: UIViewController {
         didSet { if hasServers != oldValue, isViewLoaded { refresh() } }
     }
     var onAddServer: () -> Void = {}
+    var onScan: () -> Void = {}
     var onNewSession: () -> Void = {}
 
     override func viewDidLoad() {
@@ -536,7 +550,7 @@ final class SessionPlaceholderViewController: UIViewController {
     private func refresh() {
         guard hasServers else {
             return contentUnavailableConfiguration = SessionsViewController.noServers(
-                addServer: { [weak self] in self?.onAddServer() })
+                scan: { [weak self] in self?.onScan() }, addServer: { [weak self] in self?.onAddServer() })
         }
         var configuration = UIContentUnavailableConfiguration.empty()
         configuration.image = UIImage(systemName: "bubble.left.and.text.bubble.right")

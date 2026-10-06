@@ -10,35 +10,55 @@ public struct ServerProfile: Identifiable, Equatable, Sendable {
     public var name: String
     public var host: String
     public var port: UInt16
+    /// Straight to the server, or through a TLS proxy such as a Cloudflare Tunnel.
+    public var transport: LatchRemoteTransport {
+        didSet { if transport != .tcp { allowUnencryptedNetwork = false } }
+    }
     public var token: LatchRemoteToken
-    /// Lets the token go to an address that is neither this Mac nor on a tailnet.
-    public var allowUnencryptedNetwork: Bool
+    /// Lets the token go to an address that is neither this Mac nor on a tailnet. Only TCP
+    /// needs it, and only TCP keeps it: a WebSocket is always over TLS, and an older Latch
+    /// that reads the profile as TCP must not send the token in the clear.
+    public var allowUnencryptedNetwork: Bool {
+        didSet { if transport != .tcp { allowUnencryptedNetwork = false } }
+    }
     /// The command a Custom agent runs on this server. Empty offers no Custom agent there.
     public var customCommand: String
 
-    public init(id: UUID = UUID(), name: String, host: String, port: UInt16 = LatchRemoteProtocol.defaultPort,
+    public init(id: UUID = UUID(), name: String, host: String, port: UInt16? = nil, transport: LatchRemoteTransport = .tcp,
                 token: LatchRemoteToken, allowUnencryptedNetwork: Bool = false, customCommand: String = "") {
         self.id = id
         self.name = name
         self.host = host
-        self.port = port
+        self.port = port ?? transport.defaultPort
+        self.transport = transport
         self.token = token
-        self.allowUnencryptedNetwork = allowUnencryptedNetwork
+        self.allowUnencryptedNetwork = transport == .tcp && allowUnencryptedNetwork
         self.customCommand = customCommand
     }
 
-    /// `host:port`, with an IPv6 literal bracketed.
-    public var address: String { host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)" }
+    /// `host:port`, with an IPv6 literal bracketed; through a TLS proxy, `wss://host`, and
+    /// the port only when it is not 443.
+    public var address: String {
+        Self.address(host: host, port: port, transport: transport)
+    }
+
+    public static func address(host: String, port: UInt16, transport: LatchRemoteTransport) -> String {
+        let host = host.contains(":") ? "[\(host)]" : host
+        switch transport {
+        case .tcp: return "\(host):\(port)"
+        case .webSocket: return port == transport.defaultPort ? "wss://\(host)" : "wss://\(host):\(port)"
+        }
+    }
 
     public var connectionOptions: LatchRemoteConnectionOptions {
-        LatchRemoteConnectionOptions(host: host, port: port, token: token,
+        LatchRemoteConnectionOptions(host: host, port: port, transport: transport, token: token,
                                      allowUnencryptedNetwork: allowUnencryptedNetwork, client: .latchApp)
     }
 
     /// Whether a connection made with `other` would go to the same place the same way. A new
     /// name or custom command changes nothing about a connection already made.
     public func connects(like other: ServerProfile) -> Bool {
-        host == other.host && port == other.port && token == other.token
+        host == other.host && port == other.port && transport == other.transport && token == other.token
             && allowUnencryptedNetwork == other.allowUnencryptedNetwork
     }
 }
@@ -70,6 +90,7 @@ extension ServerProfile: Codable {
         public var name: String
         public var host: String
         public var port: UInt16
+        public var transport: LatchRemoteTransport
         public var allowUnencryptedNetwork: Bool
         public var customCommand: String
 
@@ -78,17 +99,18 @@ extension ServerProfile: Codable {
             name = profile.name
             host = profile.host
             port = profile.port
+            transport = profile.transport
             allowUnencryptedNetwork = profile.allowUnencryptedNetwork
             customCommand = profile.customCommand
         }
 
         public func profile(token: LatchRemoteToken) -> ServerProfile {
-            ServerProfile(id: id, name: name, host: host, port: port, token: token,
+            ServerProfile(id: id, name: name, host: host, port: port, transport: transport, token: token,
                           allowUnencryptedNetwork: allowUnencryptedNetwork, customCommand: customCommand)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case id, name, host, port, allowUnencryptedNetwork, customCommand
+            case id, name, host, port, transport, allowUnencryptedNetwork, customCommand
         }
 
         public init(from decoder: any Decoder) throws {
@@ -97,6 +119,9 @@ extension ServerProfile: Codable {
             name = try container.decode(String.self, forKey: .name)
             host = try container.decode(String.self, forKey: .host)
             port = try container.decode(UInt16.self, forKey: .port)
+            // A transport from a newer Latch reads as TCP, which then sends the token nowhere the
+            // destination check refuses, rather than leaving the whole list unreadable.
+            transport = (try? container.decodeIfPresent(LatchRemoteTransport.self, forKey: .transport)) ?? .tcp
             allowUnencryptedNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowUnencryptedNetwork) ?? false
             customCommand = try container.decodeIfPresent(String.self, forKey: .customCommand) ?? ""
         }
@@ -108,7 +133,7 @@ extension ServerProfile: CustomStringConvertible, CustomDebugStringConvertible, 
     public var debugDescription: String { description }
     /// Without this, `dump` would walk into the token.
     public var customMirror: Mirror {
-        Mirror(self, children: ["id": id, "name": name, "host": host, "port": port,
+        Mirror(self, children: ["id": id, "name": name, "host": host, "port": port, "transport": transport,
                                 "allowUnencryptedNetwork": allowUnencryptedNetwork, "customCommand": customCommand],
                displayStyle: .struct)
     }

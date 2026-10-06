@@ -2,7 +2,7 @@
 import Foundation
 import LatchACP
 import LatchAgentCore
-import LatchRemoteClient
+@testable import LatchRemoteClient
 import LatchRemoteProtocol
 import LatchServiceProtocol
 import Synchronization
@@ -12,9 +12,18 @@ import XCTest
 /// `LatchRemoteRuntimeChannel`, the Mac and iOS client, against the real server and a mock agent.
 final class RemoteServerClientTests: XCTestCase {
     func testAChannelRunsTurnsAcrossADroppedConnection() async throws {
+        try await runTurnsAcrossADroppedConnection(webSocket: false)
+    }
+
+    /// The same inside a WebSocket, as through a TLS proxy, without the TLS.
+    func testAChannelRunsTurnsAcrossADroppedWebSocket() async throws {
+        try await runTurnsAcrossADroppedConnection(webSocket: true)
+    }
+
+    private func runTurnsAcrossADroppedConnection(webSocket: Bool) async throws {
         try await withServer { testbed in
             let id = AgentRuntimeID("channel")
-            let options = LatchRemoteRuntimeChannel.Options(
+            var options = LatchRemoteRuntimeChannel.Options(
                 host: "127.0.0.1",
                 port: testbed.port,
                 token: testbed.token,
@@ -23,6 +32,7 @@ final class RemoteServerClientTests: XCTestCase {
                 backoff: LatchRemoteBackoff(initial: .milliseconds(50), maximum: .milliseconds(200)),
                 probeTimeout: .milliseconds(500)
             )
+            if webSocket { options.connection.useWebSocketWithoutTLSForTesting() }
             let channel = LatchRemoteRuntimeChannel(options: options)
             channel.start()
             let events = ChannelRecorder(channel.events)
@@ -94,6 +104,15 @@ final class RemoteServerClientTests: XCTestCase {
     /// Two requests of several megabytes each, such as edits with large diffs, would make a
     /// record too large for one frame, and every re-attach would be refused.
     func testAChannelReattachesToARuntimeWithLargePendingRequests() async throws {
+        try await reattachWithLargePendingRequests(webSocket: false)
+    }
+
+    /// Each of those frames crosses a WebSocket as many messages.
+    func testAChannelReattachesOverAWebSocketWithLargePendingRequests() async throws {
+        try await reattachWithLargePendingRequests(webSocket: true)
+    }
+
+    private func reattachWithLargePendingRequests(webSocket: Bool) async throws {
         try await withServer { testbed in
             let script = #"""
             PATH=/usr/bin:/bin:$PATH
@@ -115,10 +134,12 @@ final class RemoteServerClientTests: XCTestCase {
             """#
             try script.write(to: testbed.bed.workspace.appendingPathComponent("big.sh"), atomically: true, encoding: .utf8)
             let id = AgentRuntimeID("big")
-            let channel = LatchRemoteRuntimeChannel(options: LatchRemoteRuntimeChannel.Options(
+            var options = LatchRemoteRuntimeChannel.Options(
                 host: "127.0.0.1", port: testbed.port, token: testbed.token,
                 client: LatchRemoteClientInfo(name: "tests", version: "1", platform: "macOS"),
-                runtimeID: id, backoff: LatchRemoteBackoff(initial: .milliseconds(50), maximum: .milliseconds(200))))
+                runtimeID: id, backoff: LatchRemoteBackoff(initial: .milliseconds(50), maximum: .milliseconds(200)))
+            if webSocket { options.connection.useWebSocketWithoutTLSForTesting() }
+            let channel = LatchRemoteRuntimeChannel(options: options)
             channel.start()
             let events = ChannelRecorder(channel.events)
             defer { channel.close() }

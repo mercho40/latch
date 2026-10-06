@@ -7,7 +7,7 @@ public enum ServerCommand: Equatable, Sendable {
     /// Prints the token, creating it if absent, or a new one with `rotate`.
     case token(ConfigOptions, rotate: Bool)
     /// Prints a `latch://` string for pasting into the app, and with `qr` a QR code of it.
-    case pair(ConfigOptions, host: String, port: UInt16, qr: PairQRCode? = nil)
+    case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil)
     case version
     case help
 }
@@ -59,7 +59,7 @@ public enum ServerCommandLine {
     public static let usage = """
     usage: latch-server [options]            serve until SIGTERM or SIGINT
            latch-server token [--rotate]      print the token, creating it if absent
-           latch-server pair --host NAME [--port N] [--qr [--invert]]
+           latch-server pair --host NAME [--port N] [--wss] [--qr [--invert]]
                                               print a latch:// string for the Latch app
            latch-server --version | --help
 
@@ -73,6 +73,8 @@ public enum ServerCommandLine {
                                     such as 24h, 90m or 30s; 0 disables (default 24h)
       --log-agent-stderr            log agents' stderr, escaped and rate-limited
       --allow-root                  run as root
+      --wss                         with pair, for clients that connect through a TLS proxy
+                                    such as a Cloudflare Tunnel (default port 443)
       --qr                          with pair, also print the string as a QR code for the
                                     iPhone's camera; it holds the token, so keep it private
       --invert                      with --qr, draw the dark modules instead of the light
@@ -94,6 +96,7 @@ public enum ServerCommandLine {
         var port: UInt16?
         var qr = false
         var invert = false
+        var webSocket = false
         var version = false
         var help = false
         var seen: Set<String> = []
@@ -164,6 +167,10 @@ public enum ServerCommandLine {
                     throw ServerCommandLineError("--port \(text): expected a number from 1 to 65535")
                 }
                 port = number
+            case "--wss":
+                try allowed(option, in: ["pair"])
+                try flag()
+                webSocket = true
             case "--qr":
                 try allowed(option, in: ["pair"])
                 try flag()
@@ -196,7 +203,8 @@ public enum ServerCommandLine {
             guard let host else { throw ServerCommandLineError("pair needs --host, the name or address clients reach this server at") }
             guard qr || !invert else { throw ServerCommandLineError("--invert needs --qr") }
             let style: PairQRCode? = qr ? (invert ? .darkModulesDrawn : .lightModulesDrawn) : nil
-            return .pair(serve.config, host: host, port: port ?? LatchRemoteProtocol.defaultPort, qr: style)
+            let transport: LatchRemoteTransport = webSocket ? .webSocket : .tcp
+            return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }

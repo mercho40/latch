@@ -72,7 +72,7 @@ A user can:
                                                         └──────────────────┘
 ```
 
-Part of this exists in a different shape. `latch-server` runs agents on a Linux or macOS machine you control, as an ordinary process (on Linux, a systemd user service), and both apps connect to it over TCP: the Mac through Tailscale or an SSH tunnel, the iPhone and iPad through Tailscale or, when allowed, a local network; see [Running latch-server](server.md) and [Latch for iPhone and iPad](ios.md). So the iOS app talks to the server, not to the Mac: to follow agents from a phone, they run on a server, which can be the Mac itself. Agents on a server keep running when either app quits or is suspended, and the apps attach to them again when they next open. Agents on the Mac itself still run under the XPC service embedded in the app, not a `launchd` service, stop when the app quits, and are out of the phone's reach.
+Part of this exists in a different shape. `latch-server` runs agents on a Linux or macOS machine you control, as an ordinary process (on Linux, a systemd user service), and both apps connect to it over TCP, or over a WebSocket through a TLS proxy such as a Cloudflare Tunnel: the Mac through Tailscale, a tunnel or an SSH tunnel, the iPhone and iPad through Tailscale, a tunnel or, when allowed, a local network; see [Running latch-server](server.md) and [Latch for iPhone and iPad](ios.md). So the iOS app talks to the server, not to the Mac: to follow agents from a phone, they run on a server, which can be the Mac itself. Agents on a server keep running when either app quits or is suspended, and the apps attach to them again when they next open. Agents on the Mac itself still run under the XPC service embedded in the app, not a `launchd` service, stop when the app quits, and are out of the phone's reach.
 
 ### Components
 
@@ -164,6 +164,7 @@ Done: AppKit shell and session UI, workspace management, local IPC through an em
 
 - [x] `latch-server`, for Linux (static binaries for x86_64 and aarch64) and macOS, run by hand or as a systemd user service
 - [x] Plain TCP with a bearer token; loopback by default, a tailnet address only on a Tailscale interface, anything else only when explicitly allowed
+- [x] The same stream over a WebSocket on the same port, for a TLS proxy such as a Cloudflare Tunnel; the apps connect with `wss` and `latch-server pair --wss`
 - [x] A replay hub that keeps each agent's events, so a client that drops, sleeps or changes network reconnects and catches up without running a command twice
 - [x] Mac client: servers in Settings, remote sessions in the window and sidebar, and reconnect with backoff
 - [x] Quitting Latch detaches from remote agents rather than stopping them, and relaunching re-attaches
@@ -205,7 +206,7 @@ Background iOS push notifications are deferred until Latch has an optional relay
 5. **Background service:** bundle Latch Agent inside the macOS application and register it as a per-user launch agent with `SMAppService`. The app owns installation, status, updates, and removal.
 6. **Initial remote access:** work over user-managed Tailscale connections without bundling its SDK. LAN use requires no third-party service.
 7. **License:** Apache-2.0, with no Contributor License Agreement.
-8. **Server transport:** newline-delimited JSON over plain TCP with a 256-bit bearer token. Encryption comes from the network path, Tailscale or SSH, not from Latch; TLS and per-device keys remain planned for pairing.
+8. **Server transport:** newline-delimited JSON over plain TCP with a 256-bit bearer token, or the same stream inside a WebSocket for a TLS proxy in front of the server. Encryption comes from the network path, Tailscale, SSH or the proxy's TLS, not from Latch; the server never handles TLS or a tunnel itself. Latch's own TLS and per-device keys remain planned for pairing.
 
 These decisions can be revisited only when a prototype exposes a concrete platform constraint.
 

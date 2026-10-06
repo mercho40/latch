@@ -239,6 +239,8 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         for control in [unencryptedCheckbox, commandField, testButton] as [NSControl] {
             control.isEnabled = readable && server != nil
         }
+        // Through a TLS proxy the connection is always encrypted.
+        unencryptedCheckbox.isEnabled = unencryptedCheckbox.isEnabled && server?.transport == .tcp
         unencryptedCheckbox.state = server?.allowUnencryptedNetwork == true ? .on : .off
         let textColor: NSColor = server == nil ? .tertiaryLabelColor : .secondaryLabelColor
         unencryptedWarning.textColor = textColor
@@ -308,6 +310,7 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
                 edited.name = profile.name
                 edited.host = profile.host
                 edited.port = profile.port
+                edited.transport = profile.transport
                 edited.token = profile.token
                 guard edited != current else { return }
                 profile = edited
@@ -433,7 +436,7 @@ private final class ServerRowView: NSTableCellView {
 /// Add Server: paste what `latch-server pair` prints, which fills in everything, or enter the
 /// server by hand. Both token-bearing fields are secure fields, so the token never shows.
 /// Editing a server uses the same sheet, filled in except for the token: left empty, the token
-/// stays as it was, and a pasted pairing string replaces the host, port and token together.
+/// stays as it was, and a pasted pairing string replaces the connection, host, port and token.
 @MainActor
 final class AddServerController: NSWindowController, NSTextFieldDelegate {
     /// Called once: with the profile on Add or Save, nil on Cancel.
@@ -443,6 +446,8 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
 
     let pairingField = NSSecureTextField(string: "")
     let nameField = NSTextField(string: "")
+    /// Direct, or through a TLS proxy such as a Cloudflare Tunnel, in `LatchRemoteTransport` order.
+    let transportPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     let hostField = NSTextField(string: "")
     let portField = NSTextField(string: String(LatchRemoteProtocol.defaultPort))
     let tokenField = NSSecureTextField(string: "")
@@ -464,6 +469,7 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
         build(in: panel)
         if let original {
             nameField.stringValue = original.name
+            transport = original.transport
             hostField.stringValue = original.host
             portField.stringValue = String(original.port)
             // A name of the user's own stays when the host changes; one that was only ever
@@ -489,8 +495,12 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
         pairingField.setAccessibilityLabel("Pairing string")
         let pairingCaption = NSTextField(labelWithString: original == nil
             ? "Paste what “latch-server pair” prints on the server; it fills in the rest."
-            : "Paste a new pairing string to replace the host, port and token.")
+            : "Paste a new pairing string to replace the connection, host, port and token.")
         nameField.setAccessibilityLabel("Name")
+        transportPopUp.addItems(withTitles: LatchRemoteTransport.allCases.map(Self.title))
+        transportPopUp.setAccessibilityLabel("Connection")
+        transportPopUp.target = self
+        transportPopUp.action = #selector(transportChanged)
         hostField.placeholderString = "vps.tailnet.ts.net"
         hostField.setAccessibilityLabel("Host")
         portField.setAccessibilityLabel("Port")
@@ -516,6 +526,7 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
             [NSTextField(labelWithString: "Pairing string:"), pairingField],
             [NSGridCell.emptyContentView, pairingCaption],
             [NSTextField(labelWithString: "Name:"), nameField],
+            [NSTextField(labelWithString: "Connection:"), transportPopUp],
             [NSTextField(labelWithString: "Host:"), hostRow],
             [NSTextField(labelWithString: "Token:"), tokenField],
             [NSGridCell.emptyContentView, message],
@@ -572,10 +583,33 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
         refresh()
     }
 
-    /// A pasted pairing string fills host, port and token, and the name when none was typed.
+    static func title(_ transport: LatchRemoteTransport) -> String {
+        switch transport {
+        case .tcp: "Direct"
+        case .webSocket: "Through a TLS proxy (wss)"
+        }
+    }
+
+    var transport: LatchRemoteTransport {
+        get { LatchRemoteTransport.allCases[max(0, transportPopUp.indexOfSelectedItem)] }
+        set { transportPopUp.selectItem(at: LatchRemoteTransport.allCases.firstIndex(of: newValue) ?? 0) }
+    }
+
+    /// A port left at the other connection's default follows to this one's.
+    @objc func transportChanged() {
+        let port = UInt16(portField.stringValue.trimmingCharacters(in: .whitespaces))
+        if let port, LatchRemoteTransport.allCases.contains(where: { $0 != transport && $0.defaultPort == port }) {
+            portField.stringValue = String(transport.defaultPort)
+        }
+        refresh()
+    }
+
+    /// A pasted pairing string fills the connection, host, port and token, and the name when
+    /// none was typed.
     func pairingChanged() {
         let text = pairingField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let pairing = try? LatchRemotePairing(parsing: text) else { return }
+        transport = pairing.transport
         hostField.stringValue = pairing.host
         portField.stringValue = String(pairing.port)
         tokenField.stringValue = pairing.token.rawValue
@@ -606,11 +640,12 @@ final class AddServerController: NSWindowController, NSTextFieldDelegate {
         guard (try? LatchRemotePairing(host: host, port: port, token: token)) != nil else { return .failure(.host) }
         let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var profile = original else {
-            return .success(ServerProfile(name: name.isEmpty ? host : name, host: host, port: port, token: token))
+            return .success(ServerProfile(name: name.isEmpty ? host : name, host: host, port: port, transport: transport, token: token))
         }
         profile.name = name.isEmpty ? host : name
         profile.host = host
         profile.port = port
+        profile.transport = transport
         profile.token = token
         return .success(profile)
     }

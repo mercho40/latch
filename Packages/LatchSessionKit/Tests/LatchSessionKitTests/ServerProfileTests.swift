@@ -44,6 +44,28 @@ final class ServerProfileTests: XCTestCase {
         XCTAssertEqual(defaults.customCommand, "")
     }
 
+    /// Through a TLS proxy the connection is always encrypted, and an older Latch that reads
+    /// the profile as plain TCP must not find the token allowed onto an unencrypted network.
+    func testOnlyTCPKeepsAnUnencryptedNetwork() throws {
+        var server = ServerProfile(name: "dev", host: "latch.example.com", transport: .webSocket, token: .generate(),
+                                   allowUnencryptedNetwork: true)
+        XCTAssertFalse(server.allowUnencryptedNetwork)
+        XCTAssertEqual(server.port, 443)
+        server.allowUnencryptedNetwork = true
+        XCTAssertFalse(server.allowUnencryptedNetwork)
+        server.transport = .tcp
+        server.allowUnencryptedNetwork = true
+        XCTAssertTrue(server.allowUnencryptedNetwork)
+        server.transport = .webSocket
+        XCTAssertFalse(server.allowUnencryptedNetwork)
+        let stored = String(decoding: try JSONEncoder().encode(server), as: UTF8.self)
+        XCTAssertTrue(stored.contains(#""allowUnencryptedNetwork":false"#), stored)
+        XCTAssertTrue(stored.contains(#""transport":"wss""#), stored)
+
+        let newer = Data(#"{"id":"00000000-0000-0000-0000-000000000001","name":"vps","host":"vps","port":7428,"transport":"quic"}"#.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(ServerProfile.Stored.self, from: newer).transport, .tcp)
+    }
+
     func testAStoreBroadcastsItsChanges() throws {
         let store = InMemoryServerStore()
         let changed = expectation(forNotification: .serverStoreDidChange, object: store)

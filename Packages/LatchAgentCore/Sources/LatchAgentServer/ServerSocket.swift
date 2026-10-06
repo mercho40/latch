@@ -22,13 +22,17 @@ public struct ServerSocketAddress: Hashable, Sendable, CustomStringConvertible {
 
     /// `127.0.0.1:7428` or `[::1]:7428`.
     public var description: String {
+        isIPv6 ? "[\(host)]:\(port)" : "\(host):\(port)"
+    }
+
+    /// The address alone: `127.0.0.1` or `::1`.
+    public var host: String {
         var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
         let family = isIPv6 ? AF_INET6 : AF_INET
-        let host: String = bytes.withUnsafeBytes { raw in
+        return bytes.withUnsafeBytes { raw in
             guard inet_ntop(family, raw.baseAddress, &text, socklen_t(text.count)) != nil else { return "?" }
             return String(nulTerminated: text)
         }
-        return isIPv6 ? "[\(host)]:\(port)" : "\(host):\(port)"
     }
 
     init?(_ storage: sockaddr_storage) {

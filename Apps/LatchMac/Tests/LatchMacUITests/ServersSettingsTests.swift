@@ -38,6 +38,45 @@ final class ServersSettingsTests: XCTestCase {
         XCTAssertFalse(profile.allowUnencryptedNetwork)
     }
 
+    /// A server behind a Cloudflare Tunnel or another TLS proxy is reached over a WebSocket.
+    func testAPairingStringForATLSProxyChoosesThatConnection() throws {
+        let sheet = AddServerController()
+        XCTAssertEqual(sheet.transport, .tcp)
+        edit(sheet.pairingField, "latch://latch.example.com:443?transport=wss&token=\(token.rawValue)", in: sheet)
+        XCTAssertEqual(sheet.transport, .webSocket)
+        XCTAssertEqual(sheet.transportPopUp.titleOfSelectedItem, "Through a TLS proxy (wss)")
+        XCTAssertEqual(sheet.portField.stringValue, "443")
+        guard case let .success(profile) = sheet.entry else { return XCTFail("Expected a complete entry") }
+        XCTAssertEqual(profile.transport, .webSocket)
+        XCTAssertEqual(profile.address, "wss://latch.example.com")
+        XCTAssertEqual(profile.connectionOptions.transport, .webSocket)
+
+        // By hand, the port follows the connection while it is the other one's default.
+        let manual = AddServerController()
+        edit(manual.hostField, "latch.example.com", in: manual)
+        edit(manual.tokenField, token.rawValue, in: manual)
+        manual.transportPopUp.selectItem(at: 1)
+        manual.transportChanged()
+        XCTAssertEqual(manual.portField.stringValue, "443")
+        guard case let .success(typed) = manual.entry else { return XCTFail("Expected a complete entry") }
+        XCTAssertEqual(typed.address, "wss://latch.example.com")
+        edit(manual.portField, "8443", in: manual)
+        manual.transportPopUp.selectItem(at: 0)
+        manual.transportChanged()
+        XCTAssertEqual(manual.portField.stringValue, "8443", "A port of the user's own stays")
+        guard case let .success(direct) = manual.entry else { return XCTFail("Expected a complete entry") }
+        XCTAssertEqual(direct.address, "latch.example.com:8443")
+
+        // Editing moves a server onto the proxy, and its sessions with it.
+        let server = ServerProfile(name: "dev", host: "10.20.10.13", token: token, allowUnencryptedNetwork: true)
+        let editing = AddServerController(editing: server)
+        XCTAssertEqual(editing.transport, .tcp)
+        edit(editing.pairingField, "latch://latch.example.com?transport=wss&token=\(token.rawValue)", in: editing)
+        guard case let .success(moved) = editing.entry else { return XCTFail("Expected a complete entry") }
+        XCTAssertEqual(moved.id, server.id)
+        XCTAssertEqual(moved.address, "wss://latch.example.com")
+    }
+
     func testATypedNameSurvivesAPastedPairingString() throws {
         let sheet = AddServerController()
         edit(sheet.nameField, "Build box", in: sheet)
@@ -219,6 +258,17 @@ final class ServersSettingsTests: XCTestCase {
         XCTAssertNil(pane.selectedServer)
         XCTAssertFalse(pane.removeButton.isEnabled)
         XCTAssertFalse(pane.testButton.isEnabled)
+    }
+
+    /// Through a TLS proxy the connection is always encrypted, so there is nothing to allow.
+    func testAServerBehindATLSProxyNeedsNoUnencryptedNetwork() throws {
+        let proxied = ServerProfile(name: "dev", host: "latch.example.com", transport: .webSocket, token: token)
+        let (pane, _) = pane([proxied])
+        XCTAssertEqual(pane.selectedServer, proxied)
+        XCTAssertFalse(pane.unencryptedCheckbox.isEnabled)
+        XCTAssertTrue(pane.testButton.isEnabled)
+        let row = try XCTUnwrap(pane.table.view(atColumn: 0, row: 0, makeIfNecessary: true))
+        XCTAssertEqual(row.accessibilityLabel(), "dev, wss://latch.example.com")
     }
 
     func testACommandEditStaysWithTheServerItBeganOn() throws {

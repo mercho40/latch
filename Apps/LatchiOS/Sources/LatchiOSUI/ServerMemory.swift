@@ -35,8 +35,7 @@ final class ServerMemory {
     }
 
     private static func address(_ options: LatchRemoteConnectionOptions) -> String {
-        let host = options.host
-        return host.contains(":") ? "[\(host)]:\(options.port)" : "\(host):\(options.port)"
+        ServerProfile.address(host: options.host, port: options.port, transport: options.transport)
     }
 
     /// A server check that keeps the home each handshake with a server in `servers` reports,

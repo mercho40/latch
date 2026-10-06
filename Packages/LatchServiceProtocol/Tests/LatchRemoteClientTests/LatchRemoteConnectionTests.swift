@@ -396,6 +396,81 @@ final class LatchRemoteConnectionTests: XCTestCase {
         } catch is TestTimeout {}
     }
 
+    func testAWebSocketGoesToTheServersAddressOverTLS() {
+        XCTAssertEqual(LatchRemoteConnection.webSocketURL(host: "latch.example.com", port: 443)?.absoluteString, "wss://latch.example.com:443/")
+        XCTAssertEqual(LatchRemoteConnection.webSocketURL(host: "::1", port: 8443)?.absoluteString, "wss://[::1]:8443/")
+        XCTAssertNil(LatchRemoteConnection.webSocketURL(host: "a b", port: 443))
+        XCTAssertEqual(LatchRemoteConnection.userAgent(LatchRemoteClientInfo(name: "Latch", version: "0.3.0", platform: "iOS")),
+                       "Latch/0.3.0 (iOS)")
+        XCTAssertEqual(LatchRemoteConnection.userAgent(LatchRemoteClientInfo(name: "La tch\r\n", version: "", platform: "mac(OS)")),
+                       "Latch/unknown (macOS)")
+    }
+
+    /// Only TLS lifts the destination check: a WebSocket without it is checked as TCP is.
+    func testAWebSocketWithoutTLSIsCheckedAsTCPIs() async throws {
+        let server = try await FakeServer.start()
+        defer { server.stop() }
+        var options = server.options()
+        options.useWebSocketWithoutTLSForTesting()
+        options.peerAddressForTesting = [203, 0, 113, 7]
+        let connection = connect(server, options: options)
+        let peer = try await server.nextConnection()
+        try await peer.answerUpgrade()
+        let head = peer.byteCount
+        do {
+            _ = try await withTimeout { try await connection.waitUntilReady() }
+            XCTFail("Expected destinationNotAllowed")
+        } catch {
+            XCTAssertEqual(error as? LatchRemoteClientError, .destinationNotAllowed(address: "203.0.113.7"))
+        }
+        try await peer.waitForClose()
+        // At most the close frame followed the upgrade request: no hello, no token.
+        XCTAssertLessThanOrEqual(peer.byteCount - head, 8)
+    }
+
+    /// A proxy's pings, and their payloads, are not part of the stream.
+    func testAWebSocketsControlFramesStayOutOfTheStream() async throws {
+        let server = try await FakeServer.start()
+        defer { server.stop() }
+        var options = server.options()
+        options.useWebSocketWithoutTLSForTesting()
+        let connection = connect(server, options: options)
+        defer { connection.close() }
+        let peer = try await server.nextConnection()
+        try await peer.answerUpgrade()
+        let welcome = try LatchRemoteCoding.encodeLine(LatchRemoteServerFrame.welcome(Fixture.welcome()))
+        // A ping with a payload, the welcome split around a pong, then a text frame.
+        peer.sendLine(Data([0x89, 2]) + Data("{x".utf8))
+        peer.sendLine(Data([0x82, UInt8(10)]) + welcome.prefix(10))
+        peer.sendLine(Data([0x8A, 1]) + Data("}".utf8))
+        let rest = welcome.dropFirst(10)
+        peer.sendLine(Data([0x82, 126, UInt8(rest.count >> 8), UInt8(rest.count & 0xFF)]) + rest)
+        let ready = try await withTimeout { try await connection.waitUntilReady() }
+        XCTAssertEqual(ready, Fixture.welcome())
+        XCTAssertTrue(LatchRemoteConnection.carriesStream(.cont))
+        XCTAssertFalse(LatchRemoteConnection.carriesStream(.close))
+    }
+
+    /// A tunnel that cannot reach the server answers the upgrade with an HTTP error, such as
+    /// a 502; the token never goes out and the message says where to look.
+    func testAProxyThatAnswersWithoutAWebSocketIsNamed() async throws {
+        let server = try await FakeServer.start()
+        defer { server.stop() }
+        var options = server.options()
+        options.useWebSocketWithoutTLSForTesting()
+        let connection = connect(server, options: options)
+        let peer = try await server.nextConnection()
+        let head = try await peer.answerUpgrade(status: "502 Bad Gateway")
+        XCTAssertTrue(head.contains("User-Agent: LatchTests/1.0 (macOS)"), head)
+        do {
+            _ = try await withTimeout { try await connection.waitUntilReady() }
+            XCTFail("Expected a failure")
+        } catch {
+            guard case let .connectionFailed(detail)? = error as? LatchRemoteClientError else { return XCTFail("\(error)") }
+            XCTAssertTrue(detail.contains("not with a WebSocket"), detail)
+        }
+    }
+
     func testAllowingAnUnencryptedNetworkSendsTheHelloAnyway() async throws {
         let server = try await FakeServer.start()
         defer { server.stop() }

@@ -2,13 +2,13 @@
 
 `latch-server` runs ACP agents on another machine, usually a Linux VPS, and lets Latch on your Mac, iPhone or iPad drive them over the network. Agents keep running when the Mac sleeps or changes network, and when Latch quits; Latch reconnects, or attaches again when it next opens, and catches up on what it missed. It also runs on macOS, which lets a phone follow agents on the Mac itself; [On a Mac](#on-a-mac) covers that. The rest of this guide covers Linux with systemd.
 
-Holding the server's token is the same as having a shell on the server as the user it runs as: a client can start any command there as a custom agent. Latch does not encrypt the connection. Encryption comes from the path: a Tailscale (WireGuard) tailnet, or an SSH tunnel. The server listens only on loopback unless told otherwise, accepts a tailnet address only if Tailscale carries it when the server starts, and refuses any other address without `--allow-unencrypted-network`. See [SECURITY.md](../.github/SECURITY.md) for the boundaries it maintains.
+Holding the server's token is the same as having a shell on the server as the user it runs as: a client can start any command there as a custom agent. Latch does not encrypt the connection itself. Encryption comes from the path: a Tailscale (WireGuard) tailnet, an SSH tunnel, or a TLS proxy such as a Cloudflare Tunnel, which the apps reach over a WebSocket. The server listens only on loopback unless told otherwise, accepts a tailnet address only if Tailscale carries it when the server starts, and refuses any other address without `--allow-unencrypted-network`. See [SECURITY.md](../.github/SECURITY.md) for the boundaries it maintains.
 
 ## Requirements
 
 - Linux on x86_64 or aarch64. The static binaries run on any distribution. A build made with the Swift toolchain on the server needs glibc 2.29 or later.
 - The agents installed and signed in **on the server, as the user `latch-server` runs as**. Your Mac's logins are never used. For Claude Code, sign in with `claude`; for Codex, `codex login`. Codex and Claude Code need Node.js 22+ with npm when their ACP adapter is fetched through `npx`, and internet access on first use. OpenCode and fx use their installed commands and their own logins.
-- Tailscale on the server and on every Mac, iPhone or iPad that connects to it, or, for a Mac only, SSH access to the server.
+- One way to reach it: Tailscale on the server and on every Mac, iPhone or iPad that connects to it; a Cloudflare Tunnel, or another TLS proxy, in front of it; or, for a Mac only, SSH access to the server.
 
 Agents get `latch-server`'s environment, not your login shell's. It searches, in order, the `PATH` it was given; `~/.local/bin`, `~/.fx/bin`, `~/.opencode/bin`, `~/.bun/bin`, `~/.npm-global/bin` and `~/.volta/bin`; Linuxbrew, `/usr/local/bin`, the system directories and `/snap/bin`; then fnm installs, then nvm installs. An agent installed anywhere else needs `Environment=PATH=…` in the unit below, or an absolute path in a custom command. The first `node` or `npx` found wins, so a distribution's Node in `/usr/bin` is used before one from nvm or fnm; if it is older than 22, put the newer Node's `bin` directory first with `Environment=PATH=…`.
 
@@ -72,7 +72,7 @@ prints the token, creating it on first use in `~/.config/latch/server-token` (or
 latch-server pair --host vps.example.ts.net
 ```
 
-prints a `latch://vps.example.ts.net:7428?token=…` string to paste into Latch. `--host` is the name or address your Mac or phone will connect to; add `--port` if the server does not listen on 7428. The string contains the token. Treat it like the token: paste it straight into Latch, and do not send it through chat, mail or notes.
+prints a `latch://vps.example.ts.net:7428?token=…` string to paste into Latch. `--host` is the name or address your Mac or phone will connect to; add `--port` if the server does not listen on 7428, and `--wss` for a server behind a TLS proxy such as a [Cloudflare Tunnel](#reach-it-through-a-cloudflare-tunnel). The string contains the token. Treat it like the token: paste it straight into Latch, and do not send it through chat, mail or notes.
 
 Add `--qr` to print, below the string, a QR code of it for the iPhone's Camera, which opens it in Latch. The code holds the string exactly, token included, so the same care applies: scan it from your own screen, and do not photograph it, screenshot it or leave it in a shared terminal's scrollback. It is drawn with half-block characters, the light modules and the margin around the code in white on black, whatever the terminal's theme; with `NO_COLOR` set, or written anywhere but a terminal, it has no colours of its own and suits a dark theme. It is at most 65 columns wide. Some terminals draw the blocks from the font and leave a thin gap between lines; drawn this way round the gaps fall across light modules, where the Camera still reads the code, so keep the terminal's line spacing at its default. If the Camera does not read it, add `--invert`, which draws the dark modules instead, in black on white. A host name longer than about 140 characters does not fit in a code.
 
@@ -139,11 +139,43 @@ ssh -N -L 7428:127.0.0.1:7428 vps
 
 On the server, `latch-server pair --host 127.0.0.1` prints the string to paste: to Latch the server is at `127.0.0.1:7428`. This path is for the Mac; the iOS app has no tunnel, so reach the server from a phone over Tailscale. The tunnel must be up whenever Latch connects. When it drops, Latch keeps retrying, waiting up to 30 seconds between attempts, and catches up once it is back. While it is down, Latch sends the token to whatever listens on the Mac's `127.0.0.1:7428`; see Caveats.
 
+## Reach it through a Cloudflare Tunnel
+
+A [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/) puts the server at an HTTPS address of your own, such as `latch.example.com`, that the Mac and the phone reach from any network with nothing else installed. `latch-server` keeps its default loopback address and knows nothing of the tunnel: `cloudflared`, running beside it, connects out to Cloudflare, which ends TLS at its edge and forwards each connection through the tunnel to `http://127.0.0.1:7428`. The server takes a WebSocket on the same port as Latch's own connections. Latch connects to `wss://latch.example.com`, checks the certificate with the system's trust store as Safari would, and sends the token only after that.
+
+Know what this trades. **Cloudflare decrypts the connection at its edge,** so it could read the token and everything the session carries; use Tailscale instead if that is not acceptable. **The address is public:** anyone can reach the server, and the 256-bit token is all that keeps them out. Behind the tunnel every connection comes from `cloudflared` on loopback, so the server counts connections that have not authenticated by the client address in `X-Forwarded-For`, which it believes only from a loopback peer, and logs it as `203.0.113.9 via 127.0.0.1:41234`. Run `cloudflared` on the server itself, as below: in a container with its own network it is not a loopback peer, and every client of the tunnel then shares one address's limits. Cloudflare Access with a login page cannot sit in front of it, because Latch is not a browser.
+
+1. Install `cloudflared` on the server: on Arch, `sudo pacman -S cloudflared`; elsewhere, Cloudflare's package repository or the binary from its [releases](https://github.com/cloudflare/cloudflared/releases).
+2. In the Cloudflare dashboard, under Zero Trust → Networks → Tunnels, create a tunnel of type Cloudflared, and copy its token from the install command it shows. Add a public hostname to it, such as `latch.example.com`, with service type `HTTP` and URL `127.0.0.1:7428`. The domain must be on Cloudflare.
+3. Save the token in a file only you can read, `~/.config/latch/cloudflared-token` with mode 0600, and run the connector as a user service beside `latch-server`, in `~/.config/systemd/user/cloudflared-latch.service`:
+
+   ```ini
+   [Unit]
+   Description=Cloudflare Tunnel for latch-server
+   StartLimitIntervalSec=0
+
+   [Service]
+   ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run --token-file %h/.config/latch/cloudflared-token
+   Restart=on-failure
+   RestartSec=5s
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+   Then `systemctl --user daemon-reload` and `systemctl --user enable --now cloudflared-latch`. A tunnel set up with `cloudflared tunnel create` and a `config.yml` works the same with this ingress rule: `hostname: latch.example.com`, `service: http://127.0.0.1:7428`.
+4. Check it from anywhere with `curl -sI https://latch.example.com`: `HTTP/2 426` is `latch-server` asking for a WebSocket, which means the tunnel reaches it.
+5. Pair with `latch-server pair --host latch.example.com --wss`, adding `--qr` for the phone. `--wss` adds `transport=wss` to the string and makes the port 443.
+
+If Test Connection says the address answered but not with a WebSocket, the tunnel is down or does not lead to the server: `systemctl --user status cloudflared-latch` says which. A WAF rule or Bot Fight Mode that challenges the host name blocks Latch the same way.
+
+Any other proxy that ends TLS works alike: Caddy, nginx or Tailscale Funnel in front of `127.0.0.1:7428`, forwarding WebSocket upgrades and setting `X-Forwarded-For`. The server refuses an upgrade that carries an `Origin` header, which every browser sends and Latch never does, so a web page cannot reach it through a browser on the server or through the proxy.
+
 ## Add it in Latch
 
-In Latch, open Settings → Servers, choose Add Server…, and paste the pairing string, or enter a name, host, port and token. Test Connection reports the server's host name, system and version, or why it could not connect. Then Session → New Remote Session… starts a session in a folder on the server. To change a server's name, address or token later, select it and click Edit…, or double-click it; its sessions stay on it. On an iPhone or iPad, scan the code `latch-server pair --host NAME --qr` prints with the Camera instead; [Latch for iPhone and iPad](ios.md#pairing-a-server) covers it.
+In Latch, open Settings → Servers, choose Add Server…, and paste the pairing string, or enter a name, connection, host, port and token. The connection is Direct, or Through a TLS proxy for a server behind a Cloudflare Tunnel or another proxy. Test Connection reports the server's host name, system and version, or why it could not connect. Then Session → New Remote Session… starts a session in a folder on the server. To change a server's name, address or token later, select it and click Edit…, or double-click it; its sessions stay on it. On an iPhone or iPad, scan the code `latch-server pair --host NAME --qr` prints with the Camera instead; [Latch for iPhone and iPad](ios.md#pairing-a-server) covers it.
 
-Before sending the token, Latch checks where it actually connected. It sends the token only to a loopback address, or to a tailnet address reached through a tunnel (`utun`) interface from a tailnet address of the device's own, which is how Tailscale connects when it is up. A name that resolves somewhere else, a tailnet address routed over Wi-Fi while Tailscale is down, or one carried by another VPN, which gives the device an address of its own, never receives it. The server's Allow unencrypted network setting lifts this check; with it on, the token and everything after it can cross that network in the clear.
+Through a TLS proxy, Latch sends the token once TLS has checked the proxy's certificate for the host name, wherever that is. Directly, it first checks where it actually connected. It sends the token only to a loopback address, or to a tailnet address reached through a tunnel (`utun`) interface from a tailnet address of the device's own, which is how Tailscale connects when it is up. A name that resolves somewhere else, a tailnet address routed over Wi-Fi while Tailscale is down, or one carried by another VPN, which gives the device an address of its own, never receives it. The server's Allow unencrypted network setting lifts this check; with it on, the token and everything after it can cross that network in the clear.
 
 ## Rotate the token
 
@@ -213,7 +245,7 @@ On macOS the server accepts a tailnet address on a `utun` interface, which is wh
 - **One user per server.** Everyone who holds the token acts as the same user, with the same agents and logins. There are no per-device tokens: rotating the token disconnects every device.
 - **Not a sandbox.** Agents run with the server user's full permissions. Approval sheets relay what an agent asks; they do not confine it.
 - **Other users on the same machine.** While `latch-server` is down, another local user could listen on its port, loopback included, and read the token from the next client that connects. Latch connects to `localhost` at `127.0.0.1` only, where the server listens, never at `::1`. An SSH tunnel does not prevent this, since it connects to that port too. With an SSH tunnel the same applies on the Mac: while the tunnel is down, another user of the Mac could listen on its forwarded port. Prefer machines whose only user is you.
-- **Connections without the token.** Anyone who can reach the port can open connections that never send a hello. The server holds at most eight such connections per address and 64 in all, and a new one closes the oldest rather than being turned away, so idle sockets cannot keep Latch out; a peer that opens connections faster than Latch completes its handshake can still delay it.
-- **No TLS.** Latch relies on Tailscale or SSH for encryption. `--allow-unencrypted-network` on the server, or Allow unencrypted network in Latch, sends the token and every prompt and reply in the clear.
+- **Connections without the token.** Anyone who can reach the port can open connections that never send a hello. The server holds at most eight such connections per address and 64 in all, and a new one closes the oldest rather than being turned away, so idle sockets cannot keep Latch out; a peer that opens connections faster than Latch completes its handshake can still delay it. Through a proxy on the server, the address is the client's from `X-Forwarded-For`.
+- **No TLS of its own.** Latch relies on Tailscale, SSH or a TLS proxy for encryption, and a proxy that ends TLS, such as Cloudflare's edge, reads everything that passes. `--allow-unencrypted-network` on the server, or Allow unencrypted network in Latch, sends the token and every prompt and reply in the clear.
 - **No file attachments.** Remote sessions take images, for agents that accept them, but not files or folders, which live on the Mac.
 - **Update the apps with the server.** A server offers agents what its own version of Latch can show. An app older than the server gets questions, such as Claude Code's AskUserQuestion, that it cannot show: the session waits for an answer it has no sheet for, and Stop ends the turn. It does not show a message another device sent into a running turn either, and a server older than the app cannot list or fork the agent's conversations: Fork Session then opens an empty session, as before.

@@ -90,6 +90,24 @@ final class LatchRemotePairingTests: XCTestCase {
         XCTAssertEqual(try LatchRemotePairing(parsing: "latch://[::1]?token=\(Sample.token)").port, 7428)
     }
 
+    func testATLSProxyIsReachedOverAWebSocket() throws {
+        let pairing = try LatchRemotePairing(host: "latch.example.com", transport: .webSocket, token: token)
+        XCTAssertEqual(pairing.port, 443)
+        XCTAssertEqual(pairing.string, "latch://latch.example.com:443?transport=wss&token=\(Sample.token)")
+        XCTAssertEqual(try LatchRemotePairing(parsing: pairing.string), pairing)
+        for string in [
+            "latch://latch.example.com?transport=wss&token=\(Sample.token)",
+            "latch://latch.example.com?token=\(Sample.token)&transport=WSS",
+            "latch://latch.example.com:443/?name=x&transport=wss&token=\(Sample.token)",
+        ] {
+            XCTAssertEqual(try LatchRemotePairing(parsing: string), pairing, string)
+        }
+        let custom = try LatchRemotePairing(parsing: "latch://latch.example.com:8443?transport=wss&token=\(Sample.token)")
+        XCTAssertEqual(custom.port, 8443)
+        XCTAssertEqual(try LatchRemotePairing(parsing: "latch://vps?transport=tcp&token=\(Sample.token)").transport, .tcp)
+        XCTAssertEqual(try LatchRemotePairing(host: "vps", token: token).transport, .tcp)
+    }
+
     func testParsingRejects() {
         let cases: [(String, LatchRemotePairingError)] = [
             ("http://vps:7428?token=\(Sample.token)", .invalidScheme),
@@ -113,6 +131,9 @@ final class LatchRemotePairingTests: XCTestCase {
             ("latch://vps:7428?other=1", .missingToken),
             ("latch://vps:7428?token=latch_short", .invalidToken),
             ("latch://vps:7428?token=\(Sample.token)&token=\(Sample.token)", .invalidToken),
+            ("latch://vps:7428?transport=quic&token=\(Sample.token)", .unsupportedTransport),
+            ("latch://vps:7428?transport=&token=\(Sample.token)", .unsupportedTransport),
+            ("latch://vps:7428?transport=wss&transport=wss&token=\(Sample.token)", .unsupportedTransport),
         ]
         for (string, error) in cases {
             XCTAssertThrowsError(try LatchRemotePairing(parsing: string), string) {

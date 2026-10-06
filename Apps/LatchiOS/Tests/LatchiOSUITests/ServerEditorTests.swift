@@ -45,6 +45,45 @@ final class ServerEditorTests: XCTestCase {
         XCTAssertEqual(editor.hostField.text, "vps.example", "A bad paste changes nothing")
     }
 
+    /// A server behind a Cloudflare Tunnel or another TLS proxy is reached over a WebSocket,
+    /// which is always encrypted.
+    func testAPairingStringForATLSProxyChoosesThatConnection() throws {
+        let editor = editor()
+        XCTAssertEqual(editor.transport, .tcp)
+        XCTAssertTrue(editor.unencryptedSwitch.isEnabled)
+        editor.applyPairing("latch://latch.example.com:443?transport=wss&token=\(token.rawValue)")
+        XCTAssertEqual(editor.transport, .webSocket)
+        XCTAssertEqual(editor.transportButton.configuration?.title, "TLS Proxy")
+        XCTAssertEqual(editor.portField.text, "443")
+        XCTAssertFalse(editor.unencryptedSwitch.isEnabled)
+        let profile = try editor.entry.get()
+        XCTAssertEqual(profile.transport, .webSocket)
+        XCTAssertEqual(profile.address, "wss://latch.example.com")
+
+        // Chosen by hand, the port follows while it is the other connection's default.
+        editor.choose(.tcp)
+        XCTAssertEqual(editor.portField.text, "7428")
+        XCTAssertTrue(editor.unencryptedSwitch.isEnabled)
+        type("8443", into: editor.portField)
+        editor.choose(.webSocket)
+        XCTAssertEqual(editor.portField.text, "8443", "A port of the user's own stays")
+        XCTAssertEqual(try editor.entry.get().address, "wss://latch.example.com:8443")
+    }
+
+    /// The same host reached another way is another server, not one to update.
+    func testALinkThroughATLSProxyIsNotTheDirectServerAtThatHost() throws {
+        let direct = ServerProfile(name: "dev", host: "latch.example.com", port: 443, token: token)
+        let store = InMemoryServerStore([direct])
+        let (root, window) = hostedRoot(store)
+        defer { window.isHidden = true }
+        ServerSheets().rootViewController(root, didOpenPairingLink: .success(
+            try LatchRemotePairing(host: "latch.example.com", transport: .webSocket, token: .generate())))
+        let navigation = try XCTUnwrap(root.presentedViewController as? UINavigationController)
+        let editor = try XCTUnwrap(navigation.topViewController as? ServerEditorViewController)
+        XCTAssertEqual(editor.title, "Add Server")
+        XCTAssertEqual(editor.transport, .webSocket)
+    }
+
     /// A link has filled the form already: the sheet asks for a check and offers no Paste.
     func testAPairingLinkAsksForACheckRatherThanAPaste() throws {
         let manual = editor()

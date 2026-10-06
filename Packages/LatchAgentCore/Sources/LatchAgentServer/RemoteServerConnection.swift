@@ -10,17 +10,18 @@ import Glibc
 import Musl
 #endif
 
-/// One client socket. The reader thread authenticates it and then decodes its frames; the
-/// writer thread, started once it has authenticated, is the only one that writes after the
-/// welcome. Whoever closes first shuts the socket down, which wakes both threads; the
-/// descriptor itself is closed only after both have exited, so no thread can be blocked on a
-/// descriptor number that has been reused.
+/// One client socket, speaking the stream directly or inside a WebSocket. The reader thread
+/// authenticates it and then decodes its frames; the writer thread, started once it has
+/// authenticated, is the only one that writes after the welcome. Whoever closes first shuts
+/// the socket down, which wakes both threads; the descriptor itself is closed only after both
+/// have exited, so no thread can be blocked on a descriptor number that has been reused.
 final class RemoteServerConnection: Sendable {
     let serial: UInt64
-    let peer: String
     private let descriptor: Int32
+    /// A proxy on this machine is believed about the client it forwards for.
+    private let peerIsLoopback: Bool
     private let server: RemoteServer
-    private let state = Mutex(State())
+    private let state: Mutex<State>
     /// The writer sleeps here; `wakeWriter` signals it at most once per sleep.
     private let writerWake = DispatchSemaphore(value: 0)
 
@@ -29,6 +30,9 @@ final class RemoteServerConnection: Sendable {
     private static let outboxLimit = 4096
 
     private struct State {
+        var peer: String
+        /// Set by the reader before the welcome, and never changed after.
+        var webSocket = false
         var hubConnection: RemoteConnectionID?
         var token: LatchRemoteToken?
         var outbox: [Outgoing] = []
@@ -45,13 +49,33 @@ final class RemoteServerConnection: Sendable {
         var line: Data
         /// Set for an `attached` reply: the runtime whose cursor may run once it is written.
         var attached: AgentRuntimeID?
+        /// A WebSocket control frame, written as it is.
+        var framed = false
     }
 
-    init(serial: UInt64, descriptor: Int32, peer: String, server: RemoteServer) {
+    /// What the reader makes of the bytes it receives.
+    private enum Framing {
+        /// Before the first byte.
+        case undecided
+        /// The newline-delimited stream, as it arrives.
+        case stream
+        /// An HTTP request head, until its blank line.
+        case request([UInt8])
+        case webSocket(ServerWebSocket.FrameDecoder)
+    }
+
+    init(serial: UInt64, descriptor: Int32, peer: ServerSocketAddress?, server: RemoteServer) {
         self.serial = serial
         self.descriptor = descriptor
-        self.peer = peer
+        peerIsLoopback = peer.map { LatchRemoteAddressPolicy.classify($0.bytes) == .loopback } ?? false
         self.server = server
+        state = Mutex(State(peer: peer?.description ?? "unknown"))
+    }
+
+    /// The peer's address, or the client's and the proxy's once a proxy on this machine
+    /// has said whom it forwards for.
+    var peer: String {
+        state.withLock { $0.peer }
     }
 
     /// The token this connection authenticated with; nil before then.
@@ -111,6 +135,7 @@ final class RemoteServerConnection: Sendable {
         }
         var decoder = LatchRemoteLineDecoder(maximumLineBytes: LatchRemoteProtocol.preAuthMaxLineBytes)
         var authenticated = false
+        var framing = Framing.undecided
         while true {
             let count = ServerSocket.receive(descriptor, into: buffer, count: Self.readSize)
             guard count > 0 else {
@@ -127,7 +152,8 @@ final class RemoteServerConnection: Sendable {
                 }
                 return
             }
-            decoder.append(Data(bytes: buffer, count: count))
+            guard let (stream, closing) = unwrap(Data(bytes: buffer, count: count), &framing, authenticated: authenticated) else { return }
+            decoder.append(stream)
             while true {
                 let line: Data?
                 do {
@@ -145,7 +171,117 @@ final class RemoteServerConnection: Sendable {
                     decoder.maximumLineBytes = LatchRemoteProtocol.maxFrameBytes
                 }
             }
+            if closing {
+                close("closed by the client")
+                return
+            }
         }
+    }
+
+    /// The stream bytes in what was just received, and whether the client then closed its
+    /// WebSocket; nil when the connection must close.
+    private func unwrap(_ received: Data, _ framing: inout Framing, authenticated: Bool) -> (Data, closing: Bool)? {
+        switch framing {
+        case .undecided:
+            framing = received.first.map(ServerWebSocket.beginsRequest) == true ? .request([]) : .stream
+            return unwrap(received, &framing, authenticated: authenticated)
+        case .stream:
+            return (received, false)
+        case var .request(head):
+            framing = .undecided
+            let searched = head.count
+            head.append(contentsOf: received)
+            guard let length = ServerWebSocket.requestHeadLength(in: head, from: searched) else {
+                guard head.count <= ServerWebSocket.maxRequestHeadBytes else {
+                    refuse(.headTooLarge)
+                    return nil
+                }
+                framing = .request(head)
+                return (Data(), false)
+            }
+            guard length <= ServerWebSocket.maxRequestHeadBytes else {
+                refuse(.headTooLarge)
+                return nil
+            }
+            guard upgrade(Array(head[..<length])) else { return nil }
+            framing = .webSocket(ServerWebSocket.FrameDecoder())
+            return unwrap(Data(head[length...]), &framing, authenticated: authenticated)
+        case var .webSocket(frames):
+            let contents: [ServerWebSocket.Received]
+            do {
+                contents = try frames.decode(received)
+            } catch {
+                close("sent \(error)")
+                return nil
+            }
+            framing = .webSocket(frames)
+            var stream = Data()
+            for item in contents {
+                switch item {
+                case let .data(payload):
+                    stream.append(payload)
+                case let .ping(payload):
+                    guard pong(payload, authenticated: authenticated) else { return nil }
+                case .close:
+                    // Lines that came before the close still count, as they do before a TCP close.
+                    return (stream, true)
+                }
+            }
+            return (stream, false)
+        }
+    }
+
+    /// Answers a WebSocket upgrade, false when the request was refused instead. A proxy on
+    /// this machine that names the client it forwards for moves the connection to that
+    /// client's limit on connections that have not authenticated, refused or not.
+    private func upgrade(_ bytes: [UInt8]) -> Bool {
+        let upgrade: ServerWebSocket.Upgrade
+        do {
+            let head = try ServerWebSocket.Head(bytes)
+            if peerIsLoopback, let client = head.forwardedFor {
+                state.withLock { $0.peer = "\(ServerSocketAddress(bytes: client, port: 0).host) via \($0.peer)" }
+                server.forwarded(self, for: client)
+            }
+            upgrade = try ServerWebSocket.upgrade(fromHead: head)
+        } catch {
+            refuse(error)
+            return false
+        }
+        guard ServerSocket.sendAll(descriptor, ServerWebSocket.switchingProtocols(upgrade)) else {
+            close("write failed")
+            return false
+        }
+        state.withLock { $0.webSocket = true }
+        return true
+    }
+
+    /// Sends the HTTP error and closes as `reject` does, so the client can read it.
+    private func refuse(_ refusal: ServerWebSocket.Refusal) {
+        server.authenticationFailed(self, reason: refusal.reason)
+        if ServerSocket.sendAll(descriptor, refusal.response) {
+            lingerBeforeClosing()
+        }
+        close("refused: \(refusal.status)")
+    }
+
+    /// Answers a ping: straight away before the welcome, when only the reader writes, and
+    /// through the writer after it.
+    private func pong(_ payload: Data, authenticated: Bool) -> Bool {
+        let frame = ServerWebSocket.frame(opcode: ServerWebSocket.opcodePong, payload: payload)
+        guard authenticated else {
+            guard ServerSocket.sendAll(descriptor, frame) else {
+                close("write failed")
+                return false
+            }
+            return true
+        }
+        return enqueue(Outgoing(line: frame, attached: nil, framed: true))
+    }
+
+    /// Writes stream bytes, inside binary frames on a WebSocket.
+    private func send(_ data: Data) -> Bool {
+        let webSocket = state.withLock { $0.webSocket }
+        return ServerSocket.sendAll(descriptor, webSocket ? ServerWebSocket.binaryFrames(data) : data)
     }
 
     /// Checks the hello: the token first, so version ranges are never shown to a client
@@ -194,7 +330,7 @@ final class RemoteServerConnection: Sendable {
             close("the server token changed")
             return false
         }
-        guard let line = try? LatchRemoteCoding.encodeLine(welcome), ServerSocket.sendAll(descriptor, line) else {
+        guard let line = try? LatchRemoteCoding.encodeLine(welcome), send(line) else {
             close("write failed")
             return false
         }
@@ -218,20 +354,25 @@ final class RemoteServerConnection: Sendable {
     /// Sends the rejection, then lets the client read it before the socket goes: closing with
     /// unread input would reset the connection and could discard it.
     private func reject(_ rejected: LatchRemoteRejected) {
-        if let line = try? LatchRemoteCoding.encodeLine(LatchRemoteServerFrame.rejected(rejected)),
-           ServerSocket.sendAll(descriptor, line) {
-            ServerSocket.shutdownWrite(descriptor)
-            ServerSocket.setReceiveTimeout(descriptor, .seconds(1))
-            let buffer = UnsafeMutableRawPointer.allocate(byteCount: 4096, alignment: 1)
-            defer { buffer.deallocate() }
-            var drained = 0
-            while drained < 64 * 1024 {
-                let count = ServerSocket.receive(descriptor, into: buffer, count: 4096)
-                guard count > 0 else { break }
-                drained += count
-            }
+        if let line = try? LatchRemoteCoding.encodeLine(LatchRemoteServerFrame.rejected(rejected)), send(line) {
+            if state.withLock({ $0.webSocket }) { _ = ServerSocket.sendAll(descriptor, ServerWebSocket.closeFrame(code: 1008)) }
+            lingerBeforeClosing()
         }
         close("rejected: \(rejected.reason.rawValue)")
+    }
+
+    /// Ends the writing side and reads what the client still sends, for up to a second.
+    private func lingerBeforeClosing() {
+        ServerSocket.shutdownWrite(descriptor)
+        ServerSocket.setReceiveTimeout(descriptor, .seconds(1))
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: 4096, alignment: 1)
+        defer { buffer.deallocate() }
+        var drained = 0
+        while drained < 64 * 1024 {
+            let count = ServerSocket.receive(descriptor, into: buffer, count: 4096)
+            guard count > 0 else { break }
+            drained += count
+        }
     }
 
     /// False when the connection must close.
@@ -299,7 +440,7 @@ final class RemoteServerConnection: Sendable {
     private func reply(_ id: UUID, _ result: LatchRemoteReplyResult, attached: AgentRuntimeID? = nil) -> Bool {
         var frame = LatchRemoteServerFrame.reply(LatchRemoteReply(id: id, result: result))
         if let line = try? LatchRemoteCoding.encodeLine(frame), line.count - 1 <= LatchRemoteProtocol.maxFrameBytes {
-            return enqueue(line: line, attached: attached)
+            return enqueue(Outgoing(line: line, attached: attached))
         }
         frame = .reply(LatchRemoteReply(id: id, result: .failure(LatchRemoteError(
             code: .payloadTooLarge, message: "The reply was too large to send."
@@ -311,14 +452,14 @@ final class RemoteServerConnection: Sendable {
 
     private func enqueue(_ frame: LatchRemoteServerFrame, attached: AgentRuntimeID?) -> Bool {
         guard let line = try? LatchRemoteCoding.encodeLine(frame) else { return true }
-        return enqueue(line: line, attached: attached)
+        return enqueue(Outgoing(line: line, attached: attached))
     }
 
-    private func enqueue(line: Data, attached: AgentRuntimeID?) -> Bool {
+    private func enqueue(_ outgoing: Outgoing) -> Bool {
         let accepted = state.withLock { state in
             guard !state.closing else { return false }
             guard state.outbox.count < Self.outboxLimit else { return false }
-            state.outbox.append(Outgoing(line: line, attached: attached))
+            state.outbox.append(outgoing)
             return true
         }
         guard accepted else {
@@ -351,7 +492,7 @@ final class RemoteServerConnection: Sendable {
                 return
             }
             for item in outgoing {
-                guard ServerSocket.sendAll(descriptor, item.line) else {
+                guard item.framed ? ServerSocket.sendAll(descriptor, item.line) : send(item.line) else {
                     close("write failed")
                     return
                 }
@@ -365,7 +506,7 @@ final class RemoteServerConnection: Sendable {
                 var batch = Data()
                 batch.reserveCapacity(lines.reduce(0) { $0 + $1.count })
                 lines.forEach { batch.append($0) }
-                guard ServerSocket.sendAll(descriptor, batch) else {
+                guard send(batch) else {
                     close("write failed")
                     return
                 }
@@ -377,17 +518,21 @@ final class RemoteServerConnection: Sendable {
         }
     }
 
-    /// Writes every event line the client has waiting, then shuts the socket down. Stops at
-    /// the first failed write, which is also how `closeAfterWriting`'s limit ends it.
+    /// Writes every event line the client has waiting, and a WebSocket's close frame, then
+    /// shuts the socket down. Stops at the first failed write, which is also how
+    /// `closeAfterWriting`'s limit ends it.
     private func drain(_ hubConnection: RemoteConnectionID, budget: Int) {
         defer { ServerSocket.shutdownBoth(descriptor) }
         while true {
             let lines = server.hub.pullEventLines(for: hubConnection, byteBudget: budget)
-            guard !lines.isEmpty else { return }
+            guard !lines.isEmpty else {
+                if state.withLock({ $0.webSocket }) { _ = ServerSocket.sendAll(descriptor, ServerWebSocket.closeFrame(code: 1001)) }
+                return
+            }
             var batch = Data()
             batch.reserveCapacity(lines.reduce(0) { $0 + $1.count })
             lines.forEach { batch.append($0) }
-            guard ServerSocket.sendAll(descriptor, batch) else { return }
+            guard send(batch) else { return }
         }
     }
 

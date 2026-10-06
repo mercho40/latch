@@ -75,6 +75,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         public init(
             host: String,
             port: UInt16 = LatchRemoteProtocol.defaultPort,
+            transport: LatchRemoteTransport = .tcp,
             token: LatchRemoteToken,
             allowUnencryptedNetwork: Bool = false,
             client: LatchRemoteClientInfo,
@@ -87,6 +88,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
                 connection: LatchRemoteConnectionOptions(
                     host: host,
                     port: port,
+                    transport: transport,
                     token: token,
                     allowUnencryptedNetwork: allowUnencryptedNetwork,
                     client: client,

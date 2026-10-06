@@ -53,11 +53,11 @@ public enum LatchServerMain {
                 printError("\(error)")
                 return 1
             }
-        case let .pair(config, host, port, qr):
+        case let .pair(config, host, port, transport, qr):
             guard let tokens = tokenFile(config) else { return 1 }
             let pairing: String
             do {
-                pairing = try LatchRemotePairing(host: host, port: port, token: tokens.readOrCreate()).string
+                pairing = try LatchRemotePairing(host: host, port: port, transport: transport, token: tokens.readOrCreate()).string
             } catch let error as ServerTokenError {
                 printError("\(error)")
                 return 1

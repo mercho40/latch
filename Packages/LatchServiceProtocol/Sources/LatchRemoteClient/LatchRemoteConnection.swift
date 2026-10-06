@@ -9,8 +9,10 @@ public struct LatchRemoteConnectionOptions: Sendable {
     /// A host name or a numeric address.
     public var host: String
     public var port: UInt16
+    public var transport: LatchRemoteTransport
     public var token: LatchRemoteToken
-    /// Send the token to a peer that is neither loopback nor on a tailnet.
+    /// Over TCP, send the token to a peer that is neither loopback nor on a tailnet. A
+    /// WebSocket is always over TLS, so this does not apply to it.
     public var allowUnencryptedNetwork: Bool
     public var client: LatchRemoteClientInfo
     /// From `start()` until the welcome, covering name resolution, TCP and the hello.
@@ -19,10 +21,19 @@ public struct LatchRemoteConnectionOptions: Sendable {
     var peerAddressForTesting: [UInt8]?
     var localAddressForTesting: [UInt8]?
     var interfaceNameForTesting: String?
+    /// Tests only: a WebSocket without TLS, which the destination check then applies to.
+    var webSocketWithoutTLSForTesting = false
+
+    /// Tests only: the WebSocket transport, to a server that speaks it without TLS.
+    mutating func useWebSocketWithoutTLSForTesting() {
+        transport = .webSocket
+        webSocketWithoutTLSForTesting = true
+    }
 
     public init(
         host: String,
         port: UInt16 = LatchRemoteProtocol.defaultPort,
+        transport: LatchRemoteTransport = .tcp,
         token: LatchRemoteToken,
         allowUnencryptedNetwork: Bool = false,
         client: LatchRemoteClientInfo,
@@ -30,6 +41,7 @@ public struct LatchRemoteConnectionOptions: Sendable {
     ) {
         self.host = host
         self.port = port
+        self.transport = transport
         self.token = token
         self.allowUnencryptedNetwork = allowUnencryptedNetwork
         self.client = client
@@ -37,9 +49,9 @@ public struct LatchRemoteConnectionOptions: Sendable {
     }
 }
 
-/// One TCP session with a `latch-server`: the destination check, the handshake, requests
-/// correlated by id, the runtime events that arrive on it, and the heartbeat. It never
-/// reconnects; `LatchRemoteRuntimeChannel` does that with a new connection.
+/// One session with a `latch-server`, over TCP or a WebSocket: the destination check, the
+/// handshake, requests correlated by id, the runtime events that arrive on it, and the
+/// heartbeat. It never reconnects; `LatchRemoteRuntimeChannel` does that with a new connection.
 ///
 /// Handlers, request completions and events are all delivered on `queue`, in the order the
 /// frames arrived, and never while a lock is held, so they may call back into the connection.
@@ -58,6 +70,8 @@ public final class LatchRemoteConnection: Sendable {
     /// What a welcome may ask for; the server's values come nowhere near either bound.
     static let heartbeatRange = 1...3600
     static let maxFrameRange = 1...(1 << 30)
+    /// The most stream bytes in one WebSocket message, so a proxy never holds much of one.
+    static let maxWebSocketMessageBytes = 64 * 1024
 
     /// The host to connect to for the one the user named. `localhost` is 127.0.0.1, as it is
     /// to `latch-server --listen`: resolved, it would be tried as ::1 first, where the server
@@ -66,6 +80,26 @@ public final class LatchRemoteConnection: Sendable {
         var name = host.lowercased()
         if name.hasSuffix(".") { name.removeLast() }
         return name == "localhost" ? "127.0.0.1" : host
+    }
+
+    /// `Latch/0.3.0 (iOS)`, in the characters a header token allows.
+    static func userAgent(_ client: LatchRemoteClientInfo) -> String {
+        func token(_ text: String) -> String {
+            let kept = text.unicodeScalars.filter { $0.isASCII && ($0.properties.isAlphabetic || ("0"..."9").contains($0) || ".-_".unicodeScalars.contains($0)) }
+            return kept.isEmpty ? "unknown" : String(String.UnicodeScalarView(kept))
+        }
+        return "\(token(client.name))/\(token(client.version)) (\(token(client.platform)))"
+    }
+
+    /// `wss://host:port/`, with an IPv6 host in brackets.
+    static func webSocketURL(host: String, port: UInt16, tls: Bool = true) -> URL? {
+        let authority = host.contains(":") ? "[\(host)]" : host
+        return URL(string: "\(tls ? "wss" : "ws")://\(authority):\(port)/")
+    }
+
+    /// Whether the transport encrypts on its own, so the token may go wherever it connected.
+    private var encrypts: Bool {
+        options.transport == .webSocket && !options.webSocketWithoutTLSForTesting
     }
 
     public let options: LatchRemoteConnectionOptions
@@ -117,9 +151,30 @@ public final class LatchRemoteConnection: Sendable {
             }
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
-            let parameters = NWParameters(tls: nil, tcp: tcp)
-            parameters.preferNoProxies = true
-            let connection = NWConnection(host: NWEndpoint.Host(Self.connectHost(for: options.host)), port: port, using: parameters)
+            let connection: NWConnection
+            switch options.transport {
+            case .tcp:
+                let parameters = NWParameters(tls: nil, tcp: tcp)
+                parameters.preferNoProxies = true
+                connection = NWConnection(host: NWEndpoint.Host(Self.connectHost(for: options.host)), port: port, using: parameters)
+            case .webSocket:
+                // The system checks the certificate against the host name, as for HTTPS.
+                let parameters = NWParameters(tls: options.webSocketWithoutTLSForTesting ? nil : NWProtocolTLS.Options(), tcp: tcp)
+                parameters.preferNoProxies = true
+                let webSocket = NWProtocolWebSocket.Options()
+                webSocket.autoReplyPing = true
+                // Proxies such as Cloudflare's challenge a request with no User-Agent.
+                webSocket.setAdditionalHeaders([("User-Agent", Self.userAgent(options.client))])
+                // Messages are pieces of the stream; the line decoder bounds a frame.
+                webSocket.maximumMessageSize = Self.maxWebSocketMessageBytes * 16
+                parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
+                guard let url = Self.webSocketURL(host: Self.connectHost(for: options.host), port: options.port,
+                                                  tls: !options.webSocketWithoutTLSForTesting) else {
+                    close(&core, with: .invalidEndpoint)
+                    return nil
+                }
+                connection = NWConnection(to: .url(url), using: parameters)
+            }
             core.connection = connection
             transition(&core, to: .connecting)
             return connection
@@ -271,11 +326,11 @@ public final class LatchRemoteConnection: Sendable {
         case .waiting(let error):
             // Refused or unreachable: report it now and let the caller decide when to retry,
             // rather than waiting here on Network's own schedule.
-            close(with: .connectionFailed(Self.describe(error)))
+            close(with: .connectionFailed(describeFailure(error)))
         case .ready:
             connectionReady()
         case .failed(let error):
-            close(with: .connectionFailed(Self.describe(error)))
+            close(with: .connectionFailed(describeFailure(error)))
         case .cancelled:
             close(with: .connectionLost)
         @unknown default:
@@ -288,7 +343,7 @@ public final class LatchRemoteConnection: Sendable {
             guard case .connecting = core.state, let connection = core.connection else { return nil }
             let path = connection.currentPath
             let address = options.peerAddressForTesting ?? LatchRemoteDestinationPolicy.address(of: path?.remoteEndpoint)
-            guard LatchRemoteDestinationPolicy.mayAuthenticate(
+            guard encrypts || LatchRemoteDestinationPolicy.mayAuthenticate(
                 peerAddress: address,
                 localAddress: options.localAddressForTesting ?? LatchRemoteDestinationPolicy.address(of: path?.localEndpoint),
                 interfaceName: options.interfaceNameForTesting ?? LatchRemoteDestinationPolicy.interfaceName(of: path),
@@ -307,6 +362,10 @@ public final class LatchRemoteConnection: Sendable {
     }
 
     private func receive(on connection: NWConnection) {
+        if options.transport == .webSocket {
+            receiveMessage(on: connection)
+            return
+        }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let data, !data.isEmpty {
@@ -320,6 +379,34 @@ public final class LatchRemoteConnection: Sendable {
             } else {
                 receive(on: connection)
             }
+        }
+    }
+
+    /// A WebSocket's data messages, each a piece of the stream, until the server closes it.
+    /// Network delivers control frames here too, payload and all; theirs is not the stream's.
+    private func receiveMessage(on connection: NWConnection) {
+        connection.receiveMessage { [weak self] data, context, _, error in
+            guard let self else { return }
+            let opcode = (context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata)?.opcode
+            if let data, !data.isEmpty, opcode.map(Self.carriesStream) ?? true {
+                received(data)
+            }
+            if case .closed = state { return }
+            if let error {
+                close(with: .connectionFailed(Self.describe(error)))
+            } else if opcode == .close || (data == nil && context?.isFinal == true) {
+                close(with: .connectionLost)
+            } else {
+                receiveMessage(on: connection)
+            }
+        }
+    }
+
+    static func carriesStream(_ opcode: NWProtocolWebSocket.Opcode) -> Bool {
+        switch opcode {
+        case .binary, .text, .cont: true
+        case .ping, .pong, .close: false
+        @unknown default: false
         }
     }
 
@@ -442,11 +529,22 @@ public final class LatchRemoteConnection: Sendable {
     private func write(_ core: inout Core, line: Data) {
         guard let connection = core.connection else { return }
         core.lastSent = .now
-        connection.send(content: line, completion: .contentProcessed { [weak self] error in
+        let completion = NWConnection.SendCompletion.contentProcessed { [weak self] error in
             if let error {
                 self?.close(with: .connectionFailed(Self.describe(error)))
             }
-        })
+        }
+        guard options.transport == .webSocket else {
+            connection.send(content: line, completion: completion)
+            return
+        }
+        var start = line.startIndex
+        while start < line.endIndex {
+            let end = line.index(start, offsetBy: min(Self.maxWebSocketMessageBytes, line.endIndex - start))
+            let context = NWConnection.ContentContext(identifier: "latch", metadata: [NWProtocolWebSocket.Metadata(opcode: .binary)])
+            connection.send(content: line[start..<end], contentContext: context, isComplete: true, completion: completion)
+            start = end
+        }
     }
 
     private func transition(_ core: inout Core, to state: State) {
@@ -475,6 +573,15 @@ public final class LatchRemoteConnection: Sendable {
             pings.forEach { $0(.failure(error)) }
             readyWaiters.forEach { $0(.failure(error)) }
         }
+    }
+
+    /// Network reports an HTTP answer other than the upgrade, which a proxy gives when it
+    /// cannot reach the server, as an aborted connection.
+    private func describeFailure(_ error: NWError) -> String {
+        if options.transport == .webSocket, case .posix(.ECONNABORTED) = error, case .connecting = state {
+            return "\(options.host) answered, but not with a WebSocket. Check that the tunnel is running and forwards to latch-server."
+        }
+        return Self.describe(error)
     }
 
     private static func describe(_ error: NWError) -> String {

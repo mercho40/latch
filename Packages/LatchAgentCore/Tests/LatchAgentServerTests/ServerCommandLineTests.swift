@@ -46,6 +46,10 @@ final class ServerCommandLineTests: XCTestCase {
         XCTAssertEqual(try parse("pair", "--host", "vps", "--port", "9000", "--allow-root"), .pair(ConfigOptions(allowRoot: true), host: "vps", port: 9000))
         XCTAssertEqual(try parse("pair", "--host", "vps", "--qr"), .pair(ConfigOptions(), host: "vps", port: 7428, qr: .lightModulesDrawn))
         XCTAssertEqual(try parse("pair", "--invert", "--qr", "--host=vps"), .pair(ConfigOptions(), host: "vps", port: 7428, qr: .darkModulesDrawn))
+        XCTAssertEqual(try parse("pair", "--host", "latch.example.com", "--wss"),
+                       .pair(ConfigOptions(), host: "latch.example.com", port: 443, transport: .webSocket))
+        XCTAssertEqual(try parse("pair", "--wss", "--port", "8443", "--host", "latch.example.com", "--qr"),
+                       .pair(ConfigOptions(), host: "latch.example.com", port: 8443, transport: .webSocket, qr: .lightModulesDrawn))
         XCTAssertEqual(try parse("--version"), .version)
         XCTAssertEqual(try parse("--help"), .help)
         XCTAssertEqual(try parse("token", "-h"), .help)
@@ -63,6 +67,8 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["pair", "--host", "h", "--invert"], "--invert needs --qr")
         assertRejected(["pair", "--host", "h", "--qr=yes"], "takes no value")
         assertRejected(["token", "--qr"], "does not apply")
+        assertRejected(["--wss"], "does not apply")
+        assertRejected(["pair", "--host", "h", "--wss=yes"], "takes no value")
         assertRejected(["--qr"], "does not apply")
         assertRejected(["--detached-timeout", "soon"], "--detached-timeout")
         assertRejected(["--config-dir", "/a", "--config-dir", "/b"], "twice")

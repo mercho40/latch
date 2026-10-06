@@ -23,6 +23,9 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     private(set) var fromLink = false
 
     let nameField = UITextField()
+    /// Direct, or through a TLS proxy such as a Cloudflare Tunnel.
+    let transportButton = UIButton(configuration: .plain())
+    private(set) var transport = LatchRemoteTransport.tcp
     let hostField = UITextField()
     let portField = UITextField()
     let tokenField = UITextField()
@@ -89,6 +92,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     private func load(_ stored: ServerProfile.Stored) {
         nameField.text = stored.name
+        transport = stored.transport
         hostField.text = stored.host
         portField.text = String(stored.port)
         unencryptedSwitch.isOn = stored.allowUnencryptedNetwork
@@ -139,6 +143,49 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         tokenField.accessibilityLabel = "Token"
         commandField.accessibilityLabel = "Custom agent command"
         unencryptedSwitch.addAction(UIAction { [weak self] _ in self?.clearTestResult() }, for: .valueChanged)
+        transportButton.showsMenuAsPrimaryAction = true
+        transportButton.accessibilityLabel = "Connection"
+        updateTransportMenu()
+        refresh()
+    }
+
+    static func title(_ transport: LatchRemoteTransport) -> String {
+        switch transport {
+        case .tcp: "Direct"
+        case .webSocket: "TLS Proxy"
+        }
+    }
+
+    /// The menu with the current connection checked, and its name on the button.
+    private func updateTransportMenu() {
+        transportButton.menu = UIMenu(options: .singleSelection, children: LatchRemoteTransport.allCases.map { option in
+            UIAction(title: Self.title(option), subtitle: option == .webSocket ? "Such as a Cloudflare Tunnel" : nil,
+                     state: option == transport ? .on : .off) { [weak self] _ in self?.choose(option) }
+        })
+        var configuration = transportButton.configuration ?? .plain()
+        configuration.title = Self.title(transport)
+        configuration.image = UIImage(systemName: "chevron.up.chevron.down")
+        configuration.imagePlacement = .trailing
+        configuration.imagePadding = 4
+        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .footnote)
+        configuration.contentInsets = .zero
+        transportButton.configuration = configuration
+        transportButton.accessibilityValue = Self.title(transport)
+        transportButton.sizeToFit()
+        // Only a direct connection may be unencrypted; a profile through a proxy never is.
+        unencryptedSwitch.isEnabled = transport == .tcp
+        if transport != .tcp { unencryptedSwitch.isOn = false }
+    }
+
+    /// A port left at the other connection's default follows to this one's.
+    func choose(_ option: LatchRemoteTransport) {
+        guard option != transport else { return }
+        if let port = UInt16((portField.text ?? "").trimmingCharacters(in: .whitespaces)), port == transport.defaultPort {
+            portField.text = String(option.defaultPort)
+        }
+        transport = option
+        updateTransportMenu()
+        clearTestResult()
         refresh()
     }
 
@@ -164,7 +211,7 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         guard (try? LatchRemotePairing(host: host, port: port, token: token)) != nil else { return .failure(.host) }
         let name = (nameField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return .success(ServerProfile(
-            id: originalID ?? UUID(), name: name.isEmpty ? host : name, host: host, port: port, token: token,
+            id: originalID ?? UUID(), name: name.isEmpty ? host : name, host: host, port: port, transport: transport, token: token,
             allowUnencryptedNetwork: unencryptedSwitch.isOn,
             customCommand: (commandField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)))
     }
@@ -213,6 +260,8 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
     }
 
     private func fill(from pairing: LatchRemotePairing) {
+        transport = pairing.transport
+        updateTransportMenu()
         hostField.text = pairing.host
         portField.text = String(pairing.port)
         tokenField.text = pairing.token.rawValue
@@ -415,12 +464,12 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
 
     // MARK: Table
 
-    private enum Row { case paste, name, host, port, token, test, testResult, unencrypted, command, remove }
+    private enum Row { case paste, name, transport, host, port, token, test, testResult, unencrypted, command, remove }
 
     /// Test Connection sits under the fields it tests. A link leaves nothing to paste.
     private var layout: [[Row]] {
         (fromLink ? [] : [[.paste]])
-            + [[.name, .host, .port, .token], testResult == nil ? [.test] : [.test, .testResult], [.unencrypted], [.command]]
+            + [[.name, .transport, .host, .port, .token], testResult == nil ? [.test] : [.test, .testResult], [.unencrypted], [.command]]
             + (originalID == nil || !store.servers.contains { $0.id == originalID } ? [] : [[.remove]])
     }
 
@@ -462,14 +511,16 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
         case .paste:
             pasteMessage ?? note ?? (originalID == nil
                 ? "Copy what “latch-server pair” prints on the server, then paste it here. It fills in the rest."
-                : "Paste a new pairing string to replace the host, port and token.")
+                : "Paste a new pairing string to replace the connection, host, port and token.")
         case .name:
             if case let .failure(problem) = entry, let text = problem.text { text } else { fromLink ? note : nil }
         case .unencrypted:
-            "The token and everything the agent sends would cross that network in the clear. Use it only on a network you trust."
+            transport == .tcp
+                ? "The token and everything the agent sends would cross that network in the clear. Use it only on a network you trust."
+                : "A TLS proxy always encrypts the connection, so this applies only to direct connections."
         case .command:
             "The command a Custom agent runs on this server, found on its PATH. Quotes work; shell expansion does not. Leave it empty to offer no Custom agent."
-        case .port, .host, .token, .test, .testResult, .remove: nil
+        case .transport, .port, .host, .token, .test, .testResult, .remove: nil
         }
     }
 
@@ -492,6 +543,11 @@ final class ServerEditorViewController: UITableViewController, UITextFieldDelega
                 pasteControl.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
             ])
         case .name: FormRow.field(in: cell, label: "Name", field: nameField)
+        case .transport:
+            var content = cell.defaultContentConfiguration()
+            content.text = "Connection"
+            cell.contentConfiguration = content
+            cell.accessoryView = transportButton
         case .host: FormRow.field(in: cell, label: "Host", field: hostField)
         case .port: FormRow.field(in: cell, label: "Port", field: portField)
         case .token: FormRow.field(in: cell, label: "Token", field: tokenField)

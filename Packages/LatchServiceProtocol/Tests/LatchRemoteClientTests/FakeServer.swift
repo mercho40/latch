@@ -1,4 +1,5 @@
 #if canImport(Network)
+import CryptoKit
 import Foundation
 import LatchACP
 @testable import LatchRemoteClient
@@ -194,6 +195,32 @@ final class FakeConnection: Sendable {
                 receive()
             }
         }
+    }
+
+    /// The next line as it arrived, such as a line of an HTTP request.
+    func nextLine(timeout: Double = 5) async throws -> Data {
+        try await lines.next(timeout: timeout)
+    }
+
+    /// Reads a WebSocket upgrade request and answers it with `101`, or with `status`; returns
+    /// the request's head.
+    @discardableResult
+    func answerUpgrade(status: String? = nil) async throws -> String {
+        var key: String?
+        var head: [String] = []
+        while true {
+            let line = String(decoding: try await nextLine(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { break }
+            head.append(line)
+            if line.lowercased().hasPrefix("sec-websocket-key:") { key = String(line.dropFirst("sec-websocket-key:".count)).trimmingCharacters(in: .whitespaces) }
+        }
+        if let status {
+            sendLine(Data("HTTP/1.1 \(status)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+            return head.joined(separator: "\n")
+        }
+        let accept = Data(Insecure.SHA1.hash(data: Data(((key ?? "") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))).base64EncodedString()
+        sendLine(Data("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n".utf8))
+        return head.joined(separator: "\n")
     }
 
     func nextFrame(timeout: Double = 5) async throws -> LatchRemoteClientFrame {

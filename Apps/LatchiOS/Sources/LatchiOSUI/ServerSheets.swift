@@ -20,13 +20,15 @@ final class ServerSheets: RootViewControllerDelegate {
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             root.presentOnTop(alert)
         case let .success(pairing):
-            let matches = { (host: String, port: UInt16) in host.lowercased() == pairing.host.lowercased() && port == pairing.port }
+            let matches = { (host: String, port: UInt16, transport: LatchRemoteTransport) in
+                host.lowercased() == pairing.host.lowercased() && port == pairing.port && transport == pairing.transport
+            }
             // A server saved without its token, as after a backup restored onto a new device,
             // takes the link's token under its own ID, so its sessions come back.
-            if let missing = root.servers.missingTokens.first(where: { matches($0.host, $0.port) }) {
+            if let missing = root.servers.missingTokens.first(where: { matches($0.host, $0.port, $0.transport) }) {
                 return root.presentServerEditor(serverID: missing.id, pairing: pairing)
             }
-            guard let existing = root.servers.servers.first(where: { matches($0.host, $0.port) }) else {
+            guard let existing = root.servers.servers.first(where: { matches($0.host, $0.port, $0.transport) }) else {
                 return root.presentServerEditor(pairing: pairing)
             }
             let alert = UIAlertController(
@@ -53,6 +55,7 @@ final class ServerSheets: RootViewControllerDelegate {
         case .invalidPort: "Its port must be a number from 1 to 65535."
         case .missingToken: "It has no token. Run “latch-server pair” on the server for a complete link."
         case .invalidToken: "Its token is not a Latch token. Run “latch-server pair” on the server for a new link."
+        case .unsupportedTransport: "It asks for a connection this version of Latch can’t make. Update Latch, or pair without it."
         }
     }
 }

@@ -20,12 +20,12 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
 - **Attachments and commands.** Paste, drop, or attach files, folders, and screenshots; images go to agents that accept them, file links to any. Typing `/` lists the commands the agent offers.
 - **A fast native transcript.** Incremental Markdown rendering keeps a streamed frame cheap however long the answer gets, with ⌘F find, per-message copy, and system fonts and colors throughout.
 - **Process isolation.** Agents run under an XPC service embedded in the app, not in the UI process. The service admits only the app's own code signature.
-- **Agents on a server.** Run [`latch-server`](docs/server.md) on a Linux or macOS machine and connect to it over Tailscale or an SSH tunnel. Its agents keep running when the Mac sleeps or changes network, and when Latch quits; Latch catches up when it reconnects or next opens.
+- **Agents on a server.** Run [`latch-server`](docs/server.md) on a Linux or macOS machine and connect to it over Tailscale, an SSH tunnel, or a Cloudflare Tunnel. Its agents keep running when the Mac sleeps or changes network, and when Latch quits; Latch catches up when it reconnects or next opens.
 - **An iPhone and iPad app.** [Latch for iPhone and iPad](docs/ios.md) drives agents on a `latch-server`: it lists their sessions, takes up one another device started, streams replies, sends prompts and photos, and answers approvals. Pair it by scanning the code `latch-server pair --host NAME --qr` prints with the Camera. You build it yourself.
 
 ## What does not exist yet
 
-Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and your phone follows it. The iOS app exists, but only as a client of `latch-server`: it cannot reach agents the Mac runs itself. There is no App Store or TestFlight build, and no push notifications, so a request that arrives while the app is suspended waits until you open it. Pairing hands over the server's token, one for every device, not a per-device key, and Tailscale, or an SSH tunnel for the Mac, provides the encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
+Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and your phone follows it. The iOS app exists, but only as a client of `latch-server`: it cannot reach agents the Mac runs itself. There is no App Store or TestFlight build, and no push notifications, so a request that arrives while the app is suspended waits until you open it. Pairing hands over the server's token, one for every device, not a per-device key, and Tailscale, a TLS proxy such as a Cloudflare Tunnel, or an SSH tunnel for the Mac, provides the encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
 
 Other known gaps:
 

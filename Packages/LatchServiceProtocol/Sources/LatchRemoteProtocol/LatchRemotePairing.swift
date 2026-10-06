@@ -6,27 +6,51 @@ public enum LatchRemotePairingError: Error, Equatable, Sendable {
     case invalidPort
     case missingToken
     case invalidToken
+    /// A `transport` this version of Latch does not know, or one given twice.
+    case unsupportedTransport
 }
 
-/// The `latch://host:port?token=…` string `latch-server pair` prints for pasting into the app.
+/// How a client reaches a server.
+public enum LatchRemoteTransport: String, Codable, Hashable, Sendable, CaseIterable {
+    /// The stream over TCP, straight to the server; encryption comes from the network path,
+    /// such as a tailnet or an SSH tunnel.
+    case tcp
+    /// The same stream inside a WebSocket over TLS, to a proxy that forwards it to the
+    /// server's loopback address, such as a Cloudflare Tunnel. The system's trust store checks
+    /// the proxy's certificate before the token is sent.
+    case webSocket = "wss"
+
+    public var defaultPort: UInt16 {
+        switch self {
+        case .tcp: LatchRemoteProtocol.defaultPort
+        case .webSocket: 443
+        }
+    }
+}
+
+/// The `latch://host:port?token=…` string `latch-server pair` prints for pasting into the app,
+/// with `transport=wss` before the token for a server behind a TLS proxy.
 public struct LatchRemotePairing: Equatable, Sendable {
     static let scheme = "latch://"
 
     /// A host name or a numeric address; IPv6 without brackets.
     public let host: String
     public let port: UInt16
+    public let transport: LatchRemoteTransport
     public let token: LatchRemoteToken
 
-    public init(host: String, port: UInt16 = LatchRemoteProtocol.defaultPort, token: LatchRemoteToken) throws {
+    public init(host: String, port: UInt16? = nil, transport: LatchRemoteTransport = .tcp, token: LatchRemoteToken) throws {
         guard Self.isValidHost(host) else { throw LatchRemotePairingError.invalidHost }
+        let port = port ?? transport.defaultPort
         guard port > 0 else { throw LatchRemotePairingError.invalidPort }
         self.host = host
         self.port = port
+        self.transport = transport
         self.token = token
     }
 
     /// Parses a pasted string; surrounding whitespace is ignored and a missing port means
-    /// the default one.
+    /// the transport's default one.
     public init(parsing input: String) throws {
         let string = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard string.prefix(Self.scheme.count).lowercased() == Self.scheme else { throw LatchRemotePairingError.invalidScheme }
@@ -59,7 +83,7 @@ public struct LatchRemotePairing: Equatable, Sendable {
         }
 
         guard Self.isValidHost(String(host)) else { throw LatchRemotePairingError.invalidHost }
-        var port = LatchRemoteProtocol.defaultPort
+        var port: UInt16?
         if let portText {
             guard (1...5).contains(portText.count), portText.allSatisfy(\.isASCIIDigit),
                   let value = UInt16(portText) else { throw LatchRemotePairingError.invalidPort }
@@ -67,8 +91,16 @@ public struct LatchRemotePairing: Equatable, Sendable {
         }
 
         var token: LatchRemoteToken?
+        var transport: LatchRemoteTransport?
         if let queryStart {
             for parameter in remainder[remainder.index(after: queryStart)...].split(separator: "&") {
+                if parameter.hasPrefix("transport=") {
+                    guard transport == nil,
+                          let parsed = LatchRemoteTransport(rawValue: String(parameter.dropFirst("transport=".count)).lowercased()) else {
+                        throw LatchRemotePairingError.unsupportedTransport
+                    }
+                    transport = parsed
+                }
                 guard parameter.hasPrefix("token=") else { continue }
                 guard token == nil else { throw LatchRemotePairingError.invalidToken }
                 guard let parsed = LatchRemoteToken(String(parameter.dropFirst("token=".count))) else {
@@ -78,12 +110,13 @@ public struct LatchRemotePairing: Equatable, Sendable {
             }
         }
         guard let token else { throw LatchRemotePairingError.missingToken }
-        try self.init(host: String(host), port: port, token: token)
+        try self.init(host: String(host), port: port, transport: transport ?? .tcp, token: token)
     }
 
     public var string: String {
         let authority = host.contains(":") ? "[\(host)]" : host
-        return "\(Self.scheme)\(authority):\(port)?token=\(token.rawValue)"
+        let transport = transport == .tcp ? "" : "transport=\(self.transport.rawValue)&"
+        return "\(Self.scheme)\(authority):\(port)?\(transport)token=\(token.rawValue)"
     }
 
     /// A DNS name of letters, digits and hyphens, or a numeric IPv4 or IPv6 address.

@@ -108,6 +108,13 @@ public final class RemoteServer: Sendable {
         return nil
     }
 
+    /// What a peer is counted under: an IPv4 address, or an IPv6 address's /64, which one
+    /// host or site holds whole, so it cannot take every slot with addresses of its own.
+    static func peerKey(_ address: [UInt8]) -> [UInt8] {
+        guard let bytes = LatchRemoteAddressPolicy.unmapped(address) else { return address }
+        return bytes.count == 16 ? Array(bytes.prefix(8)) : bytes
+    }
+
     public init(hub: RemoteRuntimeHub, tokens: ServerTokenFile, configuration: RemoteServerConfiguration, log: ServerLog) {
         self.hub = hub
         self.tokens = tokens
@@ -235,7 +242,7 @@ public final class RemoteServer: Sendable {
     /// connection to arrive.
     private func admit(_ descriptor: Int32, peer address: ServerSocketAddress?) {
         let peer = address?.description ?? "unknown"
-        let key = address?.bytes ?? []
+        let key = address.map { Self.peerKey($0.bytes) } ?? []
         let perPeer = max(1, configuration.maxUnauthenticatedConnectionsPerPeer)
         let total = max(1, configuration.maxUnauthenticatedConnections)
         let admitted: (connection: RemoteServerConnection, evicted: RemoteServerConnection?)? = state.withLock { state in
@@ -247,7 +254,7 @@ public final class RemoteServer: Sendable {
                 evicted = state.connections[victim]
             }
             state.nextSerial += 1
-            let connection = RemoteServerConnection(serial: state.nextSerial, descriptor: descriptor, peer: peer, server: self)
+            let connection = RemoteServerConnection(serial: state.nextSerial, descriptor: descriptor, peer: address, server: self)
             state.connections[connection.serial] = connection
             state.unauthenticated[connection.serial] = key
             return (connection, evicted)
@@ -275,6 +282,27 @@ public final class RemoteServer: Sendable {
             let waiting = state.unauthenticated.removeValue(forKey: connection.serial) != nil
             return waiting && !state.stopping
         }
+    }
+
+    /// A proxy on this machine forwarded `connection`, which has not authenticated, for the
+    /// client at `client`: from now on it counts against that client's limit rather than the
+    /// proxy's, and makes room there as a new connection would.
+    func forwarded(_ connection: RemoteServerConnection, for address: [UInt8]) {
+        let client = Self.peerKey(address)
+        let perPeer = max(1, configuration.maxUnauthenticatedConnectionsPerPeer)
+        let evicted: RemoteServerConnection? = state.withLock { state in
+            guard state.unauthenticated.removeValue(forKey: connection.serial) != nil else { return nil }
+            var evicted: RemoteServerConnection?
+            // Moving a connection leaves the total as it was.
+            if let victim = Self.evictionVictim(among: state.unauthenticated, for: client, perPeer: perPeer, total: .max) {
+                state.unauthenticated[victim] = nil
+                state.evicted.insert(victim)
+                evicted = state.connections[victim]
+            }
+            state.unauthenticated[connection.serial] = client
+            return evicted
+        }
+        evicted?.close("closed to make room: too many connections have not authenticated")
     }
 
     func ended(_ connection: RemoteServerConnection, reason: String) {

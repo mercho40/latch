@@ -78,6 +78,10 @@ final class ServerCommandLineTests: XCTestCase {
                        .installService(service, replace: true))
         XCTAssertEqual(try parse("install-service"), .installService(ServeOptions(), replace: false))
         XCTAssertEqual(try parse("uninstall-service", "--config-dir", "/c"), .uninstallService(ConfigOptions(configDirectory: "/c")))
+        XCTAssertEqual(try parse("runtimes"), .runtimes(ServeOptions(), stop: nil))
+        var elsewhere = ServeOptions()
+        elsewhere.listen = ["127.0.0.1:7801"]
+        XCTAssertEqual(try parse("runtimes", "--listen", "127.0.0.1:7801", "--stop", "rt-1"), .runtimes(elsewhere, stop: "rt-1"))
         XCTAssertEqual(try parse("devices", "--revoke=phone", "--config-dir", "/c"), .devices(ConfigOptions(configDirectory: "/c"), revoke: "phone"))
         XCTAssertEqual(try parse("--version"), .version)
         XCTAssertEqual(try parse("--help"), .help)
@@ -116,6 +120,8 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["doctor", "--qr"], "does not apply")
         assertRejected(["--replace"], "does not apply")
         assertRejected(["uninstall-service", "--listen", "127.0.0.1:1"], "does not apply")
+        assertRejected(["runtimes", "--stop", "a b"], "--stop a b: expected a runtime ID")
+        assertRejected(["--stop", "rt-1"], "does not apply")
     }
 
     func testPairSuggestsWhatTheHostCanBe() {

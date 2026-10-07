@@ -250,6 +250,15 @@ On SIGTERM or SIGINT, the server stops accepting and stops every agent, then giv
 
 A session that says its agent was stopped on the server means the agent is no longer running there, and not because of anything this session did: another client stopped it, or the server shut down while the session was connected. The idle timeout below stops only agents no client is attached to, and forgets them, so a session finds such an agent gone, as after a restart. It is not a crash; an agent that crashed shows its exit status instead. An agent that exited or was stopped stays attachable, so Latch can show how it ended; the server keeps the last eight. The server keeps up to 8 MiB of each agent's events for clients that return, and 128 MiB across all of them, dropping the oldest first. A client that returns after some of its events were dropped is told so.
 
+## See what it runs
+
+```sh
+latch-server runtimes
+latch-server runtimes --stop ID
+```
+
+lists the agents the server runs, with what each is doing (idle, working, waiting for you, starting, or exited), its agent, workspace and title, and stops one by its ID, as Stop Agent does on a phone. It asks the server at the default listen address with the server token; give `--listen` for another address and `--config-dir` for another token.
+
 ## Idle agents
 
 An agent nobody has been attached to for 24 hours, with no turn running, is stopped and forgotten; the server checks once a minute. Change the timeout with `--detached-timeout`, such as `12h`, `90m` or `1h30m`; `0` turns this off. An agent whose turn is waiting on a permission request is given seven days, or the timeout if that is longer, so a request left waiting when Latch quit is still there the next day, but an agent whose session was closed while the server was out of reach does not run forever. An agent running a turn that waits on nothing is never stopped. A client that comes back later resumes the session as after a restart.

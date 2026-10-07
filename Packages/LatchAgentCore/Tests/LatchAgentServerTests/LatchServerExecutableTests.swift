@@ -224,6 +224,42 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertEqual(try run(["doctor", "--listen", "bogus"]).status, 2)
     }
 
+    func testRuntimesListsAndStopsTheServersAgents() async throws {
+        let workspace = root.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try MockAgent.script.write(to: workspace.appendingPathComponent("agent.sh"), atomically: true, encoding: .utf8)
+        let config = root.appendingPathComponent("config").path
+        let server = try await ServerProcess.start(binary(), config: config, extra: rootArguments)
+        defer { server.kill() }
+        let listen = ["--listen", "127.0.0.1:\(server.port)", "--config-dir", config] + rootArguments
+        let none = try run(["runtimes"] + listen)
+        XCTAssertEqual(none.status, 0, none.error)
+        XCTAssertTrue(none.error.contains("runs no agents"), none.error)
+
+        let client = try await server.authenticated()
+        let id = AgentRuntimeID("listed")
+        let agent = LatchRemoteAgent.custom("/bin/sh " + AgentCommand.quotedArgument(workspace.appendingPathComponent("agent.sh").path))
+        try await client.ok(.launchAgent(runtimeID: id, agent: agent, workspace: workspace.path))
+        try await client.ok(.newSession(runtimeID: id))
+        let listed = try run(["runtimes"] + listen)
+        XCTAssertEqual(listed.status, 0, listed.error)
+        let rows = listed.output.split(separator: "\n")
+        XCTAssertTrue(rows.first?.hasPrefix("ID ") == true, listed.output)
+        XCTAssertTrue(rows.contains { $0.hasPrefix("listed ") && $0.contains(" idle ") && $0.contains(workspace.path) }, listed.output)
+
+        let stopped = try run(["runtimes", "--stop", "listed"] + listen)
+        XCTAssertEqual(stopped.status, 0, stopped.error)
+        XCTAssertTrue(stopped.error.contains("stopped listed"), stopped.error)
+        let missing = try run(["runtimes", "--stop", "nonesuch"] + listen)
+        XCTAssertEqual(missing.status, 1)
+        let after = try run(["runtimes"] + listen)
+        XCTAssertFalse(after.output.contains(" idle "), after.output)
+
+        let elsewhere = try run(["runtimes", "--listen", "127.0.0.1:1", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(elsewhere.status, 1)
+        XCTAssertTrue(elsewhere.error.contains("nothing listens at 127.0.0.1:1"), elsewhere.error)
+    }
+
     /// latch-server joins an agent's streamed chunks; the hub's own default does not.
     func testTheServerJoinsStreamedChunks() async throws {
         let workspace = root.appendingPathComponent("workspace")

@@ -244,41 +244,20 @@ struct ServerDoctor {
 // MARK: The real checks
 
 extension ServerDoctor {
-    /// Connects, sends a hello with `token`, and reads the first line back.
+    /// Connects and sends a hello with `token`.
     static func ask(_ address: ServerSocketAddress, token: LatchRemoteToken) -> Answer {
-        let descriptor: Int32
         do {
-            descriptor = try ServerSocket.connect(to: address, timeout: .seconds(3))
+            let client = try ServerLocalClient(connectingTo: address, token: token)
+            client.close()
+            return .welcomed(version: client.welcome.server.version, hostname: client.welcome.server.hostname)
+        } catch .nothingListening {
+            return .nothingListening
+        } catch let .unreachable(reason) {
+            return .unreachable(reason)
+        } catch let .rejected(reason) {
+            return .rejected(reason)
         } catch {
-            return error.code == ECONNREFUSED ? .nothingListening : .unreachable(String(cString: strerror(error.code)))
-        }
-        defer { ServerSocket.close(descriptor) }
-        ServerSocket.setReceiveTimeout(descriptor, .seconds(5))
-        #if os(macOS)
-        let platform = "macOS"
-        #else
-        let platform = "Linux"
-        #endif
-        let hello = LatchRemoteClientFrame.hello(LatchRemoteHello(
-            token: token.rawValue,
-            client: LatchRemoteClientInfo(name: "latch-server doctor", version: LatchServerVersion.current, platform: platform)
-        ))
-        guard let line = try? LatchRemoteCoding.encodeLine(hello), ServerSocket.sendAll(descriptor, line) else { return .notLatch }
-        var decoder = LatchRemoteLineDecoder(maximumLineBytes: 64 * 1024)
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: 4096, alignment: 1)
-        defer { buffer.deallocate() }
-        while true {
-            let count = ServerSocket.receive(descriptor, into: buffer, count: 4096)
-            guard count > 0 else { return .notLatch }
-            decoder.append(Data(bytes: buffer, count: count))
-            let next: Data?
-            do { next = try decoder.nextLine() } catch { return .notLatch }
-            guard let next else { continue }
-            switch try? LatchRemoteCoding.decode(LatchRemoteServerFrame.self, fromLine: next) {
-            case let .welcome(welcome)?: return .welcomed(version: welcome.server.version, hostname: welcome.server.hostname)
-            case let .rejected(rejected)?: return .rejected(rejected.reason)
-            default: return .notLatch
-            }
+            return .notLatch
         }
     }
 

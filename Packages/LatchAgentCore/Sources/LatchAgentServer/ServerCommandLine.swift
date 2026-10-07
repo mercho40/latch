@@ -18,6 +18,9 @@ public enum ServerCommand: Equatable, Sendable {
     case installService(ServeOptions, replace: Bool)
     /// Stops the service and removes the unit `installService` wrote.
     case uninstallService(ConfigOptions)
+    /// Lists the agents the server listening at the first of `options`' addresses runs, or
+    /// with `stop`, stops one.
+    case runtimes(ServeOptions, stop: String?)
     case version
     case help
 }
@@ -82,6 +85,8 @@ public enum ServerCommandLine {
                                               run latch-server with those options as a
                                               systemd user service, now and at boot
            latch-server uninstall-service    stop that service and remove its unit
+           latch-server runtimes [--listen HOST:PORT] [--stop ID]
+                                              list the agents the server runs, or stop one
            latch-server --version | --help
 
     options:
@@ -105,6 +110,7 @@ public enum ServerCommandLine {
       --revoke DEVICE               with devices, delete DEVICE's token
       --replace                     with install-service, replace a latch-server.service
                                     it did not write
+      --stop ID                     with runtimes, stop that agent
 
     SIGHUP re-reads the token files at once; a rotated or revoked token closes the connections that used it.
     """
@@ -127,6 +133,7 @@ public enum ServerCommandLine {
         var device: String?
         var revoke: String?
         var replace = false
+        var stop: String?
         var version = false
         var help = false
         var seen: Set<String> = []
@@ -158,7 +165,7 @@ public enum ServerCommandLine {
 
             switch option {
             case "--listen":
-                try allowed(option, in: [nil, "doctor", "install-service"])
+                try allowed(option, in: [nil, "doctor", "install-service", "runtimes"])
                 serve.listen.append(try value())
             case "--allow-unencrypted-network":
                 try allowed(option, in: [nil, "doctor", "install-service"])
@@ -216,6 +223,13 @@ public enum ServerCommandLine {
                     throw ServerCommandLineError("\(option) \(name): expected 1 to 64 letters, digits, '.', '_' and '-', not starting with '.'")
                 }
                 if option == "--device" { device = name } else { revoke = name }
+            case "--stop":
+                try allowed(option, in: ["runtimes"])
+                let id = try value()
+                guard LatchRemoteProtocol.isValidRuntimeID(id) else {
+                    throw ServerCommandLineError("--stop \(id): expected a runtime ID as `latch-server runtimes` lists it")
+                }
+                stop = id
             case "--replace":
                 try allowed(option, in: ["install-service"])
                 try flag()
@@ -254,6 +268,8 @@ public enum ServerCommandLine {
             return .installService(serve, replace: replace)
         case "uninstall-service":
             return .uninstallService(serve.config)
+        case "runtimes":
+            return .runtimes(serve, stop: stop)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }

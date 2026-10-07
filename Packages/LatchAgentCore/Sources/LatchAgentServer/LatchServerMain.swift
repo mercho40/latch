@@ -131,6 +131,8 @@ public enum LatchServerMain {
             return installService(options, replace: replace)
         case let .uninstallService(config):
             return uninstallService(config)
+        case let .runtimes(options, stop):
+            return runtimes(options, stop: stop)
         case let .serve(options):
             return serve(options)
         }
@@ -320,6 +322,71 @@ public enum LatchServerMain {
             user: getpwuid(geteuid()).map { String(cString: $0.pointee.pw_name) } ?? "\(geteuid())",
             run: ServerService.runCommand
         )
+    }
+
+    /// Asks the server at the first listen address, as the server token's holder.
+    private static func runtimes(_ options: ServeOptions, stop: String?) -> Int32 {
+        let address: ServerSocketAddress
+        do {
+            address = ServerDoctor.reachable(try ServerListenPolicy.parse(options.listenAddresses[0]))
+        } catch {
+            printError("\(error)")
+            return 2
+        }
+        guard let tokens = tokenFile(options.config) else { return 1 }
+        let token: LatchRemoteToken
+        do {
+            token = try tokens.read()
+        } catch {
+            printError("\(error)")
+            return 1
+        }
+        var client: ServerLocalClient
+        do {
+            client = try ServerLocalClient(connectingTo: address, token: token)
+        } catch {
+            printError(RuntimeTable.describe(error, at: address, configDirectory: tokens.directory))
+            return 1
+        }
+        defer { client.close() }
+        do {
+            if let stop {
+                // Stopping is idempotent on the wire, so an unknown ID would read as stopped.
+                guard case let .success(.runtimes(summaries)) = try client.request(.listRuntimes) else {
+                    printError("the server at \(address) did not list its agents")
+                    return 1
+                }
+                guard let summary = summaries.first(where: { $0.runtimeID.rawValue == stop }) else {
+                    printError("no agent has the ID \(stop); `latch-server runtimes` lists them")
+                    return 1
+                }
+                guard summary.lifecycle != .exited else {
+                    printError("\(stop) has already exited")
+                    return 0
+                }
+                switch try client.request(.stopRuntime(runtimeID: AgentRuntimeID(stop))) {
+                case .success:
+                    printError("stopped \(stop)")
+                    return 0
+                case let .failure(error):
+                    printError("\(stop): \(error.message)")
+                    return 1
+                }
+            }
+            guard case let .success(.runtimes(summaries)) = try client.request(.listRuntimes) else {
+                printError("the server at \(address) did not list its agents")
+                return 1
+            }
+            if summaries.isEmpty {
+                printError("the server at \(address) runs no agents")
+            } else {
+                print(RuntimeTable.render(summaries, homeDirectory: client.welcome.server.home))
+            }
+            return 0
+        } catch {
+            printError(RuntimeTable.describe(error, at: address, configDirectory: tokens.directory))
+            return 1
+        }
     }
 
     private static func tokenFile(_ config: ConfigOptions) -> ServerTokenFile? {

@@ -10,6 +10,12 @@ public struct RemoteRuntimeHubConfiguration: Sendable {
     public var runtimeJournalBudget = 8 * 1024 * 1024
     /// Journaled event bytes kept across all runtimes, exited ones included.
     public var globalJournalBudget = 128 * 1024 * 1024
+    /// Bytes of condensed history kept per runtime, within `globalJournalBudget`: what
+    /// `runtimeJournalBudget` pushes out, with each message's chunks joined and each tool
+    /// call's updates folded into it, for a client attaching from the start. Zero, the default,
+    /// drops it; `latch-server` uses `servedHistoryBudget`.
+    public var historyBudget = 0
+    public static let servedHistoryBudget = 8 * 1024 * 1024
     /// An event whose encoding is larger is journaled as `omitted`.
     public var maxEncodedEventBytes = LatchRemoteProtocol.maxEncodedEventBytes
     /// An idle runtime nobody has been attached to for this long is stopped. Zero disables it,
@@ -139,6 +145,7 @@ public actor RemoteRuntimeHub {
         journal = RemoteEventJournal(
             runtimeBudget: configuration.runtimeJournalBudget,
             globalBudget: configuration.globalJournalBudget,
+            historyBudget: configuration.historyBudget,
             clock: clock
         )
     }

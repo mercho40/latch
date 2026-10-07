@@ -198,6 +198,7 @@ public enum LatchServerMain {
         var configuration = RemoteRuntimeHubConfiguration()
         configuration.detachedTimeout = options.detachedTimeout
         configuration.chunkCoalescingWindow = RemoteRuntimeHubConfiguration.servedChunkCoalescingWindow
+        configuration.historyBudget = RemoteRuntimeHubConfiguration.servedHistoryBudget
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var standardError: (@Sendable (AgentRuntimeID, Data) -> Void)?
         if let standardErrorLog {

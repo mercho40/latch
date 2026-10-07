@@ -1,4 +1,5 @@
 import Foundation
+import LatchACP
 import LatchRemoteProtocol
 import LatchServiceProtocol
 import XCTest
@@ -140,6 +141,105 @@ final class RemoteEventJournalTests: XCTestCase {
         XCTAssertEqual(journal.byteCount, 0)
         XCTAssertEqual(journal.pull(connection, byteBudget: 1 << 20), [])
         XCTAssertNil(journal.append(event(40), to: first))
+    }
+
+    func testAClientAttachingFromTheStartReadsTheCondensedHistory() throws {
+        let journal = RemoteEventJournal(runtimeBudget: 16_000, globalBudget: 1 << 20, historyBudget: 1 << 20, clock: { .now })
+        journal.createRuntime(first)
+        let words = (0..<400).map { "w\($0) " }
+        for word in words { journal.append(chunk(word), to: first) }
+
+        let fresh = journal.openConnection(wake: {})
+        let attach = journal.subscribe(fresh, to: first, after: 0)
+        XCTAssertFalse(attach.truncated)
+        journal.activate(fresh, runtimeID: first)
+        let frames = try decode(journal.pull(fresh, byteBudget: 1 << 20))
+        XCTAssertEqual(frames.first?.sequence, attach.backlogFrom)
+        XCTAssertEqual(text(frames), words.joined())
+        XCTAssertLessThan(frames.count, words.count * 3 / 4)
+        XCTAssertEqual(frames.last?.sequence, 400)
+        XCTAssertEqual(Set(frames.map(\.sequence)).count, frames.count)
+        XCTAssertEqual(frames.map(\.sequence), frames.map(\.sequence).sorted())
+        XCTAssertFalse(frames.contains(where: \.gap))
+
+        // A cursor inside the history gets the journal alone, after a gap, as without condensing.
+        let behind = journal.openConnection(wake: {})
+        let resumed = journal.subscribe(behind, to: first, after: 3)
+        XCTAssertTrue(resumed.truncated)
+        XCTAssertGreaterThan(resumed.backlogFrom, 4)
+        journal.activate(behind, runtimeID: first)
+        let rest = try decode(journal.pull(behind, byteBudget: 1 << 20))
+        XCTAssertEqual(rest.first?.sequence, resumed.backlogFrom)
+        XCTAssertEqual(text(rest), words.suffix(rest.count).joined())
+    }
+
+    func testAReaderOfTheHistoryFollowsItAsItGrows() throws {
+        let journal = RemoteEventJournal(runtimeBudget: 16_000, globalBudget: 1 << 20, historyBudget: 1 << 20, clock: { .now })
+        journal.createRuntime(first)
+        let words = (0..<480).map { "w\($0) " }
+        for word in words.prefix(240) { journal.append(chunk(word), to: first) }
+        let fresh = journal.openConnection(wake: {})
+        _ = journal.subscribe(fresh, to: first, after: 0)
+        journal.activate(fresh, runtimeID: first)
+        var frames = try decode(journal.pull(fresh, byteBudget: 1))
+        XCTAssertEqual(frames.count, 1)
+
+        // What it has yet to read is condensed while it reads.
+        for word in words.dropFirst(240) { journal.append(chunk(word), to: first) }
+        frames += try decode(journal.pull(fresh, byteBudget: 1 << 20))
+        XCTAssertEqual(text(frames), words.joined())
+        XCTAssertEqual(frames.last?.sequence, 480)
+        XCTAssertFalse(frames.contains(where: \.gap))
+    }
+
+    func testHistoryPastItsBudgetIsReportedLost() throws {
+        let journal = RemoteEventJournal(runtimeBudget: 16_000, globalBudget: 1 << 20, historyBudget: 1500, clock: { .now })
+        journal.createRuntime(first)
+        let words = (0..<900).map { "w\($0) " }
+        for word in words.prefix(450) { journal.append(chunk(word), to: first) }
+        XCTAssertLessThanOrEqual(journal.byteCount, 16_000 + 1500)
+
+        let fresh = journal.openConnection(wake: {})
+        XCTAssertTrue(journal.subscribe(fresh, to: first, after: 0).truncated)
+        journal.activate(fresh, runtimeID: first)
+        var frames = try decode(journal.pull(fresh, byteBudget: 1))
+        XCTAssertFalse(frames[0].gap)
+
+        // History dropped before this reader got to it is a gap.
+        for word in words.dropFirst(450) { journal.append(chunk(word), to: first) }
+        frames += try decode(journal.pull(fresh, byteBudget: 1 << 20))
+        XCTAssertTrue(frames[1].gap)
+        XCTAssertFalse(frames.dropFirst(2).contains(where: \.gap))
+        XCTAssertEqual(frames.last?.sequence, 900)
+        XCTAssertTrue(words.joined().hasSuffix(text(Array(frames.dropFirst()))))
+    }
+
+    func testAStoppedRuntimeKeepsNoHistory() throws {
+        let journal = RemoteEventJournal(runtimeBudget: 16_000, globalBudget: 1 << 20, historyBudget: 1 << 20, clock: { .now })
+        journal.createRuntime(first)
+        for index in 0..<400 { journal.append(chunk("w\(index) "), to: first) }
+        journal.retire(first, through: 399)
+        XCTAssertEqual(journal.byteCount, chunk("w399 ").count)
+        let late = journal.openConnection(wake: {})
+        let attach = journal.subscribe(late, to: first, after: 0)
+        XCTAssertTrue(attach.truncated)
+        XCTAssertEqual(attach.backlogFrom, 400)
+    }
+
+    /// An agent message chunk, all of one message.
+    private func chunk(_ text: String) -> Data {
+        let notification = ACPSessionNotification(sessionId: "s", update: .object([
+            "sessionUpdate": .string("agent_message_chunk"), "content": .object(["type": .string("text"), "text": .string(text)]),
+        ]))
+        return try! LatchRemoteCoding.encodeEvent(.sessionUpdate(notification: notification))
+    }
+
+    private func text(_ frames: [LatchRemoteEventFrame]) -> String {
+        frames.map { frame in
+            guard case let .sessionUpdate(notification, _) = frame.event, case let .object(update) = notification.update,
+                  case let .object(content)? = update["content"], case let .string(text)? = content["text"] else { return "" }
+            return text
+        }.joined()
     }
 
     /// An encoded event of exactly `size` bytes.

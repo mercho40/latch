@@ -269,7 +269,8 @@ final class RemoteSessionLiveWindowTests: XCTestCase {
                 XCTAssertEqual(session.model.errorMessage, "The agent was stopped on loopback.")
                 XCTAssertEqual(session.banner.displayedTitle, "\(AgentPreset.custom.title) stopped on loopback")
                 XCTAssertEqual(session.banner.displayedDetail, "The agent was stopped on loopback.")
-                XCTAssertEqual(session.banner.displayedMessage, "Retry to start it again.")
+                // A server that shut down may be back soon: the session resumes once it answers.
+                XCTAssertEqual(session.banner.displayedMessage, "Latch starts it again, and resumes the conversation, once loopback answers.")
                 XCTAssertEqual(session.banner.displayedActions, ["Retry", "Server Settings…"])
                 XCTAssertEqual(session.sidebarRow(now: Date()).detail, "Stopped on loopback")
                 XCTAssertEqual(session.model.linkState, .connected, "Not left reconnecting to a server that has gone")

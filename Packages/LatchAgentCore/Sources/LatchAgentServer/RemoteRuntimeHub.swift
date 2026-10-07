@@ -176,7 +176,7 @@ public actor RemoteRuntimeHub {
         var launches: [(AgentRuntimeID, Task<ACPInitializeResponse, any Error>)] = []
         for (id, state) in runtimes where state.lifecycle != .exited {
             if let launch = state.launch { launches.append((id, launch)) }
-            finish(id, exit: LatchRemoteExit(status: nil, stopped: true), keepJournal: false)
+            finish(id, exit: LatchRemoteExit(status: nil, stopped: true, serverShutDown: true), keepJournal: false)
         }
         await service.shutdown()
         // A launch task that had not reached the registry yet starts its agent only now.

@@ -163,6 +163,7 @@ final class LatchRemoteGoldenTests: XCTestCase {
             (.configurationSet(LatchRemoteConfigurationSet(route: .model, value: "model-b")), #"{"kind":"configurationSet","route":"model","value":"model-b"}"#),
             (.exited(LatchRemoteExit(status: 0, stopped: true)), #"{"kind":"exited","status":0,"stopped":true}"#),
             (.exited(LatchRemoteExit(status: nil, stopped: false)), #"{"kind":"exited","stopped":false}"#),
+            (.exited(LatchRemoteExit(status: nil, stopped: true, serverShutDown: true)), #"{"kind":"exited","serverShutDown":true,"stopped":true}"#),
             (.omitted(originalKind: "sessionUpdate", byteCount: 9_000_000), #"{"byteCount":9000000,"kind":"omitted","originalKind":"sessionUpdate"}"#),
         ]
         for (event, fixture) in cases {

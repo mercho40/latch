@@ -360,6 +360,11 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         return !current.connects(like: state.withLock { $0.reached })
     }
 
+    public func serverAnswers() async -> Bool {
+        guard let server = await readServer() else { return false }
+        return (try? await LatchRemoteServerCheck.run(server.connectionOptions)) != nil
+    }
+
     /// Checks the link now, as after the Mac wakes.
     public func probe() async {
         await state.withLock { $0.runtime?.channel }?.probe()
@@ -558,7 +563,9 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
                 // A stop this client asked for is not news to the session that asked.
                 let expected = state.withLock { $0.runtime?.channel === channel && $0.runtime?.stopping == true }
                 guard !expected else { return [skipped] }
-                if exit.stopped { return [.stopped(runtimeID: id, server: serverName, sequence: sequence)] }
+                if exit.stopped {
+                    return [.stopped(runtimeID: id, server: serverName, sequence: sequence, serverShutDown: exit.serverShutDown == true)]
+                }
                 return [.agent(.processTerminated(runtimeID: id, status: exit.status ?? 0), sequence: sequence)]
             case .omitted:
                 return [.outputLost(runtimeID: id, sequence: sequence)]

@@ -30,7 +30,7 @@ Latch's goal is a control surface that follows you: the agent keeps running wher
 Other known gaps:
 
 - Releases are ad-hoc signed, not notarized, and there is no update mechanism beyond running the installer again.
-- Agents on this Mac stop when the app quits; the background service that would keep them running is not implemented. Agents on a `latch-server` keep running, but not through a restart of the server; after one, Retry, or the next launch of Latch, starts the agent again and resumes its saved session, if the agent can load one.
+- Agents on this Mac stop when the app quits; the background service that would keep them running is not implemented. Agents on a `latch-server` keep running, but not through a restart of the server; after one, each session starts its agent again and resumes its saved session by itself, once the server answers, if the agent can load one.
 - If the app or its service is killed outright, running local agent processes are not cleaned up.
 - Remote sessions, on the Mac and the phone, cannot attach files or folders, and a folder on the server is typed, not browsed. The Mac does not list or take up agents another device started.
 - Permission approval and model/effort/mode switching are covered by mock-agent tests and an opt-in live Codex test, but have not been validated across every provider.

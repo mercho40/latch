@@ -724,7 +724,8 @@ final class RemoteServerTests: XCTestCase {
         // rather than only that the server went away.
         _ = try await client.readFrames(until: "the stop") { frame in
             guard case let .event(event) = frame, event.runtimeID == id else { return false }
-            return event.event == .exited(LatchRemoteExit(status: nil, stopped: true))
+            // Stopped by the server shutting down, so a client can resume once it is back.
+            return event.event == .exited(LatchRemoteExit(status: nil, stopped: true, serverShutDown: true))
         }
         try await client.expectClosed()
         try await handshaking.expectClosed()

@@ -56,6 +56,16 @@ public struct LatchRemoteLineDecoder: Sendable {
         return line
     }
 
+    /// The bytes after the last line returned, which leave the decoder: what follows a welcome
+    /// that starts compression is not lines until it is decompressed.
+    public mutating func takeRemainder() -> Data {
+        let remainder = Data(buffer[lineStart...])
+        buffer.removeAll()
+        lineStart = 0
+        scanned = 0
+        return remainder
+    }
+
     /// Appends `data` and returns every line it completes.
     public mutating func lines(appending data: Data) throws -> [Data] {
         append(data)

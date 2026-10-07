@@ -20,6 +20,10 @@ final class TestSocketClient: Sendable {
     let descriptor: Int32
     private let decoder = Mutex(LatchRemoteLineDecoder(maximumLineBytes: 64 * 1024 * 1024))
     private let webSocket = Mutex<TestWebSocketReader?>(nil)
+    /// Set by a welcome that chose compression, as the apps' connection does.
+    private let inflater = Mutex<LatchRemoteInflater?>(nil)
+    /// Bytes read off the socket, compressed or not, for measuring.
+    let bytesReceived = Mutex(0)
 
     init(port: UInt16) throws {
         descriptor = socket(AF_INET, ServerSocket.streamType, 0)
@@ -102,8 +106,10 @@ final class TestSocketClient: Sendable {
         ServerSocket.shutdownBoth(descriptor)
     }
 
-    func hello(token: String, range: LatchRemoteVersionRange = .supported) {
-        send(.hello(LatchRemoteHello(protocolRange: range, token: token, client: LatchRemoteClientInfo(name: "test", version: "1", platform: "test"))))
+    func hello(token: String, range: LatchRemoteVersionRange = .supported, exchangesPairingCode: Bool = false,
+               compression: [LatchRemoteCompression] = []) {
+        send(.hello(LatchRemoteHello(protocolRange: range, token: token, client: LatchRemoteClientInfo(name: "test", version: "1", platform: "test"),
+                                     exchangesPairingCode: exchangesPairingCode, compression: compression)))
     }
 
     /// Sends a request and returns its id.
@@ -124,7 +130,16 @@ final class TestSocketClient: Sendable {
 
     func readFrame(timeout: Duration = .seconds(10)) async throws -> LatchRemoteServerFrame {
         guard let line = try await readLine(timeout: timeout) else { throw HubTestError.unexpected("the server closed the connection") }
-        return try LatchRemoteCoding.decode(LatchRemoteServerFrame.self, fromLine: line)
+        let frame = try LatchRemoteCoding.decode(LatchRemoteServerFrame.self, fromLine: line)
+        if case let .welcome(welcome) = frame, welcome.compression == .deflate {
+            // What came in after the welcome with it is compressed already.
+            try inflater.withLock { stored in
+                let inflater = LatchRemoteInflater()
+                try decoder.withLock { $0.append(try inflater.decompress($0.takeRemainder())) }
+                stored = inflater
+            }
+        }
+        return frame
     }
 
     /// Reads frames until one satisfies `condition`, returning all of them.
@@ -181,11 +196,13 @@ final class TestSocketClient: Sendable {
             // A reset after the server closed with unread input counts as closed.
             if count <= 0 { return nil }
             let received = Data(bytes: buffer, count: count)
+            bytesReceived.withLock { $0 += count }
             let stream = try webSocket.withLock { reader -> Data in
                 guard reader != nil else { return received }
                 return try reader!.read(received)
             }
-            decoder.withLock { $0.append(stream) }
+            let plain = try inflater.withLock { inflater in try inflater.map { try $0.decompress(stream) } ?? stream }
+            decoder.withLock { $0.append(plain) }
         }
     }
 

@@ -25,12 +25,12 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
 
 ## What does not exist yet
 
-Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and your phone follows it. The iOS app exists, but only as a client of `latch-server`: it cannot reach agents the Mac runs itself. There is no App Store or TestFlight build, and no push notifications, so a request that arrives while the app is suspended waits until you open it. Pairing hands over the server's token, one for every device, not a per-device key, and Tailscale, a TLS proxy such as a Cloudflare Tunnel, or an SSH tunnel for the Mac, provides the encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
+Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and your phone follows it. The iOS app exists, but only as a client of `latch-server`: it cannot reach agents the Mac runs itself. There is no App Store or TestFlight build, and no push notifications, so a request that arrives while the app is suspended waits until you open it. Pairing hands over a bearer token, not a device key: the server's, or with `latch-server pair --device` one of the device's own that can be revoked alone. Tailscale, a TLS proxy such as a Cloudflare Tunnel, or an SSH tunnel for the Mac, provides the encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
 
 Other known gaps:
 
 - Releases are ad-hoc signed, not notarized, and there is no update mechanism beyond running the installer again.
-- Agents on this Mac stop when the app quits; the background service that would keep them running is not implemented. Agents on a `latch-server` keep running, but not through a restart of the server; after one, Retry, or the next launch of Latch, starts the agent again and resumes its saved session, if the agent can load one.
+- Agents on this Mac stop when the app quits; the background service that would keep them running is not implemented. Agents on a `latch-server` keep running, but not through a restart of the server; after one, each session starts its agent again and resumes its saved session by itself, once the server answers, if the agent can load one.
 - If the app or its service is killed outright, running local agent processes are not cleaned up.
 - Remote sessions, on the Mac and the phone, cannot attach files or folders, and a folder on the server is typed, not browsed. The Mac does not list or take up agents another device started.
 - Permission approval and model/effort/mode switching are covered by mock-agent tests and an opt-in live Codex test, but have not been validated across every provider.
@@ -41,7 +41,7 @@ Other known gaps:
 
 - macOS 15 or later on Apple silicon; for the iOS app, iOS or iPadOS 18 or later
 - Xcode 27. The packages and their tests also build with Xcode 26.6, which is what CI uses, but its `actool` fails on the app's Icon Composer icon, so either app bundle needs 27.
-- At least one ACP agent. For Codex, sign in with `codex login`; for Claude Code, set up your Claude login and Node.js 22+. First-time setup of either may download its ACP adapter through npm. OpenCode and fx use their installed commands and existing authentication.
+- At least one ACP agent. For Codex, sign in with `codex login`; for Claude Code, set up your Claude login and Node.js 22+; Latch has its adapter run the `claude` you installed. First-time setup of either may download its ACP adapter through npm. OpenCode and fx use their installed commands and existing authentication.
 
 ## Install
 

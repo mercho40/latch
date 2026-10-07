@@ -7,7 +7,22 @@ public enum ServerCommand: Equatable, Sendable {
     /// Prints the token, creating it if absent, or a new one with `rotate`.
     case token(ConfigOptions, rotate: Bool)
     /// Prints a `latch://` string for pasting into the app, and with `qr` a QR code of it.
-    case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil)
+    /// With `device`, the string carries that device's own token, created on first use.
+    /// `watchOnly` makes that token one that only watches.
+    case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil, device: String? = nil,
+              watchOnly: Bool = false)
+    /// Lists the devices with a token of their own, or with `revoke`, deletes one's.
+    case devices(ConfigOptions, revoke: String?)
+    /// Checks what serving with these options needs, changing nothing.
+    case doctor(ServeOptions)
+    /// Writes a systemd user unit that serves with these options, and starts it; `replace`
+    /// replaces a unit the user wrote.
+    case installService(ServeOptions, replace: Bool)
+    /// Stops the service and removes the unit `installService` wrote.
+    case uninstallService(ConfigOptions)
+    /// Lists the agents the server listening at the first of `options`' addresses runs, or
+    /// with `stop`, stops one.
+    case runtimes(ServeOptions, stop: String?)
     case version
     case help
 }
@@ -53,21 +68,34 @@ public struct ServerCommandLineError: Error, Equatable, Sendable, CustomStringCo
     init(_ description: String) {
         self.description = description
     }
+
+    static let pairNeedsHost = ServerCommandLineError("pair needs --host, the name or address your device connects to")
 }
 
 public enum ServerCommandLine {
     public static let usage = """
     usage: latch-server [options]            serve until SIGTERM or SIGINT
            latch-server token [--rotate]      print the token, creating it if absent
-           latch-server pair --host NAME [--port N] [--wss] [--qr [--invert]]
+           latch-server pair --host NAME [--port N] [--wss] [--device DEVICE [--watch-only]] [--qr [--invert]]
                                               print a latch:// string for the Latch app
+           latch-server devices [--revoke DEVICE]
+                                              list the devices paired with --device, or
+                                              revoke one
+           latch-server doctor [--listen HOST:PORT] [--allow-unencrypted-network]
+                                              check what serving with those options needs
+           latch-server install-service [options] [--replace]
+                                              run latch-server with those options as a
+                                              systemd user service, now and at boot
+           latch-server uninstall-service     stop that service and remove its unit
+           latch-server runtimes [--listen HOST:PORT] [--stop ID]
+                                              list the agents the server runs, or stop one
            latch-server --version | --help
 
     options:
       --listen HOST:PORT            numeric address to listen on; repeatable
                                     (default \(ServerListenPolicy.defaultListen))
       --allow-unencrypted-network   allow addresses that are neither loopback nor Tailscale
-      --config-dir PATH             where server-token lives
+      --config-dir PATH             where server-token and devices live
                                     (default $XDG_CONFIG_HOME/latch or ~/.config/latch)
       --detached-timeout DURATION   stop idle runtimes nobody attached to for this long,
                                     such as 24h, 90m or 30s; 0 disables (default 24h)
@@ -78,8 +106,18 @@ public enum ServerCommandLine {
       --qr                          with pair, also print the string as a QR code for the
                                     iPhone's camera; it holds the token, so keep it private
       --invert                      with --qr, draw the dark modules instead of the light
+      --device DEVICE               with pair, give the string a token of DEVICE's own,
+                                    created on first use, that revoking it ends; a name of
+                                    letters, digits, '.', '_' and '-'
+      --watch-only                  with --device, a token that lists and follows the
+                                    server's agents and changes nothing: no launch, prompt,
+                                    answer, setting or stop
+      --revoke DEVICE               with devices, delete DEVICE's token
+      --replace                     with install-service, replace a latch-server.service
+                                    it did not write
+      --stop ID                     with runtimes, stop that agent
 
-    SIGHUP re-reads the token file at once; a rotated token closes connections that used the old one.
+    SIGHUP re-reads the token files at once; a rotated or revoked token closes the connections that used it.
     """
 
     public static func parse(_ arguments: [String]) throws(ServerCommandLineError) -> ServerCommand {
@@ -97,6 +135,11 @@ public enum ServerCommandLine {
         var qr = false
         var invert = false
         var webSocket = false
+        var device: String?
+        var revoke: String?
+        var replace = false
+        var watchOnly = false
+        var stop: String?
         var version = false
         var help = false
         var seen: Set<String> = []
@@ -128,10 +171,10 @@ public enum ServerCommandLine {
 
             switch option {
             case "--listen":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "doctor", "install-service", "runtimes"])
                 serve.listen.append(try value())
             case "--allow-unencrypted-network":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "doctor", "install-service"])
                 try flag()
                 serve.allowUnencryptedNetwork = true
             case "--config-dir":
@@ -139,14 +182,14 @@ public enum ServerCommandLine {
                 guard !path.isEmpty else { throw ServerCommandLineError("--config-dir needs a path") }
                 serve.config.configDirectory = path
             case "--detached-timeout":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "install-service"])
                 let text = try value()
                 guard let duration = parseDuration(text) else {
                     throw ServerCommandLineError("--detached-timeout \(text): expected a duration such as 24h, 90m, 30s or 0")
                 }
                 serve.detachedTimeout = duration
             case "--log-agent-stderr":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "install-service"])
                 try flag()
                 serve.logAgentStandardError = true
             case "--allow-root":
@@ -179,6 +222,28 @@ public enum ServerCommandLine {
                 try allowed(option, in: ["pair"])
                 try flag()
                 invert = true
+            case "--device", "--revoke":
+                try allowed(option, in: [option == "--device" ? "pair" : "devices"])
+                let name = try value()
+                guard ServerDeviceTokens.isValidName(name) else {
+                    throw ServerCommandLineError("\(option) \(name): expected 1 to 64 letters, digits, '.', '_' and '-', not starting with '.'")
+                }
+                if option == "--device" { device = name } else { revoke = name }
+            case "--stop":
+                try allowed(option, in: ["runtimes"])
+                let id = try value()
+                guard LatchRemoteProtocol.isValidRuntimeID(id) else {
+                    throw ServerCommandLineError("--stop \(id): expected a runtime ID as `latch-server runtimes` lists it")
+                }
+                stop = id
+            case "--watch-only":
+                try allowed(option, in: ["pair"])
+                try flag()
+                watchOnly = true
+            case "--replace":
+                try allowed(option, in: ["install-service"])
+                try flag()
+                replace = true
             case "--version":
                 try flag()
                 version = true
@@ -200,14 +265,39 @@ public enum ServerCommandLine {
         case "token":
             return .token(serve.config, rotate: rotate)
         case "pair":
-            guard let host else { throw ServerCommandLineError("pair needs --host, the name or address clients reach this server at") }
+            guard let host else { throw ServerCommandLineError.pairNeedsHost }
             guard qr || !invert else { throw ServerCommandLineError("--invert needs --qr") }
             let style: PairQRCode? = qr ? (invert ? .darkModulesDrawn : .lightModulesDrawn) : nil
             let transport: LatchRemoteTransport = webSocket ? .webSocket : .tcp
-            return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style)
+            guard device != nil || !watchOnly else { throw ServerCommandLineError("--watch-only needs --device") }
+            return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style, device: device,
+                         watchOnly: watchOnly)
+        case "devices":
+            return .devices(serve.config, revoke: revoke)
+        case "doctor":
+            return .doctor(serve)
+        case "install-service":
+            return .installService(serve, replace: replace)
+        case "uninstall-service":
+            return .uninstallService(serve.config)
+        case "runtimes":
+            return .runtimes(serve, stop: stop)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }
+    }
+
+    /// What `--host` can be on this machine, for `pair` without one: its tailnet addresses,
+    /// loopback through an SSH tunnel, and a TLS proxy's host name.
+    static func hostSuggestions(interfaces: [ServerInterfaceAddress]) -> [String] {
+        var seen = Set<String>()
+        let tailnet = interfaces.filter { interface in
+            interface.address.count == 4 && LatchRemoteAddressPolicy.classify(interface.address) == .tailnet
+                && ServerListenPolicy.defaultTunnelPrefixes.contains { interface.name.hasPrefix($0) }
+        }.map { ServerSocketAddress(bytes: $0.address, port: 0).host }.filter { seen.insert($0).inserted }
+        return tailnet.map { "  --host \($0)    over Tailscale: this machine's tailnet address, or its MagicDNS name" }
+            + ["  --host 127.0.0.1    from a Mac through an SSH tunnel, or from this machine",
+               "  --host NAME --wss   through a Cloudflare Tunnel or another TLS proxy, at its host name"]
     }
 
     /// `0`, or whole numbers with units `d`, `h`, `m` and `s` in that order, such as `24h`,

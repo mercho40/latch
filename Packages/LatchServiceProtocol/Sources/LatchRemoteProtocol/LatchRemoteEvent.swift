@@ -61,10 +61,15 @@ public struct LatchRemoteExit: Codable, Equatable, Sendable {
     public var status: Int32?
     /// Whether a client stopped it, rather than the agent exiting on its own.
     public var stopped: Bool
+    /// True when the server stopped it as the server itself shut down, as for a restart, so a
+    /// client can resume the conversation once the server answers again. Never set by older
+    /// servers, and left out of the JSON when nil.
+    public var serverShutDown: Bool?
 
-    public init(status: Int32?, stopped: Bool) {
+    public init(status: Int32?, stopped: Bool, serverShutDown: Bool? = nil) {
         self.status = status
         self.stopped = stopped
+        self.serverShutDown = serverShutDown
     }
 }
 

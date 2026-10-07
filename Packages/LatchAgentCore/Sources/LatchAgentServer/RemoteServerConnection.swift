@@ -31,10 +31,14 @@ final class RemoteServerConnection: Sendable {
 
     private struct State {
         var peer: String
+        /// The client's address alone: the peer's, or the client's a proxy on this machine named.
+        var client: String
         /// Set by the reader before the welcome, and never changed after.
         var webSocket = false
+        /// What the client reads after the welcome in, set with the welcome.
+        var compression: LatchRemoteCompression?
         var hubConnection: RemoteConnectionID?
-        var token: LatchRemoteToken?
+        var credential: Credential?
         var outbox: [Outgoing] = []
         var outstanding = 0
         var wakePending = false
@@ -69,7 +73,7 @@ final class RemoteServerConnection: Sendable {
         self.descriptor = descriptor
         peerIsLoopback = peer.map { LatchRemoteAddressPolicy.classify($0.bytes) == .loopback } ?? false
         self.server = server
-        state = Mutex(State(peer: peer?.description ?? "unknown"))
+        state = Mutex(State(peer: peer?.description ?? "unknown", client: peer?.host ?? "unknown"))
     }
 
     /// The peer's address, or the client's and the proxy's once a proxy on this machine
@@ -78,9 +82,10 @@ final class RemoteServerConnection: Sendable {
         state.withLock { $0.peer }
     }
 
-    /// The token this connection authenticated with; nil before then.
-    var authenticatedToken: LatchRemoteToken? {
-        state.withLock { $0.token }
+    /// The token this connection authenticated with, and the device it belongs to, nil for
+    /// the server token; nil before then.
+    var authenticatedCredential: Credential? {
+        state.withLock { $0.credential }
     }
 
     /// Shuts the socket down, which ends both threads; the first reason is the one logged.
@@ -120,7 +125,7 @@ final class RemoteServerConnection: Sendable {
     }
 
     func handshakeDeadlinePassed() {
-        guard state.withLock({ $0.token == nil }) else { return }
+        guard state.withLock({ $0.credential == nil }) else { return }
         close("no valid hello within \(server.configuration.handshakeTimeout)")
     }
 
@@ -239,7 +244,11 @@ final class RemoteServerConnection: Sendable {
         do {
             let head = try ServerWebSocket.Head(bytes)
             if peerIsLoopback, let client = head.forwardedFor {
-                state.withLock { $0.peer = "\(ServerSocketAddress(bytes: client, port: 0).host) via \($0.peer)" }
+                let host = ServerSocketAddress(bytes: client, port: 0).host
+                state.withLock { state in
+                    state.peer = "\(host) via \(state.peer)"
+                    state.client = host
+                }
                 server.forwarded(self, for: client)
             }
             upgrade = try ServerWebSocket.upgrade(fromHead: head)
@@ -278,10 +287,16 @@ final class RemoteServerConnection: Sendable {
         return enqueue(Outgoing(line: frame, attached: nil, framed: true))
     }
 
-    /// Writes stream bytes, inside binary frames on a WebSocket.
-    private func send(_ data: Data) -> Bool {
+    /// Writes stream bytes, compressed by `deflater` after a welcome that said so, inside
+    /// binary frames on a WebSocket.
+    private func send(_ data: Data, compressing deflater: LatchRemoteDeflater? = nil) -> Bool {
         let webSocket = state.withLock { $0.webSocket }
-        return ServerSocket.sendAll(descriptor, webSocket ? ServerWebSocket.binaryFrames(data) : data)
+        var bytes = data
+        if let deflater {
+            guard let compressed = deflater.compress(data) else { return false }
+            bytes = compressed
+        }
+        return ServerSocket.sendAll(descriptor, webSocket ? ServerWebSocket.binaryFrames(bytes) : bytes)
     }
 
     /// Checks the hello: the token first, so version ranges are never shown to a client
@@ -292,7 +307,13 @@ final class RemoteServerConnection: Sendable {
             close("sent no valid hello")
             return false
         }
-        guard let token = server.checkToken(), token.matches(hello.token) else {
+        var issued: LatchRemoteToken?
+        var credential = server.checkToken().entry(matching: hello.token)
+        if credential == nil, let redeemed = server.redeem(hello.token, exchanges: hello.exchangesPairingCode) {
+            credential = redeemed.credential
+            issued = redeemed.issued
+        }
+        guard let credential else {
             server.authenticationFailed(self, reason: "wrong token")
             reject(LatchRemoteRejected(reason: .unauthorized, message: "The token is not valid for this server."))
             return false
@@ -308,16 +329,20 @@ final class RemoteServerConnection: Sendable {
         }
 
         let configuration = server.configuration
+        let compression: LatchRemoteCompression? = configuration.compression && hello.compression.contains(.deflate) ? .deflate : nil
         let welcome = LatchRemoteServerFrame.welcome(LatchRemoteWelcome(
             protocolVersion: version,
             server: configuration.serverInfo,
             heartbeatSeconds: configuration.heartbeatSeconds,
-            maxFrameBytes: LatchRemoteProtocol.maxFrameBytes
+            maxFrameBytes: LatchRemoteProtocol.maxFrameBytes,
+            deviceToken: issued,
+            compression: compression
         ))
         // From here the handshake deadline no longer applies.
         let proceed = state.withLock { state in
             guard !state.closing else { return false }
-            state.token = token
+            state.credential = credential
+            state.compression = compression
             return true
         }
         guard proceed, server.authenticated(self) else {
@@ -325,11 +350,14 @@ final class RemoteServerConnection: Sendable {
             return false
         }
         // A check that ran between reading the token and recording it skipped this
-        // connection; read it again so a rotation and SIGHUP in that window still count.
-        guard server.tokens.current() == token else {
-            close("the server token changed")
+        // connection; read it again so a rotation or revocation and SIGHUP in that window
+        // still count.
+        guard server.acceptedTokens().contains(credential.token) else {
+            close(credential.device.map { "device \($0)'s token is no longer valid" } ?? "the server token changed")
             return false
         }
+        // Before the welcome, so a client that has it finds its use noted.
+        server.tokenUse.note(device: credential.device, from: state.withLock { $0.client })
         guard let line = try? LatchRemoteCoding.encodeLine(welcome), send(line) else {
             close("write failed")
             return false
@@ -346,7 +374,12 @@ final class RemoteServerConnection: Sendable {
             return false
         }
         ServerSocket.setReceiveTimeout(descriptor, configuration.silenceTimeout)
-        server.log.log("connection \(serial) from \(peer) authenticated")
+        server.log.log("connection \(serial) from \(peer) authenticated"
+            + (credential.device.map { " as device \($0)" + (credential.access == .watch ? ", watch only" : "") } ?? "")
+            + (issued != nil ? ", exchanging a pairing code for its token" : ""))
+        if issued == nil, let device = credential.device, credential.token.matches(hello.token) {
+            server.deviceConnected(device)
+        }
         server.spawn("latch.server.write") { self.runWriter(hubConnection) }
         return true
     }
@@ -401,10 +434,25 @@ final class RemoteServerConnection: Sendable {
         }
     }
 
+    /// What a watch-only device may ask: what runs, to follow it, and the agent's saved
+    /// sessions, which change nothing.
+    static func watchAllows(_ command: LatchRemoteCommand) -> Bool {
+        switch command {
+        case .listRuntimes, .attach, .detach, .listSessions: true
+        default: false
+        }
+    }
+
     /// Hands the request to the hub in a Task of its own; closing the connection never
     /// cancels it, and its reply is dropped if the connection has gone by then. Requests read
     /// after the connection was closed, as for a rotated token, are not run at all.
     private func submit(_ request: LatchRemoteRequest) -> Bool {
+        if state.withLock({ $0.credential?.access }) == .watch, !Self.watchAllows(request.command) {
+            return reply(request.id, .failure(LatchRemoteError(
+                code: .forbidden,
+                message: "This device can only watch. To prompt, answer or stop agents from it, pair it again without --watch-only."
+            )))
+        }
         enum Admission {
             case closing
             case busy
@@ -482,17 +530,20 @@ final class RemoteServerConnection: Sendable {
         let hub = server.hub
         let budget = server.configuration.eventByteBudget
         let pause = server.configuration.writerPauseForTesting
+        // One stream for the connection's life, on this thread alone: everything after the
+        // welcome goes through it, the welcome itself having gone plain.
+        let deflater = state.withLock { $0.compression } == .deflate ? LatchRemoteDeflater() : nil
         while true {
             let (outgoing, closing, draining) = state.withLock { state in
                 defer { state.outbox.removeAll() }
                 return (state.outbox, state.closing, state.draining)
             }
             if closing {
-                if draining { drain(hubConnection, budget: budget) }
+                if draining { drain(hubConnection, budget: budget, deflater: deflater) }
                 return
             }
             for item in outgoing {
-                guard item.framed ? ServerSocket.sendAll(descriptor, item.line) : send(item.line) else {
+                guard item.framed ? ServerSocket.sendAll(descriptor, item.line) : send(item.line, compressing: deflater) else {
                     close("write failed")
                     return
                 }
@@ -506,7 +557,7 @@ final class RemoteServerConnection: Sendable {
                 var batch = Data()
                 batch.reserveCapacity(lines.reduce(0) { $0 + $1.count })
                 lines.forEach { batch.append($0) }
-                guard send(batch) else {
+                guard send(batch, compressing: deflater) else {
                     close("write failed")
                     return
                 }
@@ -521,7 +572,7 @@ final class RemoteServerConnection: Sendable {
     /// Writes every event line the client has waiting, and a WebSocket's close frame, then
     /// shuts the socket down. Stops at the first failed write, which is also how
     /// `closeAfterWriting`'s limit ends it.
-    private func drain(_ hubConnection: RemoteConnectionID, budget: Int) {
+    private func drain(_ hubConnection: RemoteConnectionID, budget: Int, deflater: LatchRemoteDeflater?) {
         defer { ServerSocket.shutdownBoth(descriptor) }
         while true {
             let lines = server.hub.pullEventLines(for: hubConnection, byteBudget: budget)
@@ -532,7 +583,7 @@ final class RemoteServerConnection: Sendable {
             var batch = Data()
             batch.reserveCapacity(lines.reduce(0) { $0 + $1.count })
             lines.forEach { batch.append($0) }
-            guard send(batch) else { return }
+            guard send(batch, compressing: deflater) else { return }
         }
     }
 

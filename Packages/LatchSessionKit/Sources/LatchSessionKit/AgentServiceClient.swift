@@ -49,7 +49,7 @@ public enum RemoteServiceEvent: Sendable {
     case skipped(runtimeID: AgentRuntimeID, sequence: UInt64)
     /// The agent was stopped on `server`, by another client or the server shutting down, rather
     /// than exiting on its own. Never for a stop this client asked for.
-    case stopped(runtimeID: AgentRuntimeID, server: String, sequence: UInt64)
+    case stopped(runtimeID: AgentRuntimeID, server: String, sequence: UInt64, serverShutDown: Bool = false)
     /// A runtime left on `server` earlier, attached again. Comes before anything else from it,
     /// so the session rebuilds its state from the record before the backlog arrives.
     case attached(runtimeID: AgentRuntimeID, LatchRemoteAttachment, server: String)
@@ -94,6 +94,8 @@ public protocol AgentServiceClient: AnyObject, Sendable {
     /// Whether Settings now reaches the server differently from the last channel this client
     /// made. Always false on this Mac.
     func serverSettingsChangedSinceLastChannel() async -> Bool
+    /// Whether the server, as Settings has it now, answers a handshake. Always false on this Mac.
+    func serverAnswers() async -> Bool
     /// Releases the channel. In-process clients stop their runtimes; XPC clients only drop the connection.
     func close()
     /// Human-readable transport summary for diagnostics and the smoke test.
@@ -135,6 +137,8 @@ extension AgentServiceClient {
     public func detach(runtimeID: AgentRuntimeID) async {}
 
     public func serverSettingsChangedSinceLastChannel() async -> Bool { false }
+
+    public func serverAnswers() async -> Bool { false }
 }
 
 /// How a turn ended, as `SessionModel` takes it in. The outcome travels apart from the turn's

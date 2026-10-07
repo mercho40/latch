@@ -119,9 +119,14 @@ public final class LatchRemoteRuntimeChannel: Sendable {
     public let events: AsyncStream<LatchRemoteChannelEvent>
     /// Single-consumer. Every change of `linkState`, ending with `failed`.
     public let linkStates: AsyncStream<LatchRemoteLinkState>
+    /// Single-consumer. A token of this device's own that the server gave for the pairing
+    /// code the channel connected with; the channel connects with it from then on, and its
+    /// owner keeps it in the code's place.
+    public let issuedTokens: AsyncStream<LatchRemoteToken>
 
     private let eventContinuation: AsyncStream<LatchRemoteChannelEvent>.Continuation
     private let linkContinuation: AsyncStream<LatchRemoteLinkState>.Continuation
+    private let tokenContinuation: AsyncStream<LatchRemoteToken>.Continuation
     /// Every connection of this channel delivers here, so callbacks from an old connection
     /// and a new one never run at once.
     private let queue = DispatchQueue(label: "dev.latchapp.remote-channel")
@@ -193,6 +198,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         core = Mutex(Core(endpoint: options.connection))
         (events, eventContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (linkStates, linkContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (issuedTokens, tokenContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
     deinit {
@@ -527,7 +533,11 @@ public final class LatchRemoteRuntimeChannel: Sendable {
             switch state {
             case .idle, .connecting, .authenticating:
                 break
-            case .ready:
+            case let .ready(welcome):
+                if let token = welcome.deviceToken, token != core.endpoint.token {
+                    core.endpoint.token = token
+                    tokenContinuation.yield(token)
+                }
                 if core.attached {
                     reattach(&core)
                 } else {
@@ -739,6 +749,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         setLink(.failed(error), &core)
         linkContinuation.finish()
         eventContinuation.finish()
+        tokenContinuation.finish()
         for command in core.commands {
             command.shot.finish(.failure(error))
         }

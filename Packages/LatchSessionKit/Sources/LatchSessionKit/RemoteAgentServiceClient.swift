@@ -25,6 +25,8 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
     private let continuation: AsyncStream<RemoteServiceEvent>.Continuation
     /// The server as Settings has it now; nil once it has been removed.
     private let readServer: @MainActor @Sendable () -> ServerProfile?
+    /// Keeps a device token the server gave for a pairing code in Settings, in the code's place.
+    private let keepToken: @MainActor @Sendable (LatchRemoteToken) -> Void
     private let backoff: LatchRemoteBackoff
     private let firstConnectionLimit: Duration
     private let state: Mutex<State>
@@ -65,8 +67,10 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
     /// `firstConnectionLimit` bounds a runtime's first connection; see `firstConnection`.
     init(server: ServerProfile, backoff: LatchRemoteBackoff = LatchRemoteBackoff(),
          firstConnectionLimit: Duration = .seconds(15),
-         readServer: @escaping @MainActor @Sendable () -> ServerProfile?) {
+         readServer: @escaping @MainActor @Sendable () -> ServerProfile?,
+         keepToken: @escaping @MainActor @Sendable (LatchRemoteToken) -> Void = { _ in }) {
         self.readServer = readServer
+        self.keepToken = keepToken
         serverID = server.id
         self.backoff = backoff
         self.firstConnectionLimit = firstConnectionLimit
@@ -148,6 +152,7 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         // Left running on the server, if it still is: stopping it is `SessionModel`'s call.
         if let replaced { release(replaced.id, replaced.channel) }
         relayLinks(channel)
+        relayTokens(channel)
         channel.start()
         return (channel, server)
     }
@@ -355,6 +360,11 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         return !current.connects(like: state.withLock { $0.reached })
     }
 
+    public func serverAnswers() async -> Bool {
+        guard let server = await readServer() else { return false }
+        return (try? await LatchRemoteServerCheck.run(server.connectionOptions)) != nil
+    }
+
     /// Checks the link now, as after the Mac wakes.
     public func probe() async {
         await state.withLock { $0.runtime?.channel }?.probe()
@@ -469,6 +479,22 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         }
     }
 
+    /// Keeps a device token the channel was given for a pairing code. It counts as how the
+    /// server is reached before Settings saves it, so the save does not reconnect the channel.
+    private func relayTokens(_ channel: LatchRemoteRuntimeChannel) {
+        Task { [weak self] in
+            for await token in channel.issuedTokens {
+                guard let self else { return }
+                state.withLock { state in
+                    guard state.runtime?.channel === channel else { return }
+                    state.server.token = token
+                    state.reached.token = token
+                }
+                await keepToken(token)
+            }
+        }
+    }
+
     /// Forwards one channel's events for as long as it is this client's. `attached` is the
     /// attach that came before them, whose record says which permissions are still pending.
     private func relayEvents(_ channel: LatchRemoteRuntimeChannel, runtimeID: AgentRuntimeID,
@@ -537,7 +563,9 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
                 // A stop this client asked for is not news to the session that asked.
                 let expected = state.withLock { $0.runtime?.channel === channel && $0.runtime?.stopping == true }
                 guard !expected else { return [skipped] }
-                if exit.stopped { return [.stopped(runtimeID: id, server: serverName, sequence: sequence)] }
+                if exit.stopped {
+                    return [.stopped(runtimeID: id, server: serverName, sequence: sequence, serverShutDown: exit.serverShutDown == true)]
+                }
                 return [.agent(.processTerminated(runtimeID: id, status: exit.status ?? 0), sequence: sequence)]
             case .omitted:
                 return [.outputLost(runtimeID: id, sequence: sequence)]

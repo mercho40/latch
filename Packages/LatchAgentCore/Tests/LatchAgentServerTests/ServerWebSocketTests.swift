@@ -271,4 +271,25 @@ final class ServerWebSocketTests: XCTestCase {
             try await testbed.waitForLog("from 203.0.113.9 via 127.0.0.1:")
         }
     }
+
+    func testADeviceThroughAProxyIsNamedAndRevokedLikeAnyOther() async throws {
+        try await withServer { testbed in
+            let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)
+            let token = try devices.readOrCreate("phone")
+            let phone = try testbed.connect()
+            let response = try await phone.upgrade(headers: TestWebSocketReader.upgradeHeaders(adding: ["X-Forwarded-For: 203.0.113.9"]))
+            XCTAssertTrue(response.hasPrefix("HTTP/1.1 101 "), response)
+            phone.hello(token: token.rawValue)
+            guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+            try await testbed.waitForLog("from 203.0.113.9 via 127.0.0.1:")
+            try await testbed.waitForLog("authenticated as device phone")
+            // The client the proxy named, not the proxy.
+            XCTAssertEqual(ServerTokenUse.read(configDirectory: testbed.configDirectory)?.devices["phone"]?.from, "203.0.113.9")
+
+            XCTAssertTrue(try devices.revoke("phone"))
+            testbed.server.checkToken()
+            try await phone.expectClosed()
+            try await testbed.waitForLog("closed: device phone's token is no longer valid")
+        }
+    }
 }

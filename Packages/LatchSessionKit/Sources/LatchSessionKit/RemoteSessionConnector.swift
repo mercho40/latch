@@ -63,13 +63,22 @@ public final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnect
         guard let server = servers.server(id: serverID) else {
             return UnconnectedAgentServiceClient(failure: RemoteSessionNotConnected.serverRemoved)
         }
-        let client = RemoteAgentServiceClient(server: server, backoff: backoff, firstConnectionLimit: firstConnectionLimit) { [weak self] in
-            self?.servers.server(id: serverID)
-        }
+        let client = RemoteAgentServiceClient(
+            server: server, backoff: backoff, firstConnectionLimit: firstConnectionLimit,
+            readServer: { [weak self] in self?.servers.server(id: serverID) },
+            keepToken: { [weak self] token in self?.keep(token, forServer: serverID) }
+        )
         clients.removeAll { $0.client == nil }
         clients.append(WeakClient(client: client))
         known[serverID] = server
         return client
+    }
+
+    /// Keeps the token a server gave this device for its pairing code, in the code's place.
+    private func keep(_ token: LatchRemoteToken, forServer id: UUID) {
+        guard var server = servers.server(id: id), server.token != token else { return }
+        server.token = token
+        try? servers.save(server)
     }
 
     /// The clients still in use, for waking and for tests.

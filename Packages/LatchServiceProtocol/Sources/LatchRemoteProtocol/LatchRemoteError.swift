@@ -33,6 +33,9 @@ public struct LatchRemoteFailureCode: RawRepresentable, Codable, Hashable, Senda
     public static let commandFailed = LatchRemoteFailureCode(rawValue: "commandFailed")
     /// Ends a turn whose runtime exited or was stopped while it ran.
     public static let runtimeExited = LatchRemoteFailureCode(rawValue: "runtimeExited")
+    /// A command the device's token does not allow: a watch-only device lists, attaches
+    /// and detaches, and nothing more.
+    public static let forbidden = LatchRemoteFailureCode(rawValue: "forbidden")
 }
 
 /// A failed request, or a turn that ended in error. `message` is for people and never echoes

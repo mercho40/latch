@@ -107,6 +107,50 @@ final class LatchServerExecutableTests: XCTestCase {
         }
     }
 
+    func testPairingListingAndRevokingDevices() throws {
+        let config = root.appendingPathComponent("config").path
+        let none = try run(["devices", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(none.status, 0, none.error)
+        XCTAssertEqual(none.output, "")
+        XCTAssertTrue(none.error.contains("no device has a token of its own"), none.error)
+        XCTAssertTrue(none.error.contains("the server token: no connection recorded"), none.error)
+
+        let sharedRun = try run(["pair", "--host", "vps", "--config-dir", config] + rootArguments)
+        XCTAssertTrue(sharedRun.error.contains("which every device paired with it shares"), sharedRun.error)
+        let shared = try LatchRemotePairing(parsing: sharedRun.output)
+        let phone = try run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(phone.status, 0, phone.error)
+        XCTAssertTrue(phone.error.contains("this pairing code pairs one device, within 10 minutes"), phone.error)
+        let phonePairing = try LatchRemotePairing(parsing: phone.output)
+        XCTAssertNotEqual(phonePairing.token, shared.token)
+        // Each pairing makes a new code, which replaces the one before.
+        let again = try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments).output)
+        XCTAssertNotEqual(again.token, phonePairing.token)
+        XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tablet", "--config-dir", config] + rootArguments).status, 0)
+        XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tv", "--watch-only", "--config-dir", config] + rootArguments).status, 0)
+        let rows = try run(["devices", "--config-dir", config] + rootArguments).output.split(separator: "\n")
+        XCTAssertEqual(rows.map { $0.split(separator: " ").first.map(String.init) }, ["phone", "tablet", "tv"])
+        XCTAssertTrue(rows.allSatisfy { $0.contains("pairing code waiting") }, "\(rows)")
+        XCTAssertEqual(try run(["devices", "--revoke", "tv", "--config-dir", config] + rootArguments).status, 0)
+
+        // A device's token, once it has one, keeps its name to its access.
+        try ServerDeviceTokens(configDirectory: config, access: .watch).readOrCreate("screen")
+        let other = try run(["pair", "--host", "vps", "--device", "screen", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(other.status, 1)
+        XCTAssertTrue(other.error.contains("device screen already has a token that only watches"), other.error)
+
+        let revoked = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(revoked.status, 0, revoked.error)
+        XCTAssertTrue(revoked.error.contains("revoked phone"), revoked.error)
+        let left = try run(["devices", "--config-dir", config] + rootArguments).output
+        XCTAssertTrue(left.hasPrefix("screen  watch only, no connection recorded\ntablet  pairing code waiting"), left)
+        let gone = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(gone.status, 1)
+        XCTAssertTrue(gone.error.contains("no device is named phone"), gone.error)
+        // The server's own token is untouched.
+        XCTAssertEqual(try ServerTokenFile(directory: config).read(), shared.token)
+    }
+
     func testConcurrentFirstRunsPrintOneToken() throws {
         let config = root.appendingPathComponent("config").path
         var runs: [(Process, Pipe)] = []
@@ -141,6 +185,8 @@ final class LatchServerExecutableTests: XCTestCase {
         defer { server.kill() }
         let token = try ServerTokenFile(directory: server.config).read()
         XCTAssertFalse(server.stderr.text.contains(token.rawValue))
+        // Logged once the server listens, after the line `start` waits for.
+        _ = try await server.stderr.wait("the pairing hint") { $0.contains("no device has connected yet: pair one with `latch-server pair") ? true : nil }
 
         let client = try await server.authenticated()
         let id = AgentRuntimeID("pid")
@@ -168,6 +214,91 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertFalse(log.contains(token.rawValue))
     }
 
+    func testDoctorAsksTheRunningServer() async throws {
+        let config = root.appendingPathComponent("config").path
+        let server = try await ServerProcess.start(binary(), config: config, extra: rootArguments)
+        defer { server.kill() }
+        let listen = ["--listen", "127.0.0.1:\(server.port)"]
+        let healthy = try run(["doctor", "--config-dir", config] + listen + rootArguments)
+        XCTAssertTrue(healthy.output.contains("✓ latch-server \(LatchServerVersion.current) on "), healthy.output)
+        XCTAssertTrue(healthy.output.contains(" answers at 127.0.0.1:\(server.port) and accepts the server token"), healthy.output)
+
+        let other = root.appendingPathComponent("other").path
+        XCTAssertEqual(try run(["token", "--config-dir", other] + rootArguments).status, 0)
+        let refused = try run(["doctor", "--config-dir", other] + listen + rootArguments)
+        XCTAssertEqual(refused.status, 1)
+        XCTAssertTrue(refused.output.contains("refuses the token in \(other): it reads another config directory"), refused.output)
+
+        let missing = root.appendingPathComponent("missing").path
+        let fresh = try run(["doctor", "--config-dir", missing] + listen + rootArguments)
+        XCTAssertTrue(fresh.output.contains("\(missing) does not exist yet"), fresh.output)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing), "doctor creates nothing")
+        XCTAssertEqual(try run(["doctor", "--listen", "bogus"]).status, 2)
+    }
+
+    func testRuntimesListsAndStopsTheServersAgents() async throws {
+        let workspace = root.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try MockAgent.script.write(to: workspace.appendingPathComponent("agent.sh"), atomically: true, encoding: .utf8)
+        let config = root.appendingPathComponent("config").path
+        let server = try await ServerProcess.start(binary(), config: config, extra: rootArguments)
+        defer { server.kill() }
+        let listen = ["--listen", "127.0.0.1:\(server.port)", "--config-dir", config] + rootArguments
+        let none = try run(["runtimes"] + listen)
+        XCTAssertEqual(none.status, 0, none.error)
+        XCTAssertTrue(none.error.contains("runs no agents"), none.error)
+
+        let client = try await server.authenticated()
+        let id = AgentRuntimeID("listed")
+        let agent = LatchRemoteAgent.custom("/bin/sh " + AgentCommand.quotedArgument(workspace.appendingPathComponent("agent.sh").path))
+        try await client.ok(.launchAgent(runtimeID: id, agent: agent, workspace: workspace.path))
+        try await client.ok(.newSession(runtimeID: id))
+        let listed = try run(["runtimes"] + listen)
+        XCTAssertEqual(listed.status, 0, listed.error)
+        let rows = listed.output.split(separator: "\n")
+        XCTAssertTrue(rows.first?.hasPrefix("ID ") == true, listed.output)
+        XCTAssertTrue(rows.contains { $0.hasPrefix("listed ") && $0.contains(" idle ") && $0.contains(workspace.path) }, listed.output)
+
+        let stopped = try run(["runtimes", "--stop", "listed"] + listen)
+        XCTAssertEqual(stopped.status, 0, stopped.error)
+        XCTAssertTrue(stopped.error.contains("stopped listed"), stopped.error)
+        let missing = try run(["runtimes", "--stop", "nonesuch"] + listen)
+        XCTAssertEqual(missing.status, 1)
+        let after = try run(["runtimes"] + listen)
+        XCTAssertFalse(after.output.contains(" idle "), after.output)
+
+        let elsewhere = try run(["runtimes", "--listen", "127.0.0.1:1", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(elsewhere.status, 1)
+        XCTAssertTrue(elsewhere.error.contains("nothing listens at 127.0.0.1:1"), elsewhere.error)
+    }
+
+    /// latch-server joins an agent's streamed chunks; the hub's own default does not.
+    func testTheServerJoinsStreamedChunks() async throws {
+        let workspace = root.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try MockAgent.script.write(to: workspace.appendingPathComponent("agent.sh"), atomically: true, encoding: .utf8)
+        let server = try await ServerProcess.start(binary(), config: root.appendingPathComponent("config").path, extra: rootArguments)
+        defer { server.kill() }
+        let client = try await server.authenticated()
+        let id = AgentRuntimeID("flood")
+        let agent = LatchRemoteAgent.custom("/bin/sh " + AgentCommand.quotedArgument(workspace.appendingPathComponent("agent.sh").path))
+        try await client.ok(.launchAgent(runtimeID: id, agent: agent, workspace: workspace.path))
+        try await client.ok(.newSession(runtimeID: id))
+        try await client.ok(.attach(runtimeID: id, after: 0))
+        try await client.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("flood")]))
+        let all = (0..<300).map { "flood-\($0)" }.joined()
+        var texts: [String] = []
+        _ = try await client.readFrames(until: "every chunk") { frame in
+            if case let .event(event) = frame, let text = event.chunkText { texts.append(text) }
+            return texts.joined() == all
+        }
+        XCTAssertLessThanOrEqual(texts.count, 30, "\(texts.count) events for 300 chunks")
+        try await client.ok(.stopRuntime(runtimeID: id))
+        XCTAssertEqual(kill(server.process.processIdentifier, SIGTERM), 0)
+        let status = await server.exitStatus()
+        XCTAssertEqual(status, 0)
+    }
+
     /// Much sooner than the periodic check, which is 15 s apart.
     func testSIGHUPDropsConnectionsThatUsedARotatedToken() async throws {
         let server = try await ServerProcess.start(binary(), config: root.appendingPathComponent("config").path, extra: rootArguments)
@@ -185,6 +316,35 @@ final class LatchServerExecutableTests: XCTestCase {
         let log = try await server.finishedLog()
         XCTAssertTrue(log.contains("SIGHUP: checking the token file"), log)
         XCTAssertTrue(log.contains("closed: the server token changed"), log)
+    }
+
+    func testSIGHUPDropsConnectionsOfARevokedDevice() async throws {
+        let config = root.appendingPathComponent("config").path
+        XCTAssertEqual(try run(["token", "--config-dir", config] + rootArguments).status, 0)
+        let token = try LatchRemotePairing(parsing: run(["pair", "--host", "127.0.0.1", "--device", "phone", "--config-dir", config] + rootArguments).output).token
+        let server = try await ServerProcess.start(binary(), config: config, extra: rootArguments)
+        defer { server.kill() }
+        let phone = try TestSocketClient(port: server.port)
+        phone.hello(token: token.rawValue)
+        guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+        let shared = try await server.authenticated()
+        let listed = try run(["devices", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(listed.output, "phone  last connected just now, from 127.0.0.1\n")
+        XCTAssertTrue(listed.error.contains("the server token: last connected just now, from 127.0.0.1"), listed.error)
+
+        XCTAssertEqual(try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments).status, 0)
+        XCTAssertEqual(kill(server.process.processIdentifier, SIGHUP), 0)
+        try await phone.expectClosed(timeout: .seconds(3))
+        shared.send(.ping)
+        let pong = try await shared.readFrame()
+        XCTAssertEqual(pong, .pong)
+        XCTAssertEqual(kill(server.process.processIdentifier, SIGTERM), 0)
+        let status = await server.exitStatus()
+        XCTAssertEqual(status, 0)
+        let log = try await server.finishedLog()
+        XCTAssertTrue(log.contains("authenticated as device phone"), log)
+        XCTAssertTrue(log.contains("closed: device phone's token is no longer valid"), log)
+        XCTAssertFalse(log.contains(token.rawValue))
     }
 
     /// Every thread of the server, whatever its C library's default stack, parses JSON nested

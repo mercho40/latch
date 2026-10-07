@@ -10,6 +10,15 @@ final class ServerCommandLineTests: XCTestCase {
         try ServerCommandLine.parse(arguments)
     }
 
+    private static func parseError(_ arguments: [String]) -> ServerCommandLineError? {
+        do {
+            _ = try ServerCommandLine.parse(arguments)
+            return nil
+        } catch {
+            return error
+        }
+    }
+
     private func assertRejected(_ arguments: [String], _ fragment: String, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertThrowsError(try ServerCommandLine.parse(arguments), file: file, line: line) { error in
             XCTAssertTrue("\(error)".contains(fragment), "\(error)", file: file, line: line)
@@ -50,6 +59,32 @@ final class ServerCommandLineTests: XCTestCase {
                        .pair(ConfigOptions(), host: "latch.example.com", port: 443, transport: .webSocket))
         XCTAssertEqual(try parse("pair", "--wss", "--port", "8443", "--host", "latch.example.com", "--qr"),
                        .pair(ConfigOptions(), host: "latch.example.com", port: 8443, transport: .webSocket, qr: .lightModulesDrawn))
+        XCTAssertEqual(try parse("pair", "--host", "vps", "--device", "phone", "--qr"),
+                       .pair(ConfigOptions(), host: "vps", port: 7428, qr: .lightModulesDrawn, device: "phone"))
+        XCTAssertEqual(try parse("pair", "--host", "latch.example.com", "--wss", "--device", "phone"),
+                       .pair(ConfigOptions(), host: "latch.example.com", port: 443, transport: .webSocket, device: "phone"))
+        XCTAssertEqual(try parse("devices"), .devices(ConfigOptions(), revoke: nil))
+        XCTAssertEqual(try parse("pair", "--host", "vps", "--device", "tv", "--watch-only"),
+                       .pair(ConfigOptions(), host: "vps", port: 7428, device: "tv", watchOnly: true))
+        var checked = ServeOptions()
+        checked.listen = ["100.101.102.103:7428"]
+        checked.allowUnencryptedNetwork = true
+        checked.config.configDirectory = "/c"
+        XCTAssertEqual(try parse("doctor", "--listen", "100.101.102.103:7428", "--allow-unencrypted-network", "--config-dir", "/c"), .doctor(checked))
+        XCTAssertEqual(try parse("doctor"), .doctor(ServeOptions()))
+        var service = ServeOptions()
+        service.listen = ["127.0.0.1:7801"]
+        service.detachedTimeout = .seconds(3600)
+        service.logAgentStandardError = true
+        XCTAssertEqual(try parse("install-service", "--listen", "127.0.0.1:7801", "--detached-timeout", "1h", "--log-agent-stderr", "--replace"),
+                       .installService(service, replace: true))
+        XCTAssertEqual(try parse("install-service"), .installService(ServeOptions(), replace: false))
+        XCTAssertEqual(try parse("uninstall-service", "--config-dir", "/c"), .uninstallService(ConfigOptions(configDirectory: "/c")))
+        XCTAssertEqual(try parse("runtimes"), .runtimes(ServeOptions(), stop: nil))
+        var elsewhere = ServeOptions()
+        elsewhere.listen = ["127.0.0.1:7801"]
+        XCTAssertEqual(try parse("runtimes", "--listen", "127.0.0.1:7801", "--stop", "rt-1"), .runtimes(elsewhere, stop: "rt-1"))
+        XCTAssertEqual(try parse("devices", "--revoke=phone", "--config-dir", "/c"), .devices(ConfigOptions(configDirectory: "/c"), revoke: "phone"))
         XCTAssertEqual(try parse("--version"), .version)
         XCTAssertEqual(try parse("--help"), .help)
         XCTAssertEqual(try parse("token", "-h"), .help)
@@ -75,6 +110,36 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["--allow-root=yes"], "takes no value")
         assertRejected(["--version", "--allow-root"], "--version")
         assertRejected(["--config-dir="], "needs a path")
+        assertRejected(["pair", "--host", "h", "--device", "../server-token"], "--device ../server-token")
+        assertRejected(["pair", "--host", "h", "--device", ".phone"], "--device .phone")
+        assertRejected(["pair", "--host", "h", "--device"], "needs a value")
+        assertRejected(["devices", "--revoke", "my phone"], "--revoke my phone")
+        assertRejected(["token", "--device", "phone"], "does not apply")
+        assertRejected(["devices", "--device", "phone"], "does not apply")
+        assertRejected(["pair", "--host", "h", "--revoke", "phone"], "does not apply")
+        assertRejected(["devices", "--revoke", "a", "--revoke", "b"], "twice")
+        assertRejected(["doctor", "--detached-timeout", "1h"], "does not apply")
+        assertRejected(["doctor", "--qr"], "does not apply")
+        assertRejected(["--replace"], "does not apply")
+        assertRejected(["uninstall-service", "--listen", "127.0.0.1:1"], "does not apply")
+        assertRejected(["runtimes", "--stop", "a b"], "--stop a b: expected a runtime ID")
+        assertRejected(["--stop", "rt-1"], "does not apply")
+        assertRejected(["pair", "--host", "vps", "--watch-only"], "--watch-only needs --device")
+        assertRejected(["devices", "--watch-only"], "does not apply")
+    }
+
+    func testPairSuggestsWhatTheHostCanBe() {
+        XCTAssertEqual(Self.parseError(["pair"]), .pairNeedsHost)
+        let suggestions = ServerCommandLine.hostSuggestions(interfaces: [
+            ServerInterfaceAddress(name: ServerListenPolicy.defaultTunnelPrefixes[0] + "0", address: [100, 101, 102, 103]),
+            ServerInterfaceAddress(name: "eth0", address: [192, 168, 1, 7]),
+            ServerInterfaceAddress(name: "lo", address: [127, 0, 0, 1]),
+        ])
+        XCTAssertEqual(suggestions.count, 3)
+        XCTAssertTrue(suggestions[0].hasPrefix("  --host 100.101.102.103 "), suggestions[0])
+        XCTAssertTrue(suggestions[1].hasPrefix("  --host 127.0.0.1 "), suggestions[1])
+        XCTAssertTrue(suggestions[2].hasPrefix("  --host NAME --wss "), suggestions[2])
+        XCTAssertFalse(suggestions.joined().contains("192.168"), "an unencrypted network is never suggested")
     }
 
     func testDurations() {

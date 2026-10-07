@@ -27,8 +27,10 @@ let package = Package(
         ),
         .target(
             name: "LatchRemoteProtocol",
-            dependencies: ["LatchServiceProtocol", "LatchACP"]
+            dependencies: ["LatchServiceProtocol", "LatchACP", "CLatchZlib"]
         ),
+        // zlib, a system library on every platform Latch builds for.
+        .systemLibrary(name: "CLatchZlib"),
         .testTarget(
             name: "LatchRemoteProtocolTests",
             dependencies: ["LatchRemoteProtocol", "LatchServiceProtocol", "LatchACP"]

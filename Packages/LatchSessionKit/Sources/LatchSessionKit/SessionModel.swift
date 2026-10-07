@@ -149,7 +149,7 @@ public final class SessionModel {
     private var foreignTurn: (turn: UUID, boundary: SavedSession.RemoteBinding)?
     /// An attach found the runtime exited. Its exit is shown once its last output is in;
     /// `stoppedOn` names the server when the agent was stopped there rather than exiting.
-    private var pendingExit: (through: UInt64, status: Int32, stoppedOn: String?)?
+    private var pendingExit: (through: UInt64, status: Int32, stoppedOn: String?, serverShutDown: Bool)?
     /// The turn a saved binding was sending that the server's record does not know. Unless
     /// the backlog up to `through` shows it starting, the prompt never left this Mac.
     /// `atQuit` when the binding was saved at quit, rather than kept when the link failed.
@@ -318,7 +318,7 @@ public final class SessionModel {
         // only the link failed, the agent is most likely still running, so the session keeps
         // its binding: Retry, or fixing the server in Settings, attaches to it again from where
         // it had got to, the turn in flight included, rather than starting another agent.
-        if case let .failed(_, reason, runtimeGone) = linkState {
+        if case let .failed(server, reason, runtimeGone) = linkState {
             let binding = runtimeGone ? nil : remoteBinding
             if runtimeGone, phase == .prompting {
                 // What the turn said after the link failed went with the runtime.
@@ -328,8 +328,9 @@ public final class SessionModel {
             // A runtime gone from its server, as after a restart, stopped there: a turn it was
             // running did not finish, and is never announced as if it had.
             resetAfterLoss(status: runtimeGone ? "Agent stopped" : "Not connected", error: reason,
-                           advice: runtimeGone ? "Retry to start it again." : nil, connectionFailure: !runtimeGone,
+                           advice: runtimeGone ? resumeAdvice(server: server) : nil, connectionFailure: !runtimeGone,
                            turnStopped: runtimeGone)
+            if runtimeGone { resumeWhenServerAnswers() }
             guard let binding else { return }
             savedBinding = binding
             bindingKeptFromLink = true
@@ -373,12 +374,46 @@ public final class SessionModel {
     /// Stopped on the server by something other than this session: another client or the server
     /// shutting down. (The idle reaper only takes runtimes nobody is attached to, and forgets
     /// them, so a session finds those gone rather than stopped.) Retry starts the agent again and resumes its session.
-    private func resetAfterStop(on server: String) {
+    private func resetAfterStop(on server: String, serverShutDown: Bool = false) {
         // Whatever the link was doing, there is nothing left on it to wait for.
         linkState = .connected
         resetAfterLoss(status: "Stopped on \(server)", error: "The agent was stopped on \(server).",
-                       advice: "Retry to start it again.", stoppedOnServer: true)
+                       advice: serverShutDown ? resumeAdvice(server: server) : "Retry to start it again.", stoppedOnServer: true)
+        if serverShutDown { resumeWhenServerAnswers() }
     }
+
+    /// What a session about to resume by itself says, or Retry's advice when it cannot.
+    private func resumeAdvice(server: String) -> String {
+        resumesByItself ? "Latch starts it again, and resumes the conversation, once \(server) answers." : "Retry to start it again."
+    }
+
+    /// A remote session with a conversation the agent can load again.
+    private var resumesByItself: Bool { remoteTarget != nil && savedAgentSessionID != nil }
+
+    /// After the server restarted, as a stop it made shutting down or a runtime it no longer
+    /// has says: once it answers a handshake, the agent is started there again and its
+    /// conversation resumed, as Retry would. Checks with waits that double up to a minute,
+    /// for as long as nothing else happens to the session; what that resume runs into, such
+    /// as an agent that cannot load a session, is left for the user, as Retry's would be.
+    private func resumeWhenServerAnswers() {
+        guard resumesByItself, let target = remoteTarget else { return }
+        let token = generation
+        Task { [weak self] in
+            var delay = Duration.seconds(1)
+            for _ in 0..<Self.resumeChecks {
+                guard let self, self.generation == token, self.phase == .disconnected else { return }
+                if await self.client.serverAnswers() {
+                    guard self.generation == token, self.phase == .disconnected else { return }
+                    return await self.connect(remote: target.agent, path: target.path)
+                }
+                try? await Task.sleep(for: delay)
+                delay = min(delay * 2, .seconds(60))
+            }
+        }
+    }
+
+    /// About half an hour of checks before a session leaves its resume to Retry.
+    static let resumeChecks = 36
 
     #if os(macOS)
     public func connect(command: String, workspace: URL?, launchEnvironment: AgentLaunchEnvironment = AgentLaunchEnvironment(), startNewSession: Bool = false) async {
@@ -613,7 +648,8 @@ public final class SessionModel {
         status = "Connected · \(title)"
         phase = .ready
         if record.lifecycle == .exited {
-            pendingExit = (record.lastSequence, record.exit?.status ?? 0, record.exit?.stopped == true ? server : nil)
+            pendingExit = (record.lastSequence, record.exit?.status ?? 0, record.exit?.stopped == true ? server : nil,
+                           record.exit?.serverShutDown == true)
         } else if let turn = record.activeTurnID {
             followTurn(turn, runtimeID: id, boundary: binding.boundaryTurnID == turn ? binding : nil)
         } else if let turn = binding.boundaryTurnID {
@@ -770,7 +806,7 @@ public final class SessionModel {
             publishHistory()
         }
         guard let exit = pendingExit, appliedSequence >= exit.through else { return }
-        if let server = exit.stoppedOn { return resetAfterStop(on: server) }
+        if let server = exit.stoppedOn { return resetAfterStop(on: server, serverShutDown: exit.serverShutDown) }
         resetAfterLoss(status: "Agent exited (\(exit.status))",
                        error: "The agent process ended. Select the agent again to reconnect.")
     }
@@ -1493,9 +1529,9 @@ public final class SessionModel {
             guard let attaching, attaching.id == id else { return }
             rebuild(from: attachment, binding: attaching.binding, id: id, server: server)
             return
-        case let .stopped(id, server, sequence) where id == runtimeID:
+        case let .stopped(id, server, sequence, serverShutDown) where id == runtimeID:
             appliedSequence = max(appliedSequence, sequence)
-            resetAfterStop(on: server)
+            resetAfterStop(on: server, serverShutDown: serverShutDown)
         case .serverChanged:
             followAgainAfterServerChange()
             return
@@ -1729,7 +1765,7 @@ private extension RemoteServiceEvent {
         case let .replayed(id, _, sequence), let .configurationSet(id, _, sequence), let .turnStarted(id, _, _, _, sequence),
              let .promptSteered(id, _, _, _, sequence), let .turnEnded(id, _, sequence), let .skipped(id, sequence): (id, sequence)
         case let .outputLost(id, sequence): sequence.map { (id, $0) }
-        case let .stopped(id, _, sequence): (id, sequence)
+        case let .stopped(id, _, sequence, _): (id, sequence)
         case .attached, .link, .serverChanged: nil
         }
     }

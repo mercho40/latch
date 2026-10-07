@@ -121,13 +121,13 @@ A lightweight background service managed by `launchd` that:
 - Do not bundle the Tailscale SDK or make Tailscale a product dependency
 - Defer NAT traversal and a hosted relay until the local product is validated
 
-Built so far, ahead of the local-network work: a server reached over Tailscale or an SSH tunnel, with a bearer token and no encryption of its own. It runs on Linux as well as macOS. `latch-server pair --qr` prints the pairing string as a QR code that Latch scans, or the iPhone's Camera opens in Latch, but what it carries is the server's token, not a device key. Bonjour discovery, device keys and TLS are not built.
+Built so far, ahead of the local-network work: a server reached over Tailscale or an SSH tunnel, with a bearer token and no encryption of its own. It runs on Linux as well as macOS. `latch-server pair --qr` prints the pairing string as a QR code that Latch scans, or the iPhone's Camera opens in Latch, but what it carries is the server's token, or with `--device` a one-time code exchanged for a token of the device's own, not a device key. Bonjour discovery, device keys and TLS are not built.
 
 A future relay must never receive plaintext prompts, source code, tool output, or approval contents.
 
 ## Security model
 
-This is the model for the paired, multi-device product. What the shipped apps and `latch-server` enforce today is in [SECURITY.md](../.github/SECURITY.md); `latch-server` has one token per server rather than per device, and no revocation short of rotating it.
+This is the model for the paired, multi-device product. What the shipped apps and `latch-server` enforce today is in [SECURITY.md](../.github/SECURITY.md); `latch-server` has bearer tokens rather than device keys: the server's, and optionally one per device, which can be revoked alone.
 
 - The coding agent and repository remain on the Mac.
 - The iOS app receives only data intentionally forwarded by the Latch Agent.
@@ -172,8 +172,9 @@ Done: AppKit shell and session UI, workspace management, local IPC through an em
 - [x] Linux package tests and static builds in CI; an iOS build check of the protocol and client
 - [x] Runtimes listed with a title and the agent they run, and a load's history kept in the journal, so another device can name a runtime and take it up with its conversation
 - [x] `latch-server pair --qr`, a terminal QR code of the pairing string
+- [x] A token per device (`pair --device`), listed and revoked alone (`devices --revoke`), given for a one-time pairing code, and tokens that only watch (`--watch-only`)
 
-Not built: device keys and TLS; per-device tokens and revoking one device; a folder browser for the server; file and folder attachments to remote agents (images work); runtimes that survive a server restart; listing and taking up another device's runtimes in the Mac app.
+Not built: device keys and TLS; a folder browser for the server; file and folder attachments to remote agents (images work); runtimes that survive a server restart; listing and taking up another device's runtimes in the Mac app.
 
 ### M2 — paired iPhone client (in progress)
 

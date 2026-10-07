@@ -29,6 +29,10 @@ public enum LatchServerMain {
         let command: ServerCommand
         do {
             command = try ServerCommandLine.parse(arguments)
+        } catch .pairNeedsHost {
+            printError("\(ServerCommandLineError.pairNeedsHost), such as:\n"
+                + ServerCommandLine.hostSuggestions(interfaces: ServerListenPolicy.systemInterfaces()).joined(separator: "\n"))
+            return 2
         } catch {
             printError("\(error)\n\n\(ServerCommandLine.usage)")
             return 2
@@ -53,11 +57,16 @@ public enum LatchServerMain {
                 printError("\(error)")
                 return 1
             }
-        case let .pair(config, host, port, transport, qr):
+        case let .pair(config, host, port, transport, qr, device, watchOnly):
             guard let tokens = tokenFile(config) else { return 1 }
             let pairing: String
             do {
-                pairing = try LatchRemotePairing(host: host, port: port, transport: transport, token: tokens.readOrCreate()).string
+                let token = if let device {
+                    try ServerDeviceTokens.makePairingCode(device, access: watchOnly ? .watch : .full, configDirectory: tokens.directory)
+                } else {
+                    try tokens.readOrCreate()
+                }
+                pairing = try LatchRemotePairing(host: host, port: port, transport: transport, token: token).string
             } catch let error as ServerTokenError {
                 printError("\(error)")
                 return 1
@@ -66,6 +75,15 @@ public enum LatchServerMain {
                 return 1
             }
             print(pairing)
+            if let device {
+                let paired = (try? ServerDeviceTokens.readAll(configDirectory: tokens.directory))?.contains { $0.name == device } == true
+                printError("this pairing code pairs one device, within \(Int(RemoteServerConfiguration.defaultPairingCodeLifetime / 60)) minutes; "
+                    + "the device then keeps a token of its own"
+                    + (paired ? ". \(device) has a token already: the code gives it a new one, and the old one stops working" : ""))
+            } else {
+                printError("this string carries the server token, which every device paired with it shares; "
+                    + "`--device NAME` gives a device a token of its own, which you can revoke alone")
+            }
             guard let qr else { return 0 }
             do {
                 let symbol = try QRCode(pairing)
@@ -76,6 +94,65 @@ public enum LatchServerMain {
                 printError("--qr: the string is too long for a QR code (\(error)); paste it instead")
                 return 1
             }
+        case let .devices(config, revoke):
+            guard let tokens = tokenFile(config) else { return 1 }
+            do {
+                if let revoke {
+                    guard try ServerDeviceTokens.revoke(revoke, configDirectory: tokens.directory) != nil else {
+                        printError("no device is named \(revoke)")
+                        return 1
+                    }
+                    printError("revoked \(revoke): running servers drop its connections within \(LatchRemoteProtocol.heartbeatSeconds) seconds, or at once on SIGHUP")
+                    return 0
+                }
+                let all = try ServerDeviceTokens.readAll(configDirectory: tokens.directory)
+                var codes: [(name: String, made: Date?)] = []
+                for access in [DeviceAccess.full, .watch] {
+                    let pending = ServerDeviceTokens.pairingCodes(configDirectory: tokens.directory, access: access)
+                    codes += try pending.read().map { ($0.name, pending.written($0.name)) }
+                }
+                let use = ServerTokenUse.read(configDirectory: tokens.directory)
+                let now = Date()
+                func lastUse(_ use: ServerTokenUse.Use?) -> String {
+                    use.map { "last connected \(ServerTokenUse.describe($0.at, now: now)), from \($0.from)" } ?? "no connection recorded"
+                }
+                func waiting(_ name: String) -> String? {
+                    guard let code = codes.first(where: { $0.name == name }) else { return nil }
+                    let left = code.made.map { RemoteServerConfiguration.defaultPairingCodeLifetime - now.timeIntervalSince($0) } ?? 0
+                    return left > 0 ? "pairing code waiting, \(max(1, Int(left / 60))) minutes left" : "pairing code expired; pair it again"
+                }
+                let names = Set(all.map(\.name))
+                let width = (all.map(\.name.count) + codes.map(\.name.count)).max() ?? 0
+                for device in all {
+                    let name = device.name.padding(toLength: width, withPad: " ", startingAt: 0)
+                    switch device.token {
+                    case .success:
+                        print("\(name)  " + (device.access == .watch ? "watch only, " : "") + lastUse(use?.devices[device.name])
+                            + (waiting(device.name).map { "; new " + $0 } ?? ""))
+                    case let .failure(error): print("\(name)  refused: \(error)")
+                    }
+                }
+                for code in codes where !names.contains(code.name) {
+                    print(code.name.padding(toLength: width, withPad: " ", startingAt: 0) + "  " + (waiting(code.name) ?? ""))
+                }
+                if all.isEmpty, codes.isEmpty {
+                    printError("no device has a token of its own; `latch-server pair --host NAME --device DEVICE` gives one")
+                }
+                // On stderr, so the rows above stay one per device.
+                printError("the server token: " + lastUse(use?.server))
+                return 0
+            } catch {
+                printError("\(error)")
+                return 1
+            }
+        case let .doctor(options):
+            return doctor(options)
+        case let .installService(options, replace):
+            return installService(options, replace: replace)
+        case let .uninstallService(config):
+            return uninstallService(config)
+        case let .runtimes(options, stop):
+            return runtimes(options, stop: stop)
         case let .serve(options):
             return serve(options)
         }
@@ -94,13 +171,22 @@ public enum LatchServerMain {
             return 2
         }
         guard let tokens = tokenFile(options.config) else { return 1 }
+        let devices: [(name: String, access: DeviceAccess, token: Result<LatchRemoteToken, ServerTokenError>)]
         do {
             try tokens.readOrCreate()
+            devices = try ServerDeviceTokens.readAll(configDirectory: tokens.directory)
         } catch {
             printError("\(error)")
             return 1
         }
         log.log("token file \(tokens.path)")
+        if !devices.isEmpty {
+            log.log("device tokens: " + devices.map { $0.name + ($0.access == .watch ? " (watch only)" : "") }.joined(separator: ", "))
+        }
+        for case let (name, _, .failure(error)) in devices {
+            log.log("warning: device \(name) is refused: \(error)")
+        }
+        let neverUsed = devices.isEmpty && ServerTokenUse.read(configDirectory: tokens.directory)?.server == nil
 
         let controller = ServeController(log: log)
         startSignalThread(controller)
@@ -111,6 +197,8 @@ public enum LatchServerMain {
         let standardErrorLog = options.logAgentStandardError ? AgentStandardErrorLog(log: log) : nil
         var configuration = RemoteRuntimeHubConfiguration()
         configuration.detachedTimeout = options.detachedTimeout
+        configuration.chunkCoalescingWindow = RemoteRuntimeHubConfiguration.servedChunkCoalescingWindow
+        configuration.historyBudget = RemoteRuntimeHubConfiguration.servedHistoryBudget
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var standardError: (@Sendable (AgentRuntimeID, Data) -> Void)?
         if let standardErrorLog {
@@ -156,9 +244,178 @@ public enum LatchServerMain {
         for listener in listeners {
             log.log("listening on \(listener.address)")
         }
+        if neverUsed {
+            log.log("no device has connected yet: pair one with `latch-server pair --host NAME --device DEVICE --qr`, and check the setup with `latch-server doctor`")
+        }
         controller.waitUntilStopped()
         log.log("stopped")
         return 0
+    }
+
+    /// Reads, connects and runs `node --version`, but creates nothing, not even the config
+    /// directory, so it can run before anything is set up.
+    private static func doctor(_ options: ServeOptions) -> Int32 {
+        let addresses: [ServerSocketAddress]
+        do {
+            addresses = try options.listenAddresses.map { value throws(ServerListenError) in try ServerListenPolicy.parse(value) }
+        } catch {
+            printError("\(error)")
+            return 2
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let doctor = ServerDoctor(
+            configDirectory: ServerConfigDirectory.resolve(
+                explicit: options.config.configDirectory, environment: ProcessInfo.processInfo.environment, homeDirectory: home
+            ),
+            owner: geteuid(),
+            runsAsRoot: geteuid() == 0,
+            allowRoot: options.config.allowRoot,
+            listen: addresses,
+            allowUnencryptedNetwork: options.allowUnencryptedNetwork,
+            interfaces: ServerListenPolicy.systemInterfaces(),
+            environment: AgentLaunchEnvironment(),
+            homeDirectory: home,
+            nodeVersion: ServerDoctor.nodeVersion,
+            ask: ServerDoctor.ask
+        )
+        let sections = doctor.sections()
+        let info = RemoteServerConfiguration.localServerInfo(homeDirectory: home)
+        let user = getpwuid(geteuid()).map { String(cString: $0.pointee.pw_name) } ?? "uid \(geteuid())"
+        print(ServerDoctor.render(sections, header: "latch-server \(LatchServerVersion.current) on \(info.hostname), \(info.os) \(info.arch), as \(user)"))
+        return ServerDoctor.hasProblems(sections) ? 1 : 0
+    }
+
+    /// The unit for serving with `options`, after the checks serving would make, with the
+    /// server token created so the next step can be pairing.
+    private static func installService(_ options: ServeOptions, replace: Bool) -> Int32 {
+        #if os(macOS)
+        printError("install-service writes a systemd user unit, for Linux; on a Mac, run latch-server from a launch agent you write")
+        return 1
+        #else
+        let interfaces = ServerListenPolicy.systemInterfaces()
+        do {
+            for value in options.listenAddresses {
+                let address = try ServerListenPolicy.parse(value)
+                switch ServerListenPolicy.evaluate(address, allowUnencryptedNetwork: options.allowUnencryptedNetwork, interfaces: interfaces) {
+                case let .refused(message):
+                    printError(message)
+                    return 2
+                case .tailnetNotUp:
+                    printError("\(address) is not on a Tailscale interface yet; the service waits for it when it starts")
+                case .allowed, .allowedUnencrypted:
+                    break
+                }
+            }
+        } catch {
+            printError("\(error)")
+            return 2
+        }
+        guard let tokens = tokenFile(options.config) else { return 1 }
+        do {
+            try tokens.readOrCreate()
+        } catch {
+            printError("\(error)")
+            return 1
+        }
+        let outcome = service().install(
+            executable: URL(fileURLWithPath: "/proc/self/exe").resolvingSymlinksInPath().path, options: options, replace: replace,
+            runningAgents: { listen in
+                guard let address = try? ServerListenPolicy.parse(listen), let token = try? tokens.read(),
+                      var client = try? ServerLocalClient(connectingTo: ServerDoctor.reachable(address), token: token) else { return nil }
+                defer { client.close() }
+                guard case let .success(.runtimes(summaries))? = try? client.request(.listRuntimes) else { return nil }
+                return summaries.count { $0.lifecycle != .exited }
+            }
+        )
+        outcome.lines.forEach { print($0) }
+        return outcome.status
+        #endif
+    }
+
+    private static func uninstallService(_ config: ConfigOptions) -> Int32 {
+        #if os(macOS)
+        printError("uninstall-service removes the systemd user unit install-service writes, on Linux")
+        return 1
+        #else
+        let outcome = service().uninstall()
+        outcome.lines.forEach { print($0) }
+        return outcome.status
+        #endif
+    }
+
+    private static func service() -> ServerService {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return ServerService(
+            unitDirectory: ServerService.unitDirectory(environment: ProcessInfo.processInfo.environment, homeDirectory: home),
+            homeDirectory: home,
+            user: getpwuid(geteuid()).map { String(cString: $0.pointee.pw_name) } ?? "\(geteuid())",
+            run: ServerService.runCommand
+        )
+    }
+
+    /// Asks the server at the first listen address, as the server token's holder.
+    private static func runtimes(_ options: ServeOptions, stop: String?) -> Int32 {
+        let address: ServerSocketAddress
+        do {
+            address = ServerDoctor.reachable(try ServerListenPolicy.parse(options.listenAddresses[0]))
+        } catch {
+            printError("\(error)")
+            return 2
+        }
+        guard let tokens = tokenFile(options.config) else { return 1 }
+        let token: LatchRemoteToken
+        do {
+            token = try tokens.read()
+        } catch {
+            printError("\(error)")
+            return 1
+        }
+        var client: ServerLocalClient
+        do {
+            client = try ServerLocalClient(connectingTo: address, token: token)
+        } catch {
+            printError(RuntimeTable.describe(error, at: address, configDirectory: tokens.directory))
+            return 1
+        }
+        defer { client.close() }
+        do {
+            if let stop {
+                // Stopping is idempotent on the wire, so an unknown ID would read as stopped.
+                guard case let .success(.runtimes(summaries)) = try client.request(.listRuntimes) else {
+                    printError("the server at \(address) did not list its agents")
+                    return 1
+                }
+                guard let summary = summaries.first(where: { $0.runtimeID.rawValue == stop }) else {
+                    printError("no agent has the ID \(stop); `latch-server runtimes` lists them")
+                    return 1
+                }
+                guard summary.lifecycle != .exited else {
+                    printError("\(stop) has already exited")
+                    return 0
+                }
+                switch try client.request(.stopRuntime(runtimeID: AgentRuntimeID(stop))) {
+                case .success:
+                    printError("stopped \(stop)")
+                    return 0
+                case let .failure(error):
+                    printError("\(stop): \(error.message)")
+                    return 1
+                }
+            }
+            guard case let .success(.runtimes(summaries)) = try client.request(.listRuntimes) else {
+                printError("the server at \(address) did not list its agents")
+                return 1
+            }
+            if summaries.isEmpty {
+                printError("the server at \(address) runs no agents")
+            } else {
+                print(RuntimeTable.render(summaries, homeDirectory: client.welcome.server.home))
+            }
+            return 0
+        } catch {
+            printError(RuntimeTable.describe(error, at: address, configDirectory: tokens.directory))
+            return 1
+        }
     }
 
     private static func tokenFile(_ config: ConfigOptions) -> ServerTokenFile? {
@@ -270,6 +527,8 @@ public enum ServerListenBinder {
                     bound[index] = try ServerListener.bind(address)
                 } catch where error.code == EADDRNOTAVAIL && LatchRemoteAddressPolicy.classify(address.bytes) == .tailnet {
                     waiting.append("\(address) is not available yet")
+                } catch where error.code == EADDRINUSE {
+                    return fail("cannot listen on \(address): another server already listens there, such as the latch-server service; `latch-server doctor` says which")
                 } catch {
                     return fail("cannot listen on \(address): \(error)")
                 }

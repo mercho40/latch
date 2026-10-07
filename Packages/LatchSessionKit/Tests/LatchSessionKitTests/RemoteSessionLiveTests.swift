@@ -591,36 +591,25 @@ final class RemoteSessionLiveTests: XCTestCase {
     }
 
     /// The one link failure that gives the runtime up: the server answered, and no longer has
-    /// it. A change in Settings then starts nothing; Retry starts the agent again and resumes.
-    func testARuntimeTheServerNoLongerHasIsDroppedAndRetryResumesIt() async throws {
+    /// it, as after a restart. The server answers, so the session starts the agent again and
+    /// resumes its conversation by itself, as Retry would, in a new runtime.
+    func testARuntimeTheServerNoLongerHasIsResumedByItself() async throws {
         try await LoopbackServer.run { server in
             let connector = connector(server, backoff: LatchRemoteBackoff(initial: .seconds(120), maximum: .seconds(120)))
             let model = try await connectedModel(server, connector)
             await model.send("hello")
+            let old = try await server.onlyRuntime()
             // Away while the server restarts, so the first it hears of it is the re-attach.
             try XCTUnwrap(connector.liveClients.first).dropConnectionForTesting()
             try await eventually("the link lost") { if case .reconnecting = model.linkState { true } else { false } }
             try await server.restart()
             connector.probeAll()
 
-            try await eventually("the runtime gone") { model.phase == .disconnected }
-            XCTAssertEqual(model.status, "Agent stopped")
-            XCTAssertEqual(model.errorMessage, "The agent is no longer running on loopback; the server may have restarted.")
-            XCTAssertEqual(model.errorAdvice, "Retry to start it again.")
-            XCTAssertFalse(model.errorIsConnectionFailure)
-            XCTAssertNil(model.remoteBinding, "Nothing is left to attach to")
-
-            var changed = server.profile
-            changed.allowUnencryptedNetwork.toggle()
-            try server.store.save(changed)
-            try await Task.sleep(for: .milliseconds(300))
-            XCTAssertEqual(model.phase, .disconnected, "Settings reattaches only a runtime the session kept")
-
-            // What Retry does.
-            await model.connect(remote: .custom(server.agentCommand), path: server.workspace.path)
+            try await eventually("resumed") { model.phase == .ready && server.lines(in: "loads.log") == 1 }
             XCTAssertNil(model.errorMessage)
-            XCTAssertEqual(model.phase, .ready)
-            XCTAssertEqual(server.lines(in: "loads.log"), 1, "Resumed in a new agent")
+            let resumed = try await server.onlyRuntime()
+            XCTAssertNotEqual(resumed, old, "Resumed in a new agent")
+            XCTAssertEqual(model.remoteBinding?.runtimeID, resumed.rawValue)
         }
     }
 
@@ -637,12 +626,12 @@ final class RemoteSessionLiveTests: XCTestCase {
             try await eventually("the link lost") { if case .reconnecting = model.linkState { true } else { false } }
             try await server.restart()
             connector.probeAll()
-            try await eventually("the runtime gone") { model.phase == .disconnected }
+            // Ended with the runtime, before the session resumes by itself.
+            try await eventually("the runtime gone") { model.turnsEnded == ended + 1 }
             await sending.value
-            XCTAssertEqual(model.status, "Agent stopped")
-            XCTAssertEqual(model.turnsEnded, ended + 1)
             XCTAssertTrue(model.lastTurnEndedByStop, "Not announced as a finished turn")
             XCTAssertEqual(texts(model).last, "_" + SessionModel.outputLostWhileUnreachable + "_")
+            try await eventually("resumed") { model.phase == .ready }
         }
     }
 

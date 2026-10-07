@@ -445,6 +445,289 @@ final class RemoteServerTests: XCTestCase {
         }
     }
 
+    // MARK: Compression
+
+    /// What a client that offers compression reads is compressed after the welcome, and the
+    /// same frames as a plain client's once decompressed, events of a turn included.
+    func testAClientThatOffersCompressionGetsItAndTheSameFrames() async throws {
+        try await withServer { testbed in
+            let id = AgentRuntimeID("compressed")
+            var sizes: [Bool: (received: Int, chunks: [String])] = [:]
+            for compressed in [false, true] {
+                let client = try testbed.connect()
+                client.hello(token: testbed.token.rawValue, compression: compressed ? [.deflate] : [])
+                guard case let .welcome(welcome) = try await client.readFrame() else { return XCTFail("expected a welcome") }
+                XCTAssertEqual(welcome.compression, compressed ? .deflate : nil)
+                if !compressed {
+                    try await client.ok(.launchAgent(runtimeID: id, agent: testbed.bed.mockAgent, workspace: testbed.bed.workspace.path))
+                    try await client.ok(.newSession(runtimeID: id))
+                    for _ in 0..<5 {
+                        let turnID = UUID()
+                        try await client.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("go")]))
+                        try await testbed.bed.waitForIdle(id, through: 0)
+                    }
+                    try await eventually("five turns") { testbed.bed.lines(in: "prompts.log") == 5 }
+                }
+                let start = client.bytesReceived.withLock { $0 }
+                try await client.ok(.attach(runtimeID: id, after: 0))
+                var chunks: [String] = []
+                _ = try await client.readFrames(until: "the fifth turn's end") { frame in
+                    guard case let .event(event) = frame else { return false }
+                    if let text = event.chunkText { chunks.append(text) }
+                    if case .turnEnded = event.event { return chunks.count == 15 }
+                    return false
+                }
+                sizes[compressed] = (client.bytesReceived.withLock { $0 } - start, chunks)
+            }
+            XCTAssertEqual(sizes[true]?.chunks, sizes[false]?.chunks)
+            let plain = try XCTUnwrap(sizes[false]?.received)
+            let compressed = try XCTUnwrap(sizes[true]?.received)
+            XCTAssertLessThan(compressed * 3, plain, "\(plain) bytes plain, \(compressed) compressed")
+        }
+    }
+
+    func testAWebSocketCarriesTheCompressedStreamToo() async throws {
+        try await withServer { testbed in
+            let client = try testbed.connect()
+            let response = try await client.upgrade()
+            XCTAssertTrue(response.hasPrefix("HTTP/1.1 101 "), response)
+            client.hello(token: testbed.token.rawValue, compression: [.deflate])
+            guard case let .welcome(welcome) = try await client.readFrame() else { return XCTFail("expected a welcome") }
+            XCTAssertEqual(welcome.compression, .deflate)
+            guard case .runtimes = try await client.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+            client.send(.ping)
+            let pong = try await client.readFrame()
+            XCTAssertEqual(pong, .pong)
+        }
+    }
+
+    func testAServerWithoutCompressionSpeaksPlain() async throws {
+        try await withServer({ $0.compression = false }) { testbed in
+            let client = try testbed.connect()
+            client.hello(token: testbed.token.rawValue, compression: [.deflate])
+            guard case let .welcome(welcome) = try await client.readFrame() else { return XCTFail("expected a welcome") }
+            XCTAssertNil(welcome.compression)
+            guard case .runtimes = try await client.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+        }
+    }
+
+    // MARK: Pairing codes
+
+    /// What the welcome gave the hello, or nil when it was refused.
+    private func exchange(_ code: LatchRemoteToken, on testbed: ServerTestbed, exchanges: Bool = true) async throws -> LatchRemoteWelcome? {
+        let client = try testbed.connect()
+        client.hello(token: code.rawValue, exchangesPairingCode: exchanges)
+        switch try await client.readFrame() {
+        case let .welcome(welcome): return welcome
+        case .rejected: return nil
+        default: throw HubTestError.unexpected("neither a welcome nor a rejection")
+        }
+    }
+
+    func testAPairingCodeIsExchangedForADeviceTokenOnce() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("phone", access: .full, configDirectory: testbed.configDirectory)
+            let first = try await exchange(code, on: testbed)
+            let token = try XCTUnwrap(first?.deviceToken)
+            XCTAssertNotEqual(token, code)
+            try await testbed.waitForLog("authenticated as device phone, exchanging a pairing code for its token")
+            // A welcome lost on its way: the code gives the same token again.
+            let retried = try await exchange(code, on: testbed)
+            XCTAssertEqual(retried?.deviceToken, token)
+
+            // The device connects with its token: the code is spent.
+            let device = try testbed.connect()
+            device.hello(token: token.rawValue, exchangesPairingCode: true)
+            guard case let .welcome(welcome) = try await device.readFrame() else { return XCTFail("expected a welcome") }
+            XCTAssertNil(welcome.deviceToken)
+            let spent = try await exchange(code, on: testbed)
+            XCTAssertNil(spent)
+            XCTAssertEqual(try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory).map(\.name), ["phone"])
+            XCTAssertEqual(try ServerDeviceTokens.pairingCodes(configDirectory: testbed.configDirectory).read().count, 0)
+        }
+    }
+
+    func testAnAppThatCannotExchangeKeepsTheCodeAsItsToken() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("old-phone", access: .full, configDirectory: testbed.configDirectory)
+            let welcome = try await exchange(code, on: testbed, exchanges: false)
+            XCTAssertNotNil(welcome)
+            XCTAssertNil(welcome?.deviceToken)
+            let devices = try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory)
+            XCTAssertEqual(devices.map(\.name), ["old-phone"])
+            XCTAssertEqual(try devices[0].token.get(), code)
+            // It goes on working, as the device's token now.
+            let again = try await exchange(code, on: testbed, exchanges: false)
+            XCTAssertNotNil(again)
+        }
+    }
+
+    func testAPairingCodeNobodyUsesExpires() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("late", access: .full, configDirectory: testbed.configDirectory)
+            let codes = ServerDeviceTokens.pairingCodes(configDirectory: testbed.configDirectory)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-11 * 60)],
+                                                  ofItemAtPath: codes.directory + "/late")
+            let expired = try await exchange(code, on: testbed)
+            XCTAssertNil(expired)
+            XCTAssertEqual(try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory).count, 0)
+        }
+    }
+
+    func testPairingADeviceAgainReplacesItsToken() async throws {
+        try await withServer { testbed in
+            let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)
+            let old = try devices.readOrCreate("phone")
+            let oldPhone = try testbed.connect()
+            oldPhone.hello(token: old.rawValue)
+            guard case .welcome = try await oldPhone.readFrame() else { return XCTFail("expected a welcome") }
+
+            let code = try ServerDeviceTokens.makePairingCode("phone", access: .full, configDirectory: testbed.configDirectory)
+            let exchanged = try await exchange(code, on: testbed)
+            let new = try XCTUnwrap(exchanged?.deviceToken)
+            XCTAssertNotEqual(new, old)
+            testbed.server.checkToken()
+            try await oldPhone.expectClosed()
+        }
+    }
+
+    func testAWatchOnlyCodePairsAWatchOnlyDevice() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("tv", access: .watch, configDirectory: testbed.configDirectory)
+            let exchanged = try await exchange(code, on: testbed)
+            let token = try XCTUnwrap(exchanged?.deviceToken)
+            let tv = try testbed.connect()
+            tv.hello(token: token.rawValue)
+            guard case .welcome = try await tv.readFrame() else { return XCTFail("expected a welcome") }
+            guard case let .failure(error) = try await tv.reply(to: tv.request(.stopRuntime(runtimeID: AgentRuntimeID("x")))) else {
+                return XCTFail("expected a refusal")
+            }
+            XCTAssertEqual(error.code, .forbidden)
+            XCTAssertEqual(try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory).map(\.access), [.watch])
+        }
+    }
+
+    func testAWatchOnlyDeviceFollowsAgentsAndChangesNothing() async throws {
+        try await withServer { testbed in
+            let viewerToken = try ServerDeviceTokens(configDirectory: testbed.configDirectory, access: .watch).readOrCreate("viewer")
+            let owner = try await testbed.authenticated()
+            let id = AgentRuntimeID("watched")
+            try await owner.ok(.launchAgent(runtimeID: id, agent: testbed.bed.mockAgent, workspace: testbed.bed.workspace.path))
+            try await owner.ok(.newSession(runtimeID: id))
+
+            let viewer = try testbed.connect()
+            viewer.hello(token: viewerToken.rawValue)
+            guard case .welcome = try await viewer.readFrame() else { return XCTFail("expected a welcome") }
+            try await testbed.waitForLog("authenticated as device viewer, watch only")
+            guard case let .runtimes(listed) = try await viewer.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+            XCTAssertEqual(listed.map(\.runtimeID), [id])
+            try await viewer.ok(.attach(runtimeID: id, after: 0))
+
+            // What the owner does, the viewer sees.
+            let turnID = UUID()
+            try await owner.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("go")]))
+            _ = try await viewer.readFrames(until: "the turn's end") { frame in
+                if case let .event(event) = frame, case .turnEnded = event.event { true } else { false }
+            }
+
+            // And it can change nothing.
+            for command: LatchRemoteCommand in [
+                .prompt(runtimeID: id, turnID: UUID(), blocks: [.text("go")]),
+                .cancelPrompt(runtimeID: id),
+                .setMode(runtimeID: id, modeID: "code"),
+                .stopRuntime(runtimeID: id),
+                .launchAgent(runtimeID: AgentRuntimeID("mine"), agent: testbed.bed.mockAgent, workspace: testbed.bed.workspace.path),
+            ] {
+                guard case let .failure(error) = try await viewer.reply(to: viewer.request(command)) else {
+                    return XCTFail("\(command.kind) should be refused")
+                }
+                XCTAssertEqual(error.code, .forbidden, command.kind)
+                XCTAssertTrue(error.message.contains("can only watch"), error.message)
+            }
+            XCTAssertEqual(testbed.bed.lines(in: "prompts.log"), 1)
+            guard case let .runtimes(after) = try await owner.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+            XCTAssertEqual(after.map(\.lifecycle), [.ready])
+        }
+    }
+
+    func testADeviceTokenAuthenticatesAndRevokingItDropsOnlyThatDevice() async throws {
+        try await withServer { testbed in
+            let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)
+            let phoneToken = try devices.readOrCreate("phone")
+            let tabletToken = try devices.readOrCreate("tablet")
+            let server = try await testbed.authenticated()
+            let phone = try testbed.connect()
+            phone.hello(token: phoneToken.rawValue)
+            guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+            let tablet = try testbed.connect()
+            tablet.hello(token: tabletToken.rawValue)
+            guard case .welcome = try await tablet.readFrame() else { return XCTFail("expected a welcome") }
+            try await testbed.waitForLog("authenticated as device phone")
+
+            let use = try XCTUnwrap(ServerTokenUse.read(configDirectory: testbed.configDirectory))
+            XCTAssertEqual(use.devices.keys.sorted(), ["phone", "tablet"])
+            XCTAssertEqual(use.devices["phone"]?.from, "127.0.0.1")
+            XCTAssertEqual(use.server?.from, "127.0.0.1")
+
+            XCTAssertTrue(try devices.revoke("phone"))
+            // What SIGHUP does.
+            testbed.server.checkToken()
+            try await phone.expectClosed()
+            try await testbed.waitForLog("closed: device phone's token is no longer valid")
+            // A revoked device's use is forgotten.
+            XCTAssertEqual(ServerTokenUse.read(configDirectory: testbed.configDirectory)?.devices.keys.sorted(), ["tablet"])
+            for client in [server, tablet] {
+                client.send(.ping)
+                let pong = try await client.readFrame()
+                XCTAssertEqual(pong, .pong)
+            }
+
+            let revoked = try testbed.connect()
+            revoked.hello(token: phoneToken.rawValue)
+            guard case let .rejected(rejected) = try await revoked.readFrame() else { return XCTFail("expected a rejection") }
+            XCTAssertEqual(rejected.reason, .unauthorized)
+        }
+    }
+
+    func testRotatingTheServerTokenLeavesDevicesConnected() async throws {
+        try await withServer { testbed in
+            let phoneToken = try ServerDeviceTokens(configDirectory: testbed.configDirectory).readOrCreate("phone")
+            let server = try await testbed.authenticated()
+            let phone = try testbed.connect()
+            phone.hello(token: phoneToken.rawValue)
+            guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+
+            try testbed.tokens.rotate()
+            testbed.server.checkToken()
+            try await server.expectClosed()
+            phone.send(.ping)
+            let pong = try await phone.readFrame()
+            XCTAssertEqual(pong, .pong)
+        }
+    }
+
+    func testAnUnusableDeviceTokenIsRefusedAndDropsItsConnections() async throws {
+        try await withServer { testbed in
+            let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)
+            let phoneToken = try devices.readOrCreate("phone")
+            let phone = try testbed.connect()
+            phone.hello(token: phoneToken.rawValue)
+            guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+            let server = try await testbed.authenticated()
+
+            XCTAssertEqual(chmod(devices.directory + "/phone", 0o644), 0)
+            let loose = try testbed.connect()
+            loose.hello(token: phoneToken.rawValue)
+            guard case let .rejected(rejected) = try await loose.readFrame() else { return XCTFail("expected a rejection") }
+            XCTAssertEqual(rejected.reason, .unauthorized)
+            // The check at that hello dropped the phone, and only the phone.
+            try await phone.expectClosed()
+            server.send(.ping)
+            let pong = try await server.readFrame()
+            XCTAssertEqual(pong, .pong)
+        }
+    }
+
     func testThePeriodicCheckNoticesARotation() async throws {
         try await withServer({ $0.tokenCheckInterval = .milliseconds(100) }) { testbed in
             let client = try await testbed.authenticated()
@@ -507,7 +790,8 @@ final class RemoteServerTests: XCTestCase {
         // rather than only that the server went away.
         _ = try await client.readFrames(until: "the stop") { frame in
             guard case let .event(event) = frame, event.runtimeID == id else { return false }
-            return event.event == .exited(LatchRemoteExit(status: nil, stopped: true))
+            // Stopped by the server shutting down, so a client can resume once it is back.
+            return event.event == .exited(LatchRemoteExit(status: nil, stopped: true, serverShutDown: true))
         }
         try await client.expectClosed()
         try await handshaking.expectClosed()

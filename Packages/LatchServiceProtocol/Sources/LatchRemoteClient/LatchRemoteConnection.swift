@@ -112,6 +112,8 @@ public final class LatchRemoteConnection: Sendable {
         var state = State.idle
         var connection: NWConnection?
         var decoder = LatchRemoteLineDecoder(maximumLineBytes: LatchRemoteProtocol.preAuthMaxLineBytes)
+        /// From a welcome that chose compression: what arrives after it goes through this.
+        var inflater: LatchRemoteInflater?
         var requests: [UUID: Completion] = [:]
         var pings: [UUID: @Sendable (Result<Void, any Error>) -> Void] = [:]
         var readyWaiters: [UUID: @Sendable (Result<LatchRemoteWelcome, any Error>) -> Void] = [:]
@@ -356,7 +358,8 @@ public final class LatchRemoteConnection: Sendable {
             // Whoever keeps the connection's token keeps a device token a pairing code is
             // exchanged for; one that does not leaves the code to work on, until its device
             // connects with the token, as the server allows for that.
-            write(&core, frame: .hello(LatchRemoteHello(token: options.token.rawValue, client: options.client, exchangesPairingCode: true)))
+            write(&core, frame: .hello(LatchRemoteHello(token: options.token.rawValue, client: options.client, exchangesPairingCode: true,
+                                                        compression: [.deflate])))
             return connection
         }
         if let connection {
@@ -414,9 +417,19 @@ public final class LatchRemoteConnection: Sendable {
     }
 
     private func received(_ data: Data) {
-        core.withLock { core in
+        let corrupt: Bool = core.withLock { core in
             core.lastReceived = .now
-            core.decoder.append(data)
+            guard let inflater = core.inflater else {
+                core.decoder.append(data)
+                return false
+            }
+            guard let plain = try? inflater.decompress(data) else { return true }
+            core.decoder.append(plain)
+            return false
+        }
+        if corrupt {
+            close(with: .protocolViolation("The server's compressed stream did not decompress."))
+            return
         }
         while true {
             let line: Data?
@@ -457,6 +470,16 @@ public final class LatchRemoteConnection: Sendable {
             }
             // What this client reads is bounded by its own limit, whatever the server offers.
             core.decoder.maximumLineBytes = min(welcome.maxFrameBytes, LatchRemoteProtocol.maxFrameBytes)
+            if welcome.compression == .deflate {
+                // What came in after the welcome with it is compressed already.
+                let inflater = LatchRemoteInflater()
+                guard let plain = try? inflater.decompress(core.decoder.takeRemainder()) else {
+                    close(&core, with: .protocolViolation("The server's compressed stream did not decompress."))
+                    return
+                }
+                core.decoder.append(plain)
+                core.inflater = inflater
+            }
             core.lastReceived = .now
             startHeartbeat(&core, seconds: welcome.heartbeatSeconds)
             transition(&core, to: .ready(welcome))

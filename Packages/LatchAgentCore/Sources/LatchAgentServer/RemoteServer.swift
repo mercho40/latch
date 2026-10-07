@@ -24,6 +24,8 @@ public struct RemoteServerConfiguration: Sendable {
     public var maxUnauthenticatedConnectionsPerPeer = 8
     /// Requests of one connection the hub is working on; more are answered `busy`.
     public var maxOutstandingRequests = 32
+    /// Compress what is sent after the welcome for a client that offers to read it so.
+    public var compression = true
     /// How long a pairing code works before a device has used it.
     public var pairingCodeLifetime: TimeInterval = Self.defaultPairingCodeLifetime
     public static let defaultPairingCodeLifetime: TimeInterval = 10 * 60

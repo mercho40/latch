@@ -55,17 +55,22 @@ public struct LatchRemoteHello: Codable, Equatable, Sendable {
     /// The client keeps a device token the welcome gives it in place of the one-time pairing
     /// code it sent as `token`, and connects with that from then on. Sent only when true.
     public var exchangesPairingCode: Bool
+    /// What the client can read the server's bytes after the welcome in; empty for plain.
+    /// Sent only when not empty, and values a server does not know are ignored.
+    public var compression: [LatchRemoteCompression]
 
     public init(
         protocolRange: LatchRemoteVersionRange = .supported,
         token: String,
         client: LatchRemoteClientInfo,
-        exchangesPairingCode: Bool = false
+        exchangesPairingCode: Bool = false,
+        compression: [LatchRemoteCompression] = []
     ) {
         self.protocolRange = protocolRange
         self.token = token
         self.client = client
         self.exchangesPairingCode = exchangesPairingCode
+        self.compression = compression
     }
 
     /// The server's only decoder before authentication; it never reaches the general frame decoder.
@@ -79,6 +84,7 @@ public struct LatchRemoteHello: Codable, Equatable, Sendable {
         case token
         case client
         case exchangesPairingCode
+        case compression
     }
 
     public init(from decoder: any Decoder) throws {
@@ -88,6 +94,8 @@ public struct LatchRemoteHello: Codable, Equatable, Sendable {
         token = try container.decode(String.self, forKey: .token)
         client = try container.decode(LatchRemoteClientInfo.self, forKey: .client)
         exchangesPairingCode = (try? container.decodeIfPresent(Bool.self, forKey: .exchangesPairingCode)) ?? false
+        compression = ((try? container.decodeIfPresent([String].self, forKey: .compression)) ?? nil)?
+            .compactMap(LatchRemoteCompression.init(rawValue:)) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -97,6 +105,7 @@ public struct LatchRemoteHello: Codable, Equatable, Sendable {
         try container.encode(token, forKey: .token)
         try container.encode(client, forKey: .client)
         if exchangesPairingCode { try container.encode(true, forKey: .exchangesPairingCode) }
+        if !compression.isEmpty { try container.encode(compression, forKey: .compression) }
     }
 }
 
@@ -121,19 +130,23 @@ public struct LatchRemoteWelcome: Codable, Equatable, Sendable {
     /// own token, to keep in the code's place and connect with from then on. A shell on the
     /// server, as any token is; its description is redacted.
     public var deviceToken: LatchRemoteToken?
+    /// What the server's bytes after this line are in, one the hello offered; nil for plain.
+    public var compression: LatchRemoteCompression?
 
     public init(
         protocolVersion: Int,
         server: LatchRemoteServerInfo,
         heartbeatSeconds: Int = LatchRemoteProtocol.heartbeatSeconds,
         maxFrameBytes: Int = LatchRemoteProtocol.maxFrameBytes,
-        deviceToken: LatchRemoteToken? = nil
+        deviceToken: LatchRemoteToken? = nil,
+        compression: LatchRemoteCompression? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.server = server
         self.heartbeatSeconds = heartbeatSeconds
         self.maxFrameBytes = maxFrameBytes
         self.deviceToken = deviceToken
+        self.compression = compression
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -143,6 +156,7 @@ public struct LatchRemoteWelcome: Codable, Equatable, Sendable {
         case heartbeatSeconds
         case maxFrameBytes
         case deviceToken
+        case compression
     }
 
     public init(from decoder: any Decoder) throws {
@@ -154,6 +168,9 @@ public struct LatchRemoteWelcome: Codable, Equatable, Sendable {
         maxFrameBytes = try container.decode(Int.self, forKey: .maxFrameBytes)
         // One that is not a token is no token: the client keeps the code it has.
         deviceToken = (try? container.decodeIfPresent(String.self, forKey: .deviceToken)).flatMap { $0.flatMap(LatchRemoteToken.init) }
+        // One this client does not know is one it did not offer; it reads the rest as plain,
+        // and the frames that follow fail to decode.
+        compression = (try? container.decodeIfPresent(String.self, forKey: .compression)).flatMap { $0.flatMap(LatchRemoteCompression.init(rawValue:)) }
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -164,6 +181,7 @@ public struct LatchRemoteWelcome: Codable, Equatable, Sendable {
         try container.encode(heartbeatSeconds, forKey: .heartbeatSeconds)
         try container.encode(maxFrameBytes, forKey: .maxFrameBytes)
         try container.encodeIfPresent(deviceToken?.rawValue, forKey: .deviceToken)
+        try container.encodeIfPresent(compression, forKey: .compression)
     }
 }
 

@@ -445,6 +445,72 @@ final class RemoteServerTests: XCTestCase {
         }
     }
 
+    // MARK: Compression
+
+    /// What a client that offers compression reads is compressed after the welcome, and the
+    /// same frames as a plain client's once decompressed, events of a turn included.
+    func testAClientThatOffersCompressionGetsItAndTheSameFrames() async throws {
+        try await withServer { testbed in
+            let id = AgentRuntimeID("compressed")
+            var sizes: [Bool: (received: Int, chunks: [String])] = [:]
+            for compressed in [false, true] {
+                let client = try testbed.connect()
+                client.hello(token: testbed.token.rawValue, compression: compressed ? [.deflate] : [])
+                guard case let .welcome(welcome) = try await client.readFrame() else { return XCTFail("expected a welcome") }
+                XCTAssertEqual(welcome.compression, compressed ? .deflate : nil)
+                if !compressed {
+                    try await client.ok(.launchAgent(runtimeID: id, agent: testbed.bed.mockAgent, workspace: testbed.bed.workspace.path))
+                    try await client.ok(.newSession(runtimeID: id))
+                    for _ in 0..<5 {
+                        let turnID = UUID()
+                        try await client.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("go")]))
+                        try await testbed.bed.waitForIdle(id, through: 0)
+                    }
+                    try await eventually("five turns") { testbed.bed.lines(in: "prompts.log") == 5 }
+                }
+                let start = client.bytesReceived.withLock { $0 }
+                try await client.ok(.attach(runtimeID: id, after: 0))
+                var chunks: [String] = []
+                _ = try await client.readFrames(until: "the fifth turn's end") { frame in
+                    guard case let .event(event) = frame else { return false }
+                    if let text = event.chunkText { chunks.append(text) }
+                    if case .turnEnded = event.event { return chunks.count == 15 }
+                    return false
+                }
+                sizes[compressed] = (client.bytesReceived.withLock { $0 } - start, chunks)
+            }
+            XCTAssertEqual(sizes[true]?.chunks, sizes[false]?.chunks)
+            let plain = try XCTUnwrap(sizes[false]?.received)
+            let compressed = try XCTUnwrap(sizes[true]?.received)
+            XCTAssertLessThan(compressed * 3, plain, "\(plain) bytes plain, \(compressed) compressed")
+        }
+    }
+
+    func testAWebSocketCarriesTheCompressedStreamToo() async throws {
+        try await withServer { testbed in
+            let client = try testbed.connect()
+            let response = try await client.upgrade()
+            XCTAssertTrue(response.hasPrefix("HTTP/1.1 101 "), response)
+            client.hello(token: testbed.token.rawValue, compression: [.deflate])
+            guard case let .welcome(welcome) = try await client.readFrame() else { return XCTFail("expected a welcome") }
+            XCTAssertEqual(welcome.compression, .deflate)
+            guard case .runtimes = try await client.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+            client.send(.ping)
+            let pong = try await client.readFrame()
+            XCTAssertEqual(pong, .pong)
+        }
+    }
+
+    func testAServerWithoutCompressionSpeaksPlain() async throws {
+        try await withServer({ $0.compression = false }) { testbed in
+            let client = try testbed.connect()
+            client.hello(token: testbed.token.rawValue, compression: [.deflate])
+            guard case let .welcome(welcome) = try await client.readFrame() else { return XCTFail("expected a welcome") }
+            XCTAssertNil(welcome.compression)
+            guard case .runtimes = try await client.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+        }
+    }
+
     // MARK: Pairing codes
 
     /// What the welcome gave the hello, or nil when it was refused.

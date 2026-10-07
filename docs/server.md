@@ -48,7 +48,7 @@ ssh vps mkdir -p .local/bin
 scp .build/linux-server/latch-server-x86_64 vps:.local/bin/latch-server
 ```
 
-**On the server**, with a Swift 6.4 toolchain:
+**On the server**, with a Swift 6.4 toolchain and zlib's headers (`zlib1g-dev` on Ubuntu and Debian, `zlib-devel` on Fedora):
 
 ```sh
 git clone --branch v0.2.0 https://github.com/mercho40/latch.git && cd latch

@@ -35,6 +35,8 @@ final class RemoteServerConnection: Sendable {
         var client: String
         /// Set by the reader before the welcome, and never changed after.
         var webSocket = false
+        /// What the client reads after the welcome in, set with the welcome.
+        var compression: LatchRemoteCompression?
         var hubConnection: RemoteConnectionID?
         var credential: Credential?
         var outbox: [Outgoing] = []
@@ -285,10 +287,16 @@ final class RemoteServerConnection: Sendable {
         return enqueue(Outgoing(line: frame, attached: nil, framed: true))
     }
 
-    /// Writes stream bytes, inside binary frames on a WebSocket.
-    private func send(_ data: Data) -> Bool {
+    /// Writes stream bytes, compressed by `deflater` after a welcome that said so, inside
+    /// binary frames on a WebSocket.
+    private func send(_ data: Data, compressing deflater: LatchRemoteDeflater? = nil) -> Bool {
         let webSocket = state.withLock { $0.webSocket }
-        return ServerSocket.sendAll(descriptor, webSocket ? ServerWebSocket.binaryFrames(data) : data)
+        var bytes = data
+        if let deflater {
+            guard let compressed = deflater.compress(data) else { return false }
+            bytes = compressed
+        }
+        return ServerSocket.sendAll(descriptor, webSocket ? ServerWebSocket.binaryFrames(bytes) : bytes)
     }
 
     /// Checks the hello: the token first, so version ranges are never shown to a client
@@ -321,17 +329,20 @@ final class RemoteServerConnection: Sendable {
         }
 
         let configuration = server.configuration
+        let compression: LatchRemoteCompression? = configuration.compression && hello.compression.contains(.deflate) ? .deflate : nil
         let welcome = LatchRemoteServerFrame.welcome(LatchRemoteWelcome(
             protocolVersion: version,
             server: configuration.serverInfo,
             heartbeatSeconds: configuration.heartbeatSeconds,
             maxFrameBytes: LatchRemoteProtocol.maxFrameBytes,
-            deviceToken: issued
+            deviceToken: issued,
+            compression: compression
         ))
         // From here the handshake deadline no longer applies.
         let proceed = state.withLock { state in
             guard !state.closing else { return false }
             state.credential = credential
+            state.compression = compression
             return true
         }
         guard proceed, server.authenticated(self) else {
@@ -519,17 +530,20 @@ final class RemoteServerConnection: Sendable {
         let hub = server.hub
         let budget = server.configuration.eventByteBudget
         let pause = server.configuration.writerPauseForTesting
+        // One stream for the connection's life, on this thread alone: everything after the
+        // welcome goes through it, the welcome itself having gone plain.
+        let deflater = state.withLock { $0.compression } == .deflate ? LatchRemoteDeflater() : nil
         while true {
             let (outgoing, closing, draining) = state.withLock { state in
                 defer { state.outbox.removeAll() }
                 return (state.outbox, state.closing, state.draining)
             }
             if closing {
-                if draining { drain(hubConnection, budget: budget) }
+                if draining { drain(hubConnection, budget: budget, deflater: deflater) }
                 return
             }
             for item in outgoing {
-                guard item.framed ? ServerSocket.sendAll(descriptor, item.line) : send(item.line) else {
+                guard item.framed ? ServerSocket.sendAll(descriptor, item.line) : send(item.line, compressing: deflater) else {
                     close("write failed")
                     return
                 }
@@ -543,7 +557,7 @@ final class RemoteServerConnection: Sendable {
                 var batch = Data()
                 batch.reserveCapacity(lines.reduce(0) { $0 + $1.count })
                 lines.forEach { batch.append($0) }
-                guard send(batch) else {
+                guard send(batch, compressing: deflater) else {
                     close("write failed")
                     return
                 }
@@ -558,7 +572,7 @@ final class RemoteServerConnection: Sendable {
     /// Writes every event line the client has waiting, and a WebSocket's close frame, then
     /// shuts the socket down. Stops at the first failed write, which is also how
     /// `closeAfterWriting`'s limit ends it.
-    private func drain(_ hubConnection: RemoteConnectionID, budget: Int) {
+    private func drain(_ hubConnection: RemoteConnectionID, budget: Int, deflater: LatchRemoteDeflater?) {
         defer { ServerSocket.shutdownBoth(descriptor) }
         while true {
             let lines = server.hub.pullEventLines(for: hubConnection, byteBudget: budget)
@@ -569,7 +583,7 @@ final class RemoteServerConnection: Sendable {
             var batch = Data()
             batch.reserveCapacity(lines.reduce(0) { $0 + $1.count })
             lines.forEach { batch.append($0) }
-            guard send(batch) else { return }
+            guard send(batch, compressing: deflater) else { return }
         }
     }
 

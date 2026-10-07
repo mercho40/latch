@@ -7,7 +7,10 @@ public enum ServerCommand: Equatable, Sendable {
     /// Prints the token, creating it if absent, or a new one with `rotate`.
     case token(ConfigOptions, rotate: Bool)
     /// Prints a `latch://` string for pasting into the app, and with `qr` a QR code of it.
-    case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil)
+    /// With `device`, the string carries that device's own token, created on first use.
+    case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil, device: String? = nil)
+    /// Lists the devices with a token of their own, or with `revoke`, deletes one's.
+    case devices(ConfigOptions, revoke: String?)
     case version
     case help
 }
@@ -59,15 +62,18 @@ public enum ServerCommandLine {
     public static let usage = """
     usage: latch-server [options]            serve until SIGTERM or SIGINT
            latch-server token [--rotate]      print the token, creating it if absent
-           latch-server pair --host NAME [--port N] [--wss] [--qr [--invert]]
+           latch-server pair --host NAME [--port N] [--wss] [--device DEVICE] [--qr [--invert]]
                                               print a latch:// string for the Latch app
+           latch-server devices [--revoke DEVICE]
+                                              list the devices paired with --device, or
+                                              revoke one
            latch-server --version | --help
 
     options:
       --listen HOST:PORT            numeric address to listen on; repeatable
                                     (default \(ServerListenPolicy.defaultListen))
       --allow-unencrypted-network   allow addresses that are neither loopback nor Tailscale
-      --config-dir PATH             where server-token lives
+      --config-dir PATH             where server-token and devices live
                                     (default $XDG_CONFIG_HOME/latch or ~/.config/latch)
       --detached-timeout DURATION   stop idle runtimes nobody attached to for this long,
                                     such as 24h, 90m or 30s; 0 disables (default 24h)
@@ -78,8 +84,12 @@ public enum ServerCommandLine {
       --qr                          with pair, also print the string as a QR code for the
                                     iPhone's camera; it holds the token, so keep it private
       --invert                      with --qr, draw the dark modules instead of the light
+      --device DEVICE               with pair, give the string a token of DEVICE's own,
+                                    created on first use, that revoking it ends; a name of
+                                    letters, digits, '.', '_' and '-'
+      --revoke DEVICE               with devices, delete DEVICE's token
 
-    SIGHUP re-reads the token file at once; a rotated token closes connections that used the old one.
+    SIGHUP re-reads the token files at once; a rotated or revoked token closes the connections that used it.
     """
 
     public static func parse(_ arguments: [String]) throws(ServerCommandLineError) -> ServerCommand {
@@ -97,6 +107,8 @@ public enum ServerCommandLine {
         var qr = false
         var invert = false
         var webSocket = false
+        var device: String?
+        var revoke: String?
         var version = false
         var help = false
         var seen: Set<String> = []
@@ -179,6 +191,13 @@ public enum ServerCommandLine {
                 try allowed(option, in: ["pair"])
                 try flag()
                 invert = true
+            case "--device", "--revoke":
+                try allowed(option, in: [option == "--device" ? "pair" : "devices"])
+                let name = try value()
+                guard ServerDeviceTokens.isValidName(name) else {
+                    throw ServerCommandLineError("\(option) \(name): expected 1 to 64 letters, digits, '.', '_' and '-', not starting with '.'")
+                }
+                if option == "--device" { device = name } else { revoke = name }
             case "--version":
                 try flag()
                 version = true
@@ -204,7 +223,9 @@ public enum ServerCommandLine {
             guard qr || !invert else { throw ServerCommandLineError("--invert needs --qr") }
             let style: PairQRCode? = qr ? (invert ? .darkModulesDrawn : .lightModulesDrawn) : nil
             let transport: LatchRemoteTransport = webSocket ? .webSocket : .tcp
-            return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style)
+            return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style, device: device)
+        case "devices":
+            return .devices(serve.config, revoke: revoke)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }

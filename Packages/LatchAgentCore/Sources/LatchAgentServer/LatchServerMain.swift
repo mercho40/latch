@@ -53,11 +53,16 @@ public enum LatchServerMain {
                 printError("\(error)")
                 return 1
             }
-        case let .pair(config, host, port, transport, qr):
+        case let .pair(config, host, port, transport, qr, device):
             guard let tokens = tokenFile(config) else { return 1 }
             let pairing: String
             do {
-                pairing = try LatchRemotePairing(host: host, port: port, transport: transport, token: tokens.readOrCreate()).string
+                let token = if let device {
+                    try ServerDeviceTokens(configDirectory: tokens.directory).readOrCreate(device)
+                } else {
+                    try tokens.readOrCreate()
+                }
+                pairing = try LatchRemotePairing(host: host, port: port, transport: transport, token: token).string
             } catch let error as ServerTokenError {
                 printError("\(error)")
                 return 1
@@ -74,6 +79,29 @@ public enum LatchServerMain {
                 return 0
             } catch {
                 printError("--qr: the string is too long for a QR code (\(error)); paste it instead")
+                return 1
+            }
+        case let .devices(config, revoke):
+            guard let tokens = tokenFile(config) else { return 1 }
+            let devices = ServerDeviceTokens(configDirectory: tokens.directory)
+            do {
+                if let revoke {
+                    guard try devices.revoke(revoke) else {
+                        printError("no device is named \(revoke)")
+                        return 1
+                    }
+                    printError("revoked \(revoke): running servers drop its connections within \(LatchRemoteProtocol.heartbeatSeconds) seconds, or at once on SIGHUP")
+                    return 0
+                }
+                for device in try devices.read() {
+                    switch device.token {
+                    case .success: print(device.name)
+                    case let .failure(error): print("\(device.name) (refused: \(error))")
+                    }
+                }
+                return 0
+            } catch {
+                printError("\(error)")
                 return 1
             }
         case let .serve(options):
@@ -94,13 +122,21 @@ public enum LatchServerMain {
             return 2
         }
         guard let tokens = tokenFile(options.config) else { return 1 }
+        let devices: [(name: String, token: Result<LatchRemoteToken, ServerTokenError>)]
         do {
             try tokens.readOrCreate()
+            devices = try ServerDeviceTokens(configDirectory: tokens.directory).read()
         } catch {
             printError("\(error)")
             return 1
         }
         log.log("token file \(tokens.path)")
+        if !devices.isEmpty {
+            log.log("device tokens: " + devices.map(\.name).joined(separator: ", "))
+        }
+        for case let (name, .failure(error)) in devices {
+            log.log("warning: device \(name) is refused: \(error)")
+        }
 
         let controller = ServeController(log: log)
         startSignalThread(controller)

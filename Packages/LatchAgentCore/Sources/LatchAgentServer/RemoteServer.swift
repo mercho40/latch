@@ -73,6 +73,8 @@ public struct ServerListener: Sendable {
 public final class RemoteServer: Sendable {
     let hub: RemoteRuntimeHub
     let tokens: ServerTokenFile
+    /// In `devices` beside `tokens`.
+    let devices: ServerDeviceTokens
     let configuration: RemoteServerConfiguration
     let log: ServerLog
     private let state = Mutex(State())
@@ -118,6 +120,7 @@ public final class RemoteServer: Sendable {
     public init(hub: RemoteRuntimeHub, tokens: ServerTokenFile, configuration: RemoteServerConfiguration, log: ServerLog) {
         self.hub = hub
         self.tokens = tokens
+        devices = ServerDeviceTokens(configDirectory: tokens.directory, owner: tokens.owner)
         self.configuration = configuration
         self.log = log
         guard let stopPipe = ServerSocket.makePipe() else { fatalError("pipe: \(String(cString: strerror(errno)))") }
@@ -184,28 +187,43 @@ public final class RemoteServer: Sendable {
     /// How long a shutdown waits for a client to take the events it has waiting.
     static let drainLimit: Duration = .seconds(2)
 
-    /// Reads the token file now and closes every connection that authenticated with another
-    /// token, or all of them when the file is gone or unusable. A failure to read it that says
-    /// nothing about the file, such as running out of descriptors, fails the hello that asked
-    /// but leaves authenticated connections alone. SIGHUP calls this.
+    /// Reads the token files now and closes every connection whose token is no longer among
+    /// them: the server token was rotated, a device was revoked, or a file is gone or
+    /// unusable. A failure to read that says nothing about the files, such as running out of
+    /// descriptors, leaves authenticated connections alone; a hello is checked against
+    /// whatever could be read. SIGHUP calls this.
     @discardableResult
-    public func checkToken() -> LatchRemoteToken? {
-        let current: LatchRemoteToken?
-        do {
-            current = try tokens.read()
-        } catch .system {
-            return nil
-        } catch {
-            current = nil
-        }
+    public func checkToken() -> AcceptedTokens {
+        let accepted = acceptedTokens()
+        guard accepted.settled else { return accepted }
         let connections = state.withLock { Array($0.connections.values) }
         for connection in connections {
-            guard let token = connection.authenticatedToken else { continue }
-            if current.map({ $0 != token }) ?? true {
-                connection.close("the server token changed")
-            }
+            guard let credential = connection.authenticatedCredential, !accepted.contains(credential.token) else { continue }
+            connection.close(credential.device.map { "device \($0)'s token is no longer valid" } ?? "the server token changed")
         }
-        return current
+        return accepted
+    }
+
+    /// The tokens a hello may carry now, read without closing anything.
+    func acceptedTokens() -> AcceptedTokens {
+        var accepted = AcceptedTokens()
+        do {
+            accepted.entries.append((nil, try tokens.read()))
+        } catch .system {
+            accepted.settled = false
+        } catch {}
+        do {
+            for device in try devices.read() {
+                switch device.token {
+                case let .success(token): accepted.entries.append((device.name, token))
+                case .failure(.system): accepted.settled = false
+                case .failure: break
+                }
+            }
+        } catch .system {
+            accepted.settled = false
+        } catch {}
+        return accepted
     }
 
     var connectionCount: Int {
@@ -325,6 +343,25 @@ public final class RemoteServer: Sendable {
         guard let suppressed = unauthenticatedNotices.withLock({ $0.admit(now: .now) }) else { return }
         let note = suppressed > 0 ? " (\(suppressed) more lines about unauthenticated connections not logged)" : ""
         log.log(message + note)
+    }
+}
+
+/// The tokens hellos may carry, as the files held them at one check: the server's, and each
+/// device's under its name.
+public struct AcceptedTokens: Sendable {
+    /// Each token with its device; nil for the server token.
+    var entries: [(device: String?, token: LatchRemoteToken)] = []
+    /// False when a file could not be read for a reason that says nothing about it, so a token
+    /// missing from `entries` may still be valid.
+    var settled = true
+
+    /// The entry whose token the hello carried, compared in constant time.
+    func entry(matching presented: String) -> (device: String?, token: LatchRemoteToken)? {
+        entries.first { $0.token.matches(presented) }
+    }
+
+    func contains(_ token: LatchRemoteToken) -> Bool {
+        entries.contains { $0.token == token }
     }
 }
 

@@ -25,7 +25,7 @@ Latch runs Codex, Claude Code, OpenCode, fx, or any other [Agent Client Protocol
 
 ## What does not exist yet
 
-Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and your phone follows it. The iOS app exists, but only as a client of `latch-server`: it cannot reach agents the Mac runs itself. There is no App Store or TestFlight build, and no push notifications, so a request that arrives while the app is suspended waits until you open it. Pairing hands over the server's token, one for every device, not a per-device key, and Tailscale, a TLS proxy such as a Cloudflare Tunnel, or an SSH tunnel for the Mac, provides the encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
+Latch's goal is a control surface that follows you: the agent keeps running where the code lives, and your phone follows it. The iOS app exists, but only as a client of `latch-server`: it cannot reach agents the Mac runs itself. There is no App Store or TestFlight build, and no push notifications, so a request that arrives while the app is suspended waits until you open it. Pairing hands over a bearer token, not a device key: the server's, or with `latch-server pair --device` one of the device's own that can be revoked alone. Tailscale, a TLS proxy such as a Cloudflare Tunnel, or an SSH tunnel for the Mac, provides the encryption. The [roadmap](docs/roadmap.md) describes the design and its milestones.
 
 Other known gaps:
 

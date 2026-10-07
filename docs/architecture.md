@@ -86,7 +86,7 @@ It was moved out of the Mac app so that the iPhone runs remote sessions with the
 `latch-server` hosts the same `LatchAgentService` as the XPC service, behind a network layer instead of XPC. The XPC protocol, its version, and the runtime registry's semantics are unchanged. Everything a network needs on top of them lives in two places: replay, turns and idempotency in the server's hub, and reconnecting in the client library.
 
 - `LatchRemoteProtocol` (in `LatchServiceProtocol`; macOS, iOS and Linux) defines the wire: frames, commands, responses, events, tokens, pairing strings, and the loopback and tailnet address checks the server and client share.
-- `LatchAgentServer` (in `LatchAgentCore`; macOS and Linux) holds the replay hub, the socket layer, the token file and the listen policy. The `latch-server` executable is only signal setup around it.
+- `LatchAgentServer` (in `LatchAgentCore`; macOS and Linux) holds the replay hub, the socket layer, the token files and the listen policy. The `latch-server` executable is only signal setup around it.
 - `LatchRemoteClient` (in `LatchServiceProtocol`; macOS and iOS, compiled out on Linux) is the Network.framework client.
 
 ### Replay hub
@@ -116,7 +116,7 @@ It was moved out of the Mac app so that the iPhone runs remote sessions with the
 - **The writer** is the only thread that writes after the welcome. It writes replies and pongs first, activating an attachment right after its `attached` reply; then a batch of events, round-robin across attached runtimes; then sleeps until the hub or a reply wakes it. A client that lets 4,096 replies pile up unread is dropped.
 - **Teardown** shuts the socket down, which wakes both threads, and closes the descriptor only after both have left it, so no thread can block on a reused descriptor number.
 - **Heartbeats.** The client pings when it has sent nothing for 15 seconds; each side closes after three heartbeats of receiving nothing.
-- **The token** is re-read on every hello, every 15 seconds and on SIGHUP. Connections that authenticated with a replaced token are closed, and an unreadable file refuses every hello rather than falling back to a remembered token.
+- **The tokens**, the server's and each device's in `devices/`, are re-read on every hello, every 15 seconds and on SIGHUP. Connections that authenticated with a token that was replaced or revoked are closed, and an unreadable file refuses every hello that would use it rather than falling back to a remembered token. A device presents its token in the hello as it would the server's, so the protocol and the apps do not tell them apart.
 - **Signals.** `main` blocks SIGTERM, SIGINT and SIGHUP before any thread exists, and a `sigwait` thread handles them. SIGPIPE gets a handler that does nothing rather than `SIG_IGN`, which agents would inherit; sends use `MSG_NOSIGNAL`.
 
 ### Wire protocol

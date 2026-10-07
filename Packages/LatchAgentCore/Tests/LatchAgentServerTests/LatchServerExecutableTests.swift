@@ -107,6 +107,33 @@ final class LatchServerExecutableTests: XCTestCase {
         }
     }
 
+    func testPairingListingAndRevokingDevices() throws {
+        let config = root.appendingPathComponent("config").path
+        let none = try run(["devices", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(none.status, 0, none.error)
+        XCTAssertEqual(none.output, "")
+
+        let shared = try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--config-dir", config] + rootArguments).output)
+        let phone = try run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(phone.status, 0, phone.error)
+        let phonePairing = try LatchRemotePairing(parsing: phone.output)
+        XCTAssertNotEqual(phonePairing.token, shared.token)
+        XCTAssertEqual(try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments).output).token,
+                       phonePairing.token)
+        XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tablet", "--config-dir", config] + rootArguments).status, 0)
+        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output, "phone\ntablet\n")
+
+        let revoked = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(revoked.status, 0, revoked.error)
+        XCTAssertTrue(revoked.error.contains("revoked phone"), revoked.error)
+        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output, "tablet\n")
+        let again = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(again.status, 1)
+        XCTAssertTrue(again.error.contains("no device is named phone"), again.error)
+        // The server's own token is untouched.
+        XCTAssertEqual(try ServerTokenFile(directory: config).read(), shared.token)
+    }
+
     func testConcurrentFirstRunsPrintOneToken() throws {
         let config = root.appendingPathComponent("config").path
         var runs: [(Process, Pipe)] = []
@@ -185,6 +212,33 @@ final class LatchServerExecutableTests: XCTestCase {
         let log = try await server.finishedLog()
         XCTAssertTrue(log.contains("SIGHUP: checking the token file"), log)
         XCTAssertTrue(log.contains("closed: the server token changed"), log)
+    }
+
+    func testSIGHUPDropsConnectionsOfARevokedDevice() async throws {
+        let config = root.appendingPathComponent("config").path
+        XCTAssertEqual(try run(["token", "--config-dir", config] + rootArguments).status, 0)
+        let token = try LatchRemotePairing(parsing: run(["pair", "--host", "127.0.0.1", "--device", "phone", "--config-dir", config] + rootArguments).output).token
+        let server = try await ServerProcess.start(binary(), config: config, extra: rootArguments)
+        defer { server.kill() }
+        let phone = try TestSocketClient(port: server.port)
+        phone.hello(token: token.rawValue)
+        guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+        let shared = try await server.authenticated()
+
+        XCTAssertEqual(try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments).status, 0)
+        XCTAssertEqual(kill(server.process.processIdentifier, SIGHUP), 0)
+        try await phone.expectClosed(timeout: .seconds(3))
+        shared.send(.ping)
+        let pong = try await shared.readFrame()
+        XCTAssertEqual(pong, .pong)
+        XCTAssertEqual(kill(server.process.processIdentifier, SIGTERM), 0)
+        let status = await server.exitStatus()
+        XCTAssertEqual(status, 0)
+        let log = try await server.finishedLog()
+        XCTAssertTrue(log.contains("device tokens: phone\n"), log)
+        XCTAssertTrue(log.contains("authenticated as device phone"), log)
+        XCTAssertTrue(log.contains("closed: device phone's token is no longer valid"), log)
+        XCTAssertFalse(log.contains(token.rawValue))
     }
 
     /// Every thread of the server, whatever its C library's default stack, parses JSON nested

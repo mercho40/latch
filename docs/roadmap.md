@@ -127,7 +127,7 @@ A future relay must never receive plaintext prompts, source code, tool output, o
 
 ## Security model
 
-This is the model for the paired, multi-device product. What the shipped apps and `latch-server` enforce today is in [SECURITY.md](../.github/SECURITY.md); `latch-server` has one token per server rather than per device, and no revocation short of rotating it.
+This is the model for the paired, multi-device product. What the shipped apps and `latch-server` enforce today is in [SECURITY.md](../.github/SECURITY.md); `latch-server` has bearer tokens rather than device keys: the server's, and optionally one per device, which can be revoked alone.
 
 - The coding agent and repository remain on the Mac.
 - The iOS app receives only data intentionally forwarded by the Latch Agent.
@@ -172,8 +172,9 @@ Done: AppKit shell and session UI, workspace management, local IPC through an em
 - [x] Linux package tests and static builds in CI; an iOS build check of the protocol and client
 - [x] Runtimes listed with a title and the agent they run, and a load's history kept in the journal, so another device can name a runtime and take it up with its conversation
 - [x] `latch-server pair --qr`, a terminal QR code of the pairing string
+- [x] A token per device (`pair --device`), listed and revoked alone (`devices --revoke`), with no change to the apps
 
-Not built: device keys and TLS; per-device tokens and revoking one device; a folder browser for the server; file and folder attachments to remote agents (images work); runtimes that survive a server restart; listing and taking up another device's runtimes in the Mac app.
+Not built: device keys and TLS; a folder browser for the server; file and folder attachments to remote agents (images work); runtimes that survive a server restart; listing and taking up another device's runtimes in the Mac app.
 
 ### M2 — paired iPhone client (in progress)
 

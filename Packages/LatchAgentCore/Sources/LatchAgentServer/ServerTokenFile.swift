@@ -19,18 +19,29 @@ public enum ServerTokenError: Error, Equatable, Sendable, CustomStringConvertibl
     case insecurePermissions(String)
     case malformed(String)
     case system(String, call: String, code: Int32)
+    case invalidDeviceName(String)
 
     public var description: String {
         switch self {
-        case let .missing(path): "\(path) does not exist; run `latch-server token` to create it"
+        case let .missing(path): "\(path) does not exist; " + Self.replacement(path, "run `latch-server token` to create it")
         case let .notADirectory(path): "\(path) is not a directory"
         case let .notARegularFile(path): "\(path) is not a regular file"
         case let .symbolicLink(path): "\(path) is a symbolic link; refusing to follow it"
         case let .wrongOwner(path): "\(path) is not owned by this user"
         case let .insecurePermissions(path): "\(path) is accessible to other users; run chmod go= on it"
-        case let .malformed(path): "\(path) does not hold a Latch token; run `latch-server token --rotate`"
+        case let .malformed(path): "\(path) does not hold a Latch token; " + Self.replacement(path, "run `latch-server token --rotate`")
         case let .system(path, call, code): "\(path): \(call): \(String(cString: strerror(code)))"
+        case let .invalidDeviceName(name): "\(name) is not a device name: use 1 to 64 letters, digits, '.', '_' and '-', not starting with '.'"
         }
+    }
+
+    /// How to get a new token for the file at `path`: a device's is replaced by revoking it
+    /// and pairing it again, the server's as `serverAdvice` says.
+    private static func replacement(_ path: String, _ serverAdvice: String) -> String {
+        let directory = (path as NSString).deletingLastPathComponent
+        guard (directory as NSString).lastPathComponent == ServerDeviceTokens.directoryName else { return serverAdvice }
+        let name = (path as NSString).lastPathComponent
+        return "run `latch-server devices --revoke \(name)`, then pair the device again"
     }
 }
 
@@ -51,8 +62,17 @@ public enum ServerConfigDirectory {
     /// 0700 too; only the last component is checked.
     public static func prepare(_ path: String, owner: uid_t = geteuid()) throws(ServerTokenError) {
         try makeDirectory(path)
+        try check(path, owner: owner)
+    }
+
+    /// Refuses the directory unless it is a real directory owned by `owner` with no group or
+    /// other bits; creates nothing.
+    public static func check(_ path: String, owner: uid_t = geteuid()) throws(ServerTokenError) {
         var status = stat()
-        guard lstat(path, &status) == 0 else { throw .system(path, call: "lstat", code: errno) }
+        guard lstat(path, &status) == 0 else {
+            if errno == ENOENT { throw .missing(path) }
+            throw .system(path, call: "lstat", code: errno)
+        }
         if status.st_mode & S_IFMT == S_IFLNK { throw .symbolicLink(path) }
         guard status.st_mode & S_IFMT == S_IFDIR else { throw .notADirectory(path) }
         guard status.st_uid == owner else { throw .wrongOwner(path) }
@@ -69,16 +89,18 @@ public enum ServerConfigDirectory {
     }
 }
 
-/// `server-token` in the config directory. Every read opens the file afresh without following
-/// a symbolic link and checks its owner and mode, so a missing or loosened file fails every
-/// hello rather than falling back to a token read earlier. The contents are cached only
+/// `server-token` in the config directory, or a device's token in `devices`
+/// (`ServerDeviceTokens`). Every read opens the file afresh without following a symbolic link
+/// and checks its owner and mode, so a missing or loosened file fails every hello that would
+/// use it rather than falling back to a token read earlier. The contents are cached only
 /// while the file's identity (inode, modification time, size) is unchanged.
 public final class ServerTokenFile: Sendable {
     public static let fileName = "server-token"
 
     public let directory: String
     public let path: String
-    private let owner: uid_t
+    private let name: String
+    let owner: uid_t
     private let cache = Mutex<Cached?>(nil)
 
     private struct Cached {
@@ -108,9 +130,10 @@ public final class ServerTokenFile: Sendable {
     }
 
     /// `owner` is the user the file must belong to; tests pass another to see it refused.
-    public init(directory: String, owner: uid_t = geteuid()) {
+    public init(directory: String, name: String = ServerTokenFile.fileName, owner: uid_t = geteuid()) {
         self.directory = directory
-        path = (directory as NSString).appendingPathComponent(Self.fileName)
+        self.name = name
+        path = (directory as NSString).appendingPathComponent(name)
         self.owner = owner
     }
 
@@ -193,7 +216,7 @@ public final class ServerTokenFile: Sendable {
     private func writeTemporary(_ token: LatchRemoteToken) throws(ServerTokenError) -> String {
         let bytes = Array((token.rawValue + "\n").utf8)
         for _ in 0..<8 {
-            let temporary = (directory as NSString).appendingPathComponent(".\(Self.fileName).\(UInt64.random(in: .min ... .max))")
+            let temporary = (directory as NSString).appendingPathComponent(".\(name).\(UInt64.random(in: .min ... .max))")
             let descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
             if descriptor < 0 {
                 if errno == EEXIST { continue }

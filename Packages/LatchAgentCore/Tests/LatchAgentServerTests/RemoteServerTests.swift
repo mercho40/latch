@@ -445,6 +445,77 @@ final class RemoteServerTests: XCTestCase {
         }
     }
 
+    func testADeviceTokenAuthenticatesAndRevokingItDropsOnlyThatDevice() async throws {
+        try await withServer { testbed in
+            let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)
+            let phoneToken = try devices.readOrCreate("phone")
+            let tabletToken = try devices.readOrCreate("tablet")
+            let server = try await testbed.authenticated()
+            let phone = try testbed.connect()
+            phone.hello(token: phoneToken.rawValue)
+            guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+            let tablet = try testbed.connect()
+            tablet.hello(token: tabletToken.rawValue)
+            guard case .welcome = try await tablet.readFrame() else { return XCTFail("expected a welcome") }
+            try await testbed.waitForLog("authenticated as device phone")
+
+            XCTAssertTrue(try devices.revoke("phone"))
+            // What SIGHUP does.
+            testbed.server.checkToken()
+            try await phone.expectClosed()
+            try await testbed.waitForLog("closed: device phone's token is no longer valid")
+            for client in [server, tablet] {
+                client.send(.ping)
+                let pong = try await client.readFrame()
+                XCTAssertEqual(pong, .pong)
+            }
+
+            let revoked = try testbed.connect()
+            revoked.hello(token: phoneToken.rawValue)
+            guard case let .rejected(rejected) = try await revoked.readFrame() else { return XCTFail("expected a rejection") }
+            XCTAssertEqual(rejected.reason, .unauthorized)
+        }
+    }
+
+    func testRotatingTheServerTokenLeavesDevicesConnected() async throws {
+        try await withServer { testbed in
+            let phoneToken = try ServerDeviceTokens(configDirectory: testbed.configDirectory).readOrCreate("phone")
+            let server = try await testbed.authenticated()
+            let phone = try testbed.connect()
+            phone.hello(token: phoneToken.rawValue)
+            guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+
+            try testbed.tokens.rotate()
+            testbed.server.checkToken()
+            try await server.expectClosed()
+            phone.send(.ping)
+            let pong = try await phone.readFrame()
+            XCTAssertEqual(pong, .pong)
+        }
+    }
+
+    func testAnUnusableDeviceTokenIsRefusedAndDropsItsConnections() async throws {
+        try await withServer { testbed in
+            let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)
+            let phoneToken = try devices.readOrCreate("phone")
+            let phone = try testbed.connect()
+            phone.hello(token: phoneToken.rawValue)
+            guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
+            let server = try await testbed.authenticated()
+
+            XCTAssertEqual(chmod(devices.directory + "/phone", 0o644), 0)
+            let loose = try testbed.connect()
+            loose.hello(token: phoneToken.rawValue)
+            guard case let .rejected(rejected) = try await loose.readFrame() else { return XCTFail("expected a rejection") }
+            XCTAssertEqual(rejected.reason, .unauthorized)
+            // The check at that hello dropped the phone, and only the phone.
+            try await phone.expectClosed()
+            server.send(.ping)
+            let pong = try await server.readFrame()
+            XCTAssertEqual(pong, .pong)
+        }
+    }
+
     func testThePeriodicCheckNoticesARotation() async throws {
         try await withServer({ $0.tokenCheckInterval = .milliseconds(100) }) { testbed in
             let client = try await testbed.authenticated()

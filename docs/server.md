@@ -2,7 +2,7 @@
 
 `latch-server` runs ACP agents on another machine, usually a Linux VPS, and lets Latch on your Mac, iPhone or iPad drive them over the network. Agents keep running when the Mac sleeps or changes network, and when Latch quits; Latch reconnects, or attaches again when it next opens, and catches up on what it missed. It also runs on macOS, which lets a phone follow agents on the Mac itself; [On a Mac](#on-a-mac) covers that. The rest of this guide covers Linux with systemd.
 
-Holding the server's token is the same as having a shell on the server as the user it runs as: a client can start any command there as a custom agent. Latch does not encrypt the connection itself. Encryption comes from the path: a Tailscale (WireGuard) tailnet, an SSH tunnel, or a TLS proxy such as a Cloudflare Tunnel, which the apps reach over a WebSocket. The server listens only on loopback unless told otherwise, accepts a tailnet address only if Tailscale carries it when the server starts, and refuses any other address without `--allow-unencrypted-network`. See [SECURITY.md](../.github/SECURITY.md) for the boundaries it maintains.
+Holding the server's token, or a device's, is the same as having a shell on the server as the user it runs as: a client can start any command there as a custom agent. Latch does not encrypt the connection itself. Encryption comes from the path: a Tailscale (WireGuard) tailnet, an SSH tunnel, or a TLS proxy such as a Cloudflare Tunnel, which the apps reach over a WebSocket. The server listens only on loopback unless told otherwise, accepts a tailnet address only if Tailscale carries it when the server starts, and refuses any other address without `--allow-unencrypted-network`. See [SECURITY.md](../.github/SECURITY.md) for the boundaries it maintains.
 
 ## Requirements
 
@@ -75,6 +75,22 @@ latch-server pair --host vps.example.ts.net
 prints a `latch://vps.example.ts.net:7428?token=…` string to paste into Latch. `--host` is the name or address your Mac or phone will connect to; add `--port` if the server does not listen on 7428, and `--wss` for a server behind a TLS proxy such as a [Cloudflare Tunnel](#reach-it-through-a-cloudflare-tunnel). The string contains the token. Treat it like the token: paste it straight into Latch, and do not send it through chat, mail or notes.
 
 Add `--qr` to print, below the string, a QR code of it for the iPhone: Latch's Scan Pairing Code reads it, and so does the Camera, which opens it in Latch. The code holds the string exactly, token included, so the same care applies: scan it from your own screen, and do not photograph it, screenshot it or leave it in a shared terminal's scrollback. It is drawn with half-block characters, the light modules and the margin around the code in white on black, whatever the terminal's theme; with `NO_COLOR` set, or written anywhere but a terminal, it has no colours of its own and suits a dark theme. It is at most 65 columns wide. Some terminals draw the blocks from the font and leave a thin gap between lines; drawn this way round the gaps fall across light modules, where the Camera still reads the code, so keep the terminal's line spacing at its default. If the Camera does not read it, add `--invert`, which draws the dark modules instead, in black on white. A host name longer than about 140 characters does not fit in a code.
+
+### A token for each device
+
+```sh
+latch-server pair --host vps.example.ts.net --device phone --qr
+```
+
+gives the string a token of its own for the device named `phone`, created on first use in `devices/phone` beside `server-token`, with the same modes and checks; running it again prints the same string. A device name is 1 to 64 letters, digits, `.`, `_` and `-`, not starting with `.`. Latch treats the string like any other, so nothing changes in the app, and `--device` goes with `--wss` as with a direct connection. Pair each Mac, iPhone and iPad this way, and losing one costs only its token:
+
+```sh
+latch-server devices
+latch-server devices --revoke phone
+systemctl --user reload latch-server
+```
+
+`devices` lists the names, and marks any the server refuses, such as one whose file has been loosened; a loosened `devices` directory refuses them all. `--revoke` deletes that device's token: the running server closes its connections within 15 seconds, or at once on the reload, which sends SIGHUP, and every other device stays connected. Pair it again for a new token. The server token keeps working beside device tokens; once every device has its own, rotate it so that an old shared string stops working.
 
 `latch-server` refuses to run as root, because its agents would run as root too; `--allow-root` overrides that. Create an ordinary user for it instead, and do everything in this guide logged in as that user over SSH, not through `su` or `sudo -u`: those do not start the user's systemd instance, and `systemctl --user` then fails with "Failed to connect to bus".
 
@@ -184,9 +200,9 @@ latch-server token --rotate
 systemctl --user reload latch-server
 ```
 
-`--rotate` writes a new token. The running server closes every connection that used the old one within 15 seconds, or at once on the reload, which sends SIGHUP. A client that tries the old token again is refused and stops retrying.
+`--rotate` writes a new token. The running server closes every connection that used the old one within 15 seconds, or at once on the reload, which sends SIGHUP. A client that tries the old token again is refused and stops retrying. Devices paired with a token of their own stay connected.
 
-Rotate it if the token or a pairing string may have leaked. Then, in Latch, choose the server in Settings → Servers, click Edit… or double-click it, and paste the new pairing string. On an iPhone or iPad, run `latch-server pair --host … --qr`, then in the server's editor tap Scan Code, scan it and Save. Its sessions stay on it: those the server refused attach again to the agents still running there, where they left off. Do not remove the server and add it again, which leaves its sessions on a removed server.
+Rotate it if the server token or a pairing string that carries it may have leaked; for a device's own string, revoke that device instead. Then, in Latch, choose the server in Settings → Servers, click Edit… or double-click it, and paste the new pairing string. On an iPhone or iPad, run `latch-server pair --host … --qr`, then in the server's editor tap Scan Code, scan it and Save. Its sessions stay on it: those the server refused attach again to the agents still running there, where they left off. Do not remove the server and add it again, which leaves its sessions on a removed server.
 
 ## Logs
 
@@ -196,7 +212,7 @@ journalctl --user -u latch-server -f
 
 If that shows nothing, the journal may be volatile, as on Debian without `/var/log/journal`: create that directory to keep logs, or read them as root with `journalctl _SYSTEMD_USER_UNIT=latch-server.service`. `systemctl --user status latch-server` shows the last lines either way.
 
-The server logs where it listens, each connection from its peer address, and each agent launched, stopped or exited, and why an agent failed to launch. It never logs the token. Lines that a peer without the token can cause are limited to 30 a minute. Agents' stderr is logged only with `--log-agent-stderr`, one escaped line at a time, each prefixed with its runtime ID, cut at 1,000 characters and at most 100 lines per agent every ten seconds.
+The server logs where it listens, each connection from its peer address and, for a device token, the device's name, and each agent launched, stopped or exited, and why an agent failed to launch. It never logs the token. Lines that a peer without the token can cause are limited to 30 a minute. Agents' stderr is logged only with `--log-agent-stderr`, one escaped line at a time, each prefixed with its runtime ID, cut at 1,000 characters and at most 100 lines per agent every ten seconds.
 
 When Latch says only "Agent command failed." for Claude Code or Codex, the log has a `failed to launch` line with the command that was run. The usual cause is a Node.js older than 22 found first on the server's `PATH` (see Requirements); run the server with `--log-agent-stderr` to see what the agent printed before it exited.
 
@@ -242,7 +258,7 @@ On macOS the server accepts a tailnet address on a `utun` interface, which is wh
 
 ## Caveats
 
-- **One user per server.** Everyone who holds the token acts as the same user, with the same agents and logins. There are no per-device tokens: rotating the token disconnects every device.
+- **One user per server.** Everyone who holds a token, the server's or a device's, acts as the same user, with the same agents and logins. A device token can be revoked alone, but it is still a bearer token, not a key the device proves it holds: whoever copies it is that device until it is revoked.
 - **Not a sandbox.** Agents run with the server user's full permissions. Approval sheets relay what an agent asks; they do not confine it.
 - **Other users on the same machine.** While `latch-server` is down, another local user could listen on its port, loopback included, and read the token from the next client that connects. Latch connects to `localhost` at `127.0.0.1` only, where the server listens, never at `::1`. An SSH tunnel does not prevent this, since it connects to that port too. With an SSH tunnel the same applies on the Mac: while the tunnel is down, another user of the Mac could listen on its forwarded port. Prefer machines whose only user is you.
 - **Connections without the token.** Anyone who can reach the port can open connections that never send a hello. The server holds at most eight such connections per address and 64 in all, and a new one closes the oldest rather than being turned away, so idle sockets cannot keep Latch out; a peer that opens connections faster than Latch completes its handshake can still delay it. Through a proxy on the server, the address is the client's from `X-Forwarded-For`.

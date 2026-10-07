@@ -34,7 +34,7 @@ final class RemoteServerConnection: Sendable {
         /// Set by the reader before the welcome, and never changed after.
         var webSocket = false
         var hubConnection: RemoteConnectionID?
-        var token: LatchRemoteToken?
+        var credential: (device: String?, token: LatchRemoteToken)?
         var outbox: [Outgoing] = []
         var outstanding = 0
         var wakePending = false
@@ -78,9 +78,10 @@ final class RemoteServerConnection: Sendable {
         state.withLock { $0.peer }
     }
 
-    /// The token this connection authenticated with; nil before then.
-    var authenticatedToken: LatchRemoteToken? {
-        state.withLock { $0.token }
+    /// The token this connection authenticated with, and the device it belongs to, nil for
+    /// the server token; nil before then.
+    var authenticatedCredential: (device: String?, token: LatchRemoteToken)? {
+        state.withLock { $0.credential }
     }
 
     /// Shuts the socket down, which ends both threads; the first reason is the one logged.
@@ -120,7 +121,7 @@ final class RemoteServerConnection: Sendable {
     }
 
     func handshakeDeadlinePassed() {
-        guard state.withLock({ $0.token == nil }) else { return }
+        guard state.withLock({ $0.credential == nil }) else { return }
         close("no valid hello within \(server.configuration.handshakeTimeout)")
     }
 
@@ -292,7 +293,7 @@ final class RemoteServerConnection: Sendable {
             close("sent no valid hello")
             return false
         }
-        guard let token = server.checkToken(), token.matches(hello.token) else {
+        guard let credential = server.checkToken().entry(matching: hello.token) else {
             server.authenticationFailed(self, reason: "wrong token")
             reject(LatchRemoteRejected(reason: .unauthorized, message: "The token is not valid for this server."))
             return false
@@ -317,7 +318,7 @@ final class RemoteServerConnection: Sendable {
         // From here the handshake deadline no longer applies.
         let proceed = state.withLock { state in
             guard !state.closing else { return false }
-            state.token = token
+            state.credential = credential
             return true
         }
         guard proceed, server.authenticated(self) else {
@@ -325,9 +326,10 @@ final class RemoteServerConnection: Sendable {
             return false
         }
         // A check that ran between reading the token and recording it skipped this
-        // connection; read it again so a rotation and SIGHUP in that window still count.
-        guard server.tokens.current() == token else {
-            close("the server token changed")
+        // connection; read it again so a rotation or revocation and SIGHUP in that window
+        // still count.
+        guard server.acceptedTokens().contains(credential.token) else {
+            close(credential.device.map { "device \($0)'s token is no longer valid" } ?? "the server token changed")
             return false
         }
         guard let line = try? LatchRemoteCoding.encodeLine(welcome), send(line) else {
@@ -346,7 +348,7 @@ final class RemoteServerConnection: Sendable {
             return false
         }
         ServerSocket.setReceiveTimeout(descriptor, configuration.silenceTimeout)
-        server.log.log("connection \(serial) from \(peer) authenticated")
+        server.log.log("connection \(serial) from \(peer) authenticated" + (credential.device.map { " as device \($0)" } ?? ""))
         server.spawn("latch.server.write") { self.runWriter(hubConnection) }
         return true
     }

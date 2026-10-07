@@ -50,6 +50,12 @@ final class ServerCommandLineTests: XCTestCase {
                        .pair(ConfigOptions(), host: "latch.example.com", port: 443, transport: .webSocket))
         XCTAssertEqual(try parse("pair", "--wss", "--port", "8443", "--host", "latch.example.com", "--qr"),
                        .pair(ConfigOptions(), host: "latch.example.com", port: 8443, transport: .webSocket, qr: .lightModulesDrawn))
+        XCTAssertEqual(try parse("pair", "--host", "vps", "--device", "phone", "--qr"),
+                       .pair(ConfigOptions(), host: "vps", port: 7428, qr: .lightModulesDrawn, device: "phone"))
+        XCTAssertEqual(try parse("pair", "--host", "latch.example.com", "--wss", "--device", "phone"),
+                       .pair(ConfigOptions(), host: "latch.example.com", port: 443, transport: .webSocket, device: "phone"))
+        XCTAssertEqual(try parse("devices"), .devices(ConfigOptions(), revoke: nil))
+        XCTAssertEqual(try parse("devices", "--revoke=phone", "--config-dir", "/c"), .devices(ConfigOptions(configDirectory: "/c"), revoke: "phone"))
         XCTAssertEqual(try parse("--version"), .version)
         XCTAssertEqual(try parse("--help"), .help)
         XCTAssertEqual(try parse("token", "-h"), .help)
@@ -75,6 +81,14 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["--allow-root=yes"], "takes no value")
         assertRejected(["--version", "--allow-root"], "--version")
         assertRejected(["--config-dir="], "needs a path")
+        assertRejected(["pair", "--host", "h", "--device", "../server-token"], "--device ../server-token")
+        assertRejected(["pair", "--host", "h", "--device", ".phone"], "--device .phone")
+        assertRejected(["pair", "--host", "h", "--device"], "needs a value")
+        assertRejected(["devices", "--revoke", "my phone"], "--revoke my phone")
+        assertRejected(["token", "--device", "phone"], "does not apply")
+        assertRejected(["devices", "--device", "phone"], "does not apply")
+        assertRejected(["pair", "--host", "h", "--revoke", "phone"], "does not apply")
+        assertRejected(["devices", "--revoke", "a", "--revoke", "b"], "twice")
     }
 
     func testDurations() {

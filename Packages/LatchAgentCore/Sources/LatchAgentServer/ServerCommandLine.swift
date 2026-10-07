@@ -84,7 +84,7 @@ public enum ServerCommandLine {
            latch-server install-service [options] [--replace]
                                               run latch-server with those options as a
                                               systemd user service, now and at boot
-           latch-server uninstall-service    stop that service and remove its unit
+           latch-server uninstall-service     stop that service and remove its unit
            latch-server runtimes [--listen HOST:PORT] [--stop ID]
                                               list the agents the server runs, or stop one
            latch-server --version | --help

@@ -174,7 +174,8 @@ final class LatchServerExecutableTests: XCTestCase {
         defer { server.kill() }
         let token = try ServerTokenFile(directory: server.config).read()
         XCTAssertFalse(server.stderr.text.contains(token.rawValue))
-        XCTAssertTrue(server.stderr.text.contains("no device has connected yet: pair one with `latch-server pair"), server.stderr.text)
+        // Logged once the server listens, after the line `start` waits for.
+        _ = try await server.stderr.wait("the pairing hint") { $0.contains("no device has connected yet: pair one with `latch-server pair") ? true : nil }
 
         let client = try await server.authenticated()
         let id = AgentRuntimeID("pid")

@@ -166,9 +166,7 @@ public enum LatchServerMain {
         for case let (name, .failure(error)) in devices {
             log.log("warning: device \(name) is refused: \(error)")
         }
-        if devices.isEmpty, ServerTokenUse.read(configDirectory: tokens.directory)?.server == nil {
-            log.log("no device has connected yet: pair one with `latch-server pair --host NAME --device DEVICE --qr`, and check the setup with `latch-server doctor`")
-        }
+        let neverUsed = devices.isEmpty && ServerTokenUse.read(configDirectory: tokens.directory)?.server == nil
 
         let controller = ServeController(log: log)
         startSignalThread(controller)
@@ -224,6 +222,9 @@ public enum LatchServerMain {
         server.start(listeners)
         for listener in listeners {
             log.log("listening on \(listener.address)")
+        }
+        if neverUsed {
+            log.log("no device has connected yet: pair one with `latch-server pair --host NAME --device DEVICE --qr`, and check the setup with `latch-server doctor`")
         }
         controller.waitUntilStopped()
         log.log("stopped")
@@ -505,6 +506,8 @@ public enum ServerListenBinder {
                     bound[index] = try ServerListener.bind(address)
                 } catch where error.code == EADDRNOTAVAIL && LatchRemoteAddressPolicy.classify(address.bytes) == .tailnet {
                     waiting.append("\(address) is not available yet")
+                } catch where error.code == EADDRINUSE {
+                    return fail("cannot listen on \(address): another server already listens there, such as the latch-server service; `latch-server doctor` says which")
                 } catch {
                     return fail("cannot listen on \(address): \(error)")
                 }

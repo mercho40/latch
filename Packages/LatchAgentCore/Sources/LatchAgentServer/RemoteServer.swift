@@ -75,6 +75,8 @@ public final class RemoteServer: Sendable {
     let tokens: ServerTokenFile
     /// In `devices` beside `tokens`.
     let devices: ServerDeviceTokens
+    /// When each token last authenticated, for `latch-server devices`.
+    let tokenUse: ServerTokenUse
     let configuration: RemoteServerConfiguration
     let log: ServerLog
     private let state = Mutex(State())
@@ -121,6 +123,7 @@ public final class RemoteServer: Sendable {
         self.hub = hub
         self.tokens = tokens
         devices = ServerDeviceTokens(configDirectory: tokens.directory, owner: tokens.owner)
+        tokenUse = ServerTokenUse(configDirectory: tokens.directory)
         self.configuration = configuration
         self.log = log
         guard let stopPipe = ServerSocket.makePipe() else { fatalError("pipe: \(String(cString: strerror(errno)))") }
@@ -196,6 +199,7 @@ public final class RemoteServer: Sendable {
     public func checkToken() -> AcceptedTokens {
         let accepted = acceptedTokens()
         guard accepted.settled else { return accepted }
+        tokenUse.forget(allBut: Set(accepted.entries.compactMap(\.device)))
         let connections = state.withLock { Array($0.connections.values) }
         for connection in connections {
             guard let credential = connection.authenticatedCredential, !accepted.contains(credential.token) else { continue }

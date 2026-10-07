@@ -459,11 +459,18 @@ final class RemoteServerTests: XCTestCase {
             guard case .welcome = try await tablet.readFrame() else { return XCTFail("expected a welcome") }
             try await testbed.waitForLog("authenticated as device phone")
 
+            let use = try XCTUnwrap(ServerTokenUse.read(configDirectory: testbed.configDirectory))
+            XCTAssertEqual(use.devices.keys.sorted(), ["phone", "tablet"])
+            XCTAssertEqual(use.devices["phone"]?.from, "127.0.0.1")
+            XCTAssertEqual(use.server?.from, "127.0.0.1")
+
             XCTAssertTrue(try devices.revoke("phone"))
             // What SIGHUP does.
             testbed.server.checkToken()
             try await phone.expectClosed()
             try await testbed.waitForLog("closed: device phone's token is no longer valid")
+            // A revoked device's use is forgotten.
+            XCTAssertEqual(ServerTokenUse.read(configDirectory: testbed.configDirectory)?.devices.keys.sorted(), ["tablet"])
             for client in [server, tablet] {
                 client.send(.ping)
                 let pong = try await client.readFrame()

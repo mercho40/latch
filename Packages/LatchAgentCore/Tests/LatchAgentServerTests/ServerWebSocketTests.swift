@@ -283,6 +283,8 @@ final class ServerWebSocketTests: XCTestCase {
             guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
             try await testbed.waitForLog("from 203.0.113.9 via 127.0.0.1:")
             try await testbed.waitForLog("authenticated as device phone")
+            // The client the proxy named, not the proxy.
+            XCTAssertEqual(ServerTokenUse.read(configDirectory: testbed.configDirectory)?.devices["phone"]?.from, "203.0.113.9")
 
             XCTAssertTrue(try devices.revoke("phone"))
             testbed.server.checkToken()

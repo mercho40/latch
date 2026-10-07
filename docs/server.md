@@ -90,7 +90,7 @@ latch-server devices --revoke phone
 systemctl --user reload latch-server
 ```
 
-`devices` lists the names, and marks any the server refuses, such as one whose file has been loosened; a loosened `devices` directory refuses them all. `--revoke` deletes that device's token: the running server closes its connections within 15 seconds, or at once on the reload, which sends SIGHUP, and every other device stays connected. Pair it again for a new token. The server token keeps working beside device tokens; once every device has its own, rotate it so that an old shared string stops working.
+`devices` lists each device with when its token last connected and from which address, and marks any the server refuses, such as one whose file has been loosened; a loosened `devices` directory refuses them all. It also says when the server token was last used, so you can tell whether anything still depends on it before you rotate it. `--revoke` deletes that device's token: the running server closes its connections within 15 seconds, or at once on the reload, which sends SIGHUP, and every other device stays connected. Pair it again for a new token. The server token keeps working beside device tokens; once every device has its own, rotate it so that an old shared string stops working.
 
 `latch-server` refuses to run as root, because its agents would run as root too; `--allow-root` overrides that. Create an ordinary user for it instead, and do everything in this guide logged in as that user over SSH, not through `su` or `sudo -u`: those do not start the user's systemd instance, and `systemctl --user` then fails with "Failed to connect to bus".
 

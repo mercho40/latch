@@ -112,6 +112,8 @@ final class LatchServerExecutableTests: XCTestCase {
         let none = try run(["devices", "--config-dir", config] + rootArguments)
         XCTAssertEqual(none.status, 0, none.error)
         XCTAssertEqual(none.output, "")
+        XCTAssertTrue(none.error.contains("no device has a token of its own"), none.error)
+        XCTAssertTrue(none.error.contains("the server token: no connection recorded"), none.error)
 
         let shared = try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--config-dir", config] + rootArguments).output)
         let phone = try run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments)
@@ -121,12 +123,13 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertEqual(try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments).output).token,
                        phonePairing.token)
         XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tablet", "--config-dir", config] + rootArguments).status, 0)
-        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output, "phone\ntablet\n")
+        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output,
+                       "phone   no connection recorded\ntablet  no connection recorded\n")
 
         let revoked = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
         XCTAssertEqual(revoked.status, 0, revoked.error)
         XCTAssertTrue(revoked.error.contains("revoked phone"), revoked.error)
-        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output, "tablet\n")
+        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output, "tablet  no connection recorded\n")
         let again = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
         XCTAssertEqual(again.status, 1)
         XCTAssertTrue(again.error.contains("no device is named phone"), again.error)
@@ -273,6 +276,9 @@ final class LatchServerExecutableTests: XCTestCase {
         phone.hello(token: token.rawValue)
         guard case .welcome = try await phone.readFrame() else { return XCTFail("expected a welcome") }
         let shared = try await server.authenticated()
+        let listed = try run(["devices", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(listed.output, "phone  last connected just now, from 127.0.0.1\n")
+        XCTAssertTrue(listed.error.contains("the server token: last connected just now, from 127.0.0.1"), listed.error)
 
         XCTAssertEqual(try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments).status, 0)
         XCTAssertEqual(kill(server.process.processIdentifier, SIGHUP), 0)

@@ -31,6 +31,8 @@ final class RemoteServerConnection: Sendable {
 
     private struct State {
         var peer: String
+        /// The client's address alone: the peer's, or the client's a proxy on this machine named.
+        var client: String
         /// Set by the reader before the welcome, and never changed after.
         var webSocket = false
         var hubConnection: RemoteConnectionID?
@@ -69,7 +71,7 @@ final class RemoteServerConnection: Sendable {
         self.descriptor = descriptor
         peerIsLoopback = peer.map { LatchRemoteAddressPolicy.classify($0.bytes) == .loopback } ?? false
         self.server = server
-        state = Mutex(State(peer: peer?.description ?? "unknown"))
+        state = Mutex(State(peer: peer?.description ?? "unknown", client: peer?.host ?? "unknown"))
     }
 
     /// The peer's address, or the client's and the proxy's once a proxy on this machine
@@ -240,7 +242,11 @@ final class RemoteServerConnection: Sendable {
         do {
             let head = try ServerWebSocket.Head(bytes)
             if peerIsLoopback, let client = head.forwardedFor {
-                state.withLock { $0.peer = "\(ServerSocketAddress(bytes: client, port: 0).host) via \($0.peer)" }
+                let host = ServerSocketAddress(bytes: client, port: 0).host
+                state.withLock { state in
+                    state.peer = "\(host) via \(state.peer)"
+                    state.client = host
+                }
                 server.forwarded(self, for: client)
             }
             upgrade = try ServerWebSocket.upgrade(fromHead: head)
@@ -332,6 +338,8 @@ final class RemoteServerConnection: Sendable {
             close(credential.device.map { "device \($0)'s token is no longer valid" } ?? "the server token changed")
             return false
         }
+        // Before the welcome, so a client that has it finds its use noted.
+        server.tokenUse.note(device: credential.device, from: state.withLock { $0.client })
         guard let line = try? LatchRemoteCoding.encodeLine(welcome), send(line) else {
             close("write failed")
             return false

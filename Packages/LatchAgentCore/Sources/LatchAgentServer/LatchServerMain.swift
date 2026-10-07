@@ -93,12 +93,25 @@ public enum LatchServerMain {
                     printError("revoked \(revoke): running servers drop its connections within \(LatchRemoteProtocol.heartbeatSeconds) seconds, or at once on SIGHUP")
                     return 0
                 }
-                for device in try devices.read() {
+                let all = try devices.read()
+                let use = ServerTokenUse.read(configDirectory: tokens.directory)
+                let now = Date()
+                func lastUse(_ use: ServerTokenUse.Use?) -> String {
+                    use.map { "last connected \(ServerTokenUse.describe($0.at, now: now)), from \($0.from)" } ?? "no connection recorded"
+                }
+                let width = all.map(\.name.count).max() ?? 0
+                for device in all {
+                    let name = device.name.padding(toLength: width, withPad: " ", startingAt: 0)
                     switch device.token {
-                    case .success: print(device.name)
-                    case let .failure(error): print("\(device.name) (refused: \(error))")
+                    case .success: print("\(name)  \(lastUse(use?.devices[device.name]))")
+                    case let .failure(error): print("\(name)  refused: \(error)")
                     }
                 }
+                if all.isEmpty {
+                    printError("no device has a token of its own; `latch-server pair --host NAME --device DEVICE` gives one")
+                }
+                // On stderr, so the rows above stay one per device.
+                printError("the server token: " + lastUse(use?.server))
                 return 0
             } catch {
                 printError("\(error)")

@@ -141,7 +141,7 @@ Some tests exist on one platform only. `LinuxChildProcessTests` cover the Linux 
 
 `LatchAgentServerTests`, in `LatchAgentCore`, cover the replay hub and its journal, the socket layer byte for byte through a plain POSIX client, the token files, the listen policy, the command line, and agent resolution. On macOS, `RemoteServerClientTests` also runs `LatchRemoteRuntimeChannel` against the real server with a shell mock agent. Their mock agents follow the single-key `case` rule in [AGENTS.md](../AGENTS.md).
 
-`LatchServerExecutableTests` runs the built `latch-server` as a process: `--version`, `token` and `pair`, pairing, listing and revoking devices, two first runs agreeing on one token, SIGTERM stopping agents and exiting cleanly, SIGHUP closing connections after a rotation and a device's after its revocation, and a deeply nested hello. It looks for the binary next to the test bundle, or at `LATCH_SERVER_BINARY`:
+`LatchServerExecutableTests` runs the built `latch-server` as a process: `--version`, `token` and `pair`, pairing, listing and revoking devices, `doctor` against a running server, two first runs agreeing on one token, SIGTERM stopping agents and exiting cleanly, SIGHUP closing connections after a rotation and a device's after its revocation, and a deeply nested hello. It looks for the binary next to the test bundle, or at `LATCH_SERVER_BINARY`:
 
 ```sh
 LATCH_SERVER_BINARY=/path/to/latch-server swift test --package-path Packages/LatchAgentCore --filter LatchServerExecutableTests

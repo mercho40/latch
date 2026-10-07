@@ -195,6 +195,28 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertFalse(log.contains(token.rawValue))
     }
 
+    func testDoctorAsksTheRunningServer() async throws {
+        let config = root.appendingPathComponent("config").path
+        let server = try await ServerProcess.start(binary(), config: config, extra: rootArguments)
+        defer { server.kill() }
+        let listen = ["--listen", "127.0.0.1:\(server.port)"]
+        let healthy = try run(["doctor", "--config-dir", config] + listen + rootArguments)
+        XCTAssertTrue(healthy.output.contains("✓ latch-server \(LatchServerVersion.current) on "), healthy.output)
+        XCTAssertTrue(healthy.output.contains(" answers at 127.0.0.1:\(server.port) and accepts the server token"), healthy.output)
+
+        let other = root.appendingPathComponent("other").path
+        XCTAssertEqual(try run(["token", "--config-dir", other] + rootArguments).status, 0)
+        let refused = try run(["doctor", "--config-dir", other] + listen + rootArguments)
+        XCTAssertEqual(refused.status, 1)
+        XCTAssertTrue(refused.output.contains("refuses the token in \(other): it reads another config directory"), refused.output)
+
+        let missing = root.appendingPathComponent("missing").path
+        let fresh = try run(["doctor", "--config-dir", missing] + listen + rootArguments)
+        XCTAssertTrue(fresh.output.contains("\(missing) does not exist yet"), fresh.output)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing), "doctor creates nothing")
+        XCTAssertEqual(try run(["doctor", "--listen", "bogus"]).status, 2)
+    }
+
     /// latch-server joins an agent's streamed chunks; the hub's own default does not.
     func testTheServerJoinsStreamedChunks() async throws {
         let workspace = root.appendingPathComponent("workspace")

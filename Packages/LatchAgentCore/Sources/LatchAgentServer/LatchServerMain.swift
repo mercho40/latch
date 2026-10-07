@@ -104,6 +104,8 @@ public enum LatchServerMain {
                 printError("\(error)")
                 return 1
             }
+        case let .doctor(options):
+            return doctor(options)
         case let .serve(options):
             return serve(options)
         }
@@ -196,6 +198,39 @@ public enum LatchServerMain {
         controller.waitUntilStopped()
         log.log("stopped")
         return 0
+    }
+
+    /// Reads, connects and runs `node --version`, but creates nothing, not even the config
+    /// directory, so it can run before anything is set up.
+    private static func doctor(_ options: ServeOptions) -> Int32 {
+        let addresses: [ServerSocketAddress]
+        do {
+            addresses = try options.listenAddresses.map { value throws(ServerListenError) in try ServerListenPolicy.parse(value) }
+        } catch {
+            printError("\(error)")
+            return 2
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let doctor = ServerDoctor(
+            configDirectory: ServerConfigDirectory.resolve(
+                explicit: options.config.configDirectory, environment: ProcessInfo.processInfo.environment, homeDirectory: home
+            ),
+            owner: geteuid(),
+            runsAsRoot: geteuid() == 0,
+            allowRoot: options.config.allowRoot,
+            listen: addresses,
+            allowUnencryptedNetwork: options.allowUnencryptedNetwork,
+            interfaces: ServerListenPolicy.systemInterfaces(),
+            environment: AgentLaunchEnvironment(),
+            homeDirectory: home,
+            nodeVersion: ServerDoctor.nodeVersion,
+            ask: ServerDoctor.ask
+        )
+        let sections = doctor.sections()
+        let info = RemoteServerConfiguration.localServerInfo(homeDirectory: home)
+        let user = getpwuid(geteuid()).map { String(cString: $0.pointee.pw_name) } ?? "uid \(geteuid())"
+        print(ServerDoctor.render(sections, header: "latch-server \(LatchServerVersion.current) on \(info.hostname), \(info.os) \(info.arch), as \(user)"))
+        return ServerDoctor.hasProblems(sections) ? 1 : 0
     }
 
     private static func tokenFile(_ config: ConfigOptions) -> ServerTokenFile? {

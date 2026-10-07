@@ -8,7 +8,8 @@ public struct ResolvedAgentCommand: Sendable {
 
 /// Filesystem-only discovery. Never consults the working directory or a shell.
 public struct AgentLaunchEnvironment: Sendable {
-    let environment: [String: String]
+    /// What an agent launched with it gets.
+    public let environment: [String: String]
     let searchDirectories: [String]
     private let home: URL
 

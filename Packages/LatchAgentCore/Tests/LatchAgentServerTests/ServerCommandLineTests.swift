@@ -55,6 +55,12 @@ final class ServerCommandLineTests: XCTestCase {
         XCTAssertEqual(try parse("pair", "--host", "latch.example.com", "--wss", "--device", "phone"),
                        .pair(ConfigOptions(), host: "latch.example.com", port: 443, transport: .webSocket, device: "phone"))
         XCTAssertEqual(try parse("devices"), .devices(ConfigOptions(), revoke: nil))
+        var checked = ServeOptions()
+        checked.listen = ["100.101.102.103:7428"]
+        checked.allowUnencryptedNetwork = true
+        checked.config.configDirectory = "/c"
+        XCTAssertEqual(try parse("doctor", "--listen", "100.101.102.103:7428", "--allow-unencrypted-network", "--config-dir", "/c"), .doctor(checked))
+        XCTAssertEqual(try parse("doctor"), .doctor(ServeOptions()))
         XCTAssertEqual(try parse("devices", "--revoke=phone", "--config-dir", "/c"), .devices(ConfigOptions(configDirectory: "/c"), revoke: "phone"))
         XCTAssertEqual(try parse("--version"), .version)
         XCTAssertEqual(try parse("--help"), .help)
@@ -89,6 +95,8 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["devices", "--device", "phone"], "does not apply")
         assertRejected(["pair", "--host", "h", "--revoke", "phone"], "does not apply")
         assertRejected(["devices", "--revoke", "a", "--revoke", "b"], "twice")
+        assertRejected(["doctor", "--detached-timeout", "1h"], "does not apply")
+        assertRejected(["doctor", "--qr"], "does not apply")
     }
 
     func testDurations() {

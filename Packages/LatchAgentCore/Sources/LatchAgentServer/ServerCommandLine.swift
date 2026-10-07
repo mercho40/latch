@@ -11,6 +11,8 @@ public enum ServerCommand: Equatable, Sendable {
     case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil, device: String? = nil)
     /// Lists the devices with a token of their own, or with `revoke`, deletes one's.
     case devices(ConfigOptions, revoke: String?)
+    /// Checks what serving with these options needs, changing nothing.
+    case doctor(ServeOptions)
     case version
     case help
 }
@@ -67,6 +69,8 @@ public enum ServerCommandLine {
            latch-server devices [--revoke DEVICE]
                                               list the devices paired with --device, or
                                               revoke one
+           latch-server doctor [--listen HOST:PORT] [--allow-unencrypted-network]
+                                              check what serving with those options needs
            latch-server --version | --help
 
     options:
@@ -140,10 +144,10 @@ public enum ServerCommandLine {
 
             switch option {
             case "--listen":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "doctor"])
                 serve.listen.append(try value())
             case "--allow-unencrypted-network":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "doctor"])
                 try flag()
                 serve.allowUnencryptedNetwork = true
             case "--config-dir":
@@ -226,6 +230,8 @@ public enum ServerCommandLine {
             return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style, device: device)
         case "devices":
             return .devices(serve.config, revoke: revoke)
+        case "doctor":
+            return .doctor(serve)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }

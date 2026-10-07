@@ -247,6 +247,34 @@ enum ServerSocket {
         return result == 0 ? ServerSocketAddress(storage) : nil
     }
 
+    /// A blocking socket connected to `address`, or an error once `timeout` has passed or the
+    /// peer refused. For `latch-server doctor`, which checks that a server answers.
+    static func connect(to address: ServerSocketAddress, timeout: Duration) throws(ServerSocketError) -> Int32 {
+        let descriptor = socket(address.isIPv6 ? AF_INET6 : AF_INET, closeOnExecStreamType, 0)
+        guard descriptor >= 0 else { throw ServerSocketError("socket") }
+        do throws(ServerSocketError) {
+            setCloseOnExec(descriptor)
+            let flags = fcntl(descriptor, F_GETFL)
+            guard fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else { throw ServerSocketError("fcntl") }
+            if address.withSocketAddress({ posixConnect(descriptor, $0, $1) }) != 0 {
+                guard errno == EINPROGRESS else { throw ServerSocketError("connect \(address)") }
+                var entry = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
+                let (seconds, attoseconds) = timeout.components
+                let ready = poll(&entry, 1, Int32(clamping: seconds * 1000 + attoseconds / 1_000_000_000_000_000))
+                guard ready > 0 else { throw ServerSocketError("connect \(address)", code: ready == 0 ? ETIMEDOUT : errno) }
+                var failure: Int32 = 0
+                var length = socklen_t(MemoryLayout<Int32>.size)
+                guard getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &failure, &length) == 0 else { throw ServerSocketError("getsockopt") }
+                guard failure == 0 else { throw ServerSocketError("connect \(address)", code: failure) }
+            }
+            guard fcntl(descriptor, F_SETFL, flags) == 0 else { throw ServerSocketError("fcntl") }
+            return descriptor
+        } catch {
+            _ = posixClose(descriptor)
+            throw error
+        }
+    }
+
     /// A close-on-exec pipe.
     static func makePipe() -> (read: Int32, write: Int32)? {
         var descriptors: [Int32] = [0, 0]
@@ -274,6 +302,10 @@ extension String {
 // `ServerSocket` has members named like the libc calls; these reach the libc ones.
 private func posixBind(_ descriptor: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Int32 {
     bind(descriptor, address, length)
+}
+
+private func posixConnect(_ descriptor: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Int32 {
+    connect(descriptor, address, length)
 }
 
 private func posixListen(_ descriptor: Int32, _ backlog: Int32) -> Int32 {

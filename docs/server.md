@@ -187,6 +187,14 @@ If Test Connection says the address answered but not with a WebSocket, the tunne
 
 Any other proxy that ends TLS works alike: Caddy, nginx or Tailscale Funnel in front of `127.0.0.1:7428`, forwarding WebSocket upgrades and setting `X-Forwarded-For`. The server refuses an upgrade that carries an `Origin` header, which every browser sends and Latch never does, so a web page cannot reach it through a browser on the server or through the proxy.
 
+## Check the setup
+
+```sh
+latch-server doctor
+```
+
+checks what serving needs, the way `latch-server` itself would, and creates or changes nothing: the config directory, the server token and each device's; each listen address against the listen policy and the Tailscale interfaces up now; whether a `latch-server` there answers a hello with this token; and which agents it can start, with the Node.js version an adapter fetched through `npx` needs. Give it the options you serve with, such as `--listen` and `--config-dir`, to check those. Each problem says what to do about it, and the command exits with status 1 while any remain. It does not check that agents are signed in. Run it as the user `latch-server` runs as; it finds agents on its own `PATH` and in the same install locations the server searches, so an agent it finds only through your login shell's `PATH` may still be missing for the service.
+
 ## Add it in Latch
 
 In Latch, open Settings → Servers, choose Add Server…, and paste the pairing string, or enter a name, connection, host, port and token. The connection is Direct, or Through a TLS proxy for a server behind a Cloudflare Tunnel or another proxy. Test Connection reports the server's host name, system and version, or why it could not connect. Then Session → New Remote Session… starts a session in a folder on the server. To change a server's name, address or token later, select it and click Edit…, or double-click it; its sessions stay on it. On an iPhone or iPad, scan the code `latch-server pair --host NAME --qr` prints instead, in Latch or with the Camera; [Latch for iPhone and iPad](ios.md#pairing-a-server) covers it.

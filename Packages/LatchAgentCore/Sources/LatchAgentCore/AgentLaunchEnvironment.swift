@@ -62,6 +62,12 @@ public struct AgentLaunchEnvironment: Sendable {
         searchDirectories = directories
         var childEnvironment = environment
         childEnvironment["PATH"] = directories.joined(separator: ":")
+        // The Claude Code ACP adapter runs the Claude Code it bundles, which trails the user's
+        // own by however long ago the adapter was pinned and lacks the models released since,
+        // unless CLAUDE_CODE_EXECUTABLE names another. Name the user's, unless they named one.
+        if childEnvironment["CLAUDE_CODE_EXECUTABLE"] == nil, let claude = Self.executable(named: "claude", in: directories) {
+            childEnvironment["CLAUDE_CODE_EXECUTABLE"] = claude
+        }
         self.environment = childEnvironment
     }
 
@@ -77,17 +83,20 @@ public struct AgentLaunchEnvironment: Sendable {
 
     public func executable(named name: String) -> String? {
         guard !name.isEmpty, !name.contains("\0") else { return nil }
-        let candidates: [String]
         if name.hasPrefix("/") {
-            candidates = [name]
+            return Self.isExecutableFile(name) ? name : nil
         } else if name.hasPrefix("~/") {
-            candidates = [home.appendingPathComponent(String(name.dropFirst(2))).path]
+            let path = home.appendingPathComponent(String(name.dropFirst(2))).path
+            return Self.isExecutableFile(path) ? path : nil
         } else if name.contains("/") {
             return nil
-        } else {
-            candidates = searchDirectories.map { URL(fileURLWithPath: $0).appendingPathComponent(name).path }
         }
-        return candidates.first(where: Self.isExecutableFile)
+        return Self.executable(named: name, in: searchDirectories)
+    }
+
+    /// The first executable file called `name`, a bare name, in `directories`.
+    private static func executable(named name: String, in directories: [String]) -> String? {
+        directories.lazy.map { URL(fileURLWithPath: $0).appendingPathComponent(name).path }.first(where: isExecutableFile)
     }
 
     public func resolve(_ command: AgentCommand) throws -> ResolvedAgentCommand {

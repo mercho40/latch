@@ -107,6 +107,24 @@ final class AgentLaunchEnvironmentTests: XCTestCase {
         XCTAssertNotNil(launch.executable(named: defaultBin + "/node"))
     }
 
+    func testPointsTheClaudeAdapterAtTheUsersClaudeCode() throws {
+        let claude = try file("tools/claude")
+        let tools = claude.deletingLastPathComponent().path
+        let launch = AgentLaunchEnvironment(environment: ["PATH": tools], home: home, includeCommonLocations: false)
+        XCTAssertEqual(launch.environment["CLAUDE_CODE_EXECUTABLE"], claude.path)
+        // Every agent gets it; only the adapter reads it.
+        XCTAssertEqual(try launch.resolve(AgentCommand("claude")).environment["CLAUDE_CODE_EXECUTABLE"], claude.path)
+
+        // One the user named is theirs to keep, whatever is installed.
+        let chosen = AgentLaunchEnvironment(environment: ["PATH": tools, "CLAUDE_CODE_EXECUTABLE": "/opt/other/claude"],
+                                            home: home, includeCommonLocations: false)
+        XCTAssertEqual(chosen.environment["CLAUDE_CODE_EXECUTABLE"], "/opt/other/claude")
+
+        // Without Claude Code installed, the adapter runs its own.
+        let none = AgentLaunchEnvironment(environment: ["PATH": ""], home: home, includeCommonLocations: false)
+        XCTAssertNil(none.environment["CLAUDE_CODE_EXECUTABLE"])
+    }
+
     func testAllManagerRootsAndNumericNvmOrdering() throws {
         let fnmRoots = ["custom fnm", ".local/share/fnm", "Library/Application Support/fnm", ".fnm"]
         let nvmRoots = ["custom nvm", ".nvm"]

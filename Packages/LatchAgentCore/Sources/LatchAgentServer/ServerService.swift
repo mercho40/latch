@@ -66,6 +66,14 @@ struct ServerService {
         }.joined(separator: " ")
     }
 
+    /// The first `--listen` address on a unit's ExecStart line.
+    static func listenAddress(inUnit unit: String) -> String? {
+        guard let execStart = unit.split(separator: "\n").first(where: { $0.hasPrefix("ExecStart=") }) else { return nil }
+        let words = execStart.split(separator: " ")
+        guard let index = words.firstIndex(of: "--listen"), index + 1 < words.count else { return nil }
+        return String(words[index + 1])
+    }
+
     /// One argument as systemd reads it: `%` and `$` doubled, and quoted when it has a space,
     /// a quote or a backslash.
     static func escape(_ argument: String) -> String {
@@ -95,9 +103,11 @@ struct ServerService {
     }
 
     /// Writes the unit, unless one the user wrote is there and `replace` is false, then reloads
-    /// systemd, enables and starts the service, restarting it when its unit changed, and
-    /// keeps the user's services running after logout.
-    func install(executable: String, options: ServeOptions, replace: Bool) -> Outcome {
+    /// systemd, enables and starts the service, and keeps the user's services running after
+    /// logout. A running service whose unit changed restarts only when `runningAgents`, asked
+    /// at the address the old unit listens on, says it runs none: a restart stops every agent.
+    func install(executable: String, options: ServeOptions, replace: Bool,
+                 runningAgents: (_ listen: String) -> Int? = { _ in 0 }) -> Outcome {
         var lines: [String] = []
         let content = unit(executable: executable, options: options)
         let existing = FileManager.default.contents(atPath: unitPath).map { String(decoding: $0, as: UTF8.self) }
@@ -122,10 +132,16 @@ struct ServerService {
         lines.append("the service runs \(executable)")
         let wasActive = run(["systemctl", "--user", "is-active", "--quiet", Self.unitName]).status == 0
         var commands = [["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", Self.unitName]]
+        var heldRestart: Int??
         if !wasActive {
             commands.append(["systemctl", "--user", "start", Self.unitName])
         } else if changed {
-            commands.append(["systemctl", "--user", "restart", Self.unitName])
+            let agents = runningAgents(existing.flatMap(Self.listenAddress(inUnit:)) ?? ServerListenPolicy.defaultListen)
+            if agents == 0 {
+                commands.append(["systemctl", "--user", "restart", Self.unitName])
+            } else {
+                heldRestart = .some(agents)
+            }
         }
         for command in commands {
             let result = run(command)
@@ -135,7 +151,14 @@ struct ServerService {
                 return Outcome(status: 1, lines: lines)
             }
         }
-        lines.append(wasActive ? (changed ? "restarted latch-server with the new unit" : "latch-server was already running") : "started latch-server")
+        switch heldRestart {
+        case let .some(agents?):
+            lines.append("latch-server runs \(agents == 1 ? "1 agent" : "\(agents) agents"), which a restart would stop: it keeps its old options until `systemctl --user restart latch-server`, once they are done")
+        case .some(nil):
+            lines.append("latch-server could not be asked what it runs, and a restart would stop its agents: it keeps its old options until `systemctl --user restart latch-server`")
+        case nil:
+            lines.append(wasActive ? (changed ? "restarted latch-server with the new unit" : "latch-server was already running") : "started latch-server")
+        }
 
         let linger = run(["loginctl", "show-user", user, "--property=Linger", "--value"])
         if linger.output.trimmingCharacters(in: .whitespacesAndNewlines) != "yes" {

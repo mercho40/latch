@@ -296,7 +296,14 @@ public enum LatchServerMain {
             return 1
         }
         let outcome = service().install(
-            executable: URL(fileURLWithPath: "/proc/self/exe").resolvingSymlinksInPath().path, options: options, replace: replace
+            executable: URL(fileURLWithPath: "/proc/self/exe").resolvingSymlinksInPath().path, options: options, replace: replace,
+            runningAgents: { listen in
+                guard let address = try? ServerListenPolicy.parse(listen), let token = try? tokens.read(),
+                      var client = try? ServerLocalClient(connectingTo: ServerDoctor.reachable(address), token: token) else { return nil }
+                defer { client.close() }
+                guard case let .success(.runtimes(summaries))? = try? client.request(.listRuntimes) else { return nil }
+                return summaries.count { $0.lifecycle != .exited }
+            }
         )
         outcome.lines.forEach { print($0) }
         return outcome.status

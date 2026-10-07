@@ -112,6 +112,39 @@ final class ServerServiceTests: XCTestCase {
         XCTAssertTrue(unit?.contains("--listen 127.0.0.1:7801") == true)
     }
 
+    func testARestartThatWouldStopAgentsWaits() {
+        var options = ServeOptions()
+        options.listen = ["127.0.0.1:7801"]
+        XCTAssertEqual(service.install(executable: "/usr/local/bin/latch-server", options: options, replace: false).status, 0)
+        system.active.withLock { $0 = true }
+        system.linger.withLock { $0 = "yes" }
+
+        // Asked at the address the running service listens on, which the old unit names.
+        let asked = Mutex<[String]>([])
+        for (agents, listen, held) in [(2, "127.0.0.1:7802", "runs 2 agents, which a restart would stop"),
+                                       (nil, "127.0.0.1:7801", "could not be asked what it runs")] as [(Int?, String, String)] {
+            system.commands.withLock { $0 = [] }
+            options.listen = [listen]
+            let outcome = service.install(executable: "/usr/local/bin/latch-server", options: options, replace: false) { address in
+                asked.withLock { $0.append(address) }
+                return agents
+            }
+            XCTAssertEqual(outcome.status, 0)
+            XCTAssertTrue(outcome.lines.contains { $0.contains(held) }, "\(outcome.lines)")
+            XCTAssertFalse(system.commands.withLock { $0 }.contains { $0.contains("restart") })
+            // Written and enabled, for the restart to come.
+            XCTAssertTrue(unit?.contains("--listen \(listen)") == true)
+        }
+        XCTAssertEqual(asked.withLock { $0 }, ["127.0.0.1:7801", "127.0.0.1:7802"])
+
+        system.commands.withLock { $0 = [] }
+        options.listen = ["127.0.0.1:7803"]
+        XCTAssertEqual(service.install(executable: "/usr/local/bin/latch-server", options: options, replace: false) { _ in 0 }.status, 0)
+        XCTAssertTrue(system.commands.withLock { $0 }.contains("systemctl --user restart latch-server.service"))
+        XCTAssertEqual(ServerService.listenAddress(inUnit: "[Service]\nExecStart=%h/x --listen [::1]:9 --log-agent-stderr\n"), "[::1]:9")
+        XCTAssertNil(ServerService.listenAddress(inUnit: "[Service]\nExecStart=/x\n"))
+    }
+
     func testAUnitTheUserWroteIsReplacedOnlyWhenAsked() throws {
         try FileManager.default.createDirectory(atPath: root + "/systemd/user", withIntermediateDirectories: true)
         let own = "[Service]\nExecStart=/usr/local/bin/latch-server --listen 127.0.0.1:7428\n"

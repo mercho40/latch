@@ -172,11 +172,16 @@ final class ServerDoctorTests: XCTestCase {
         XCTAssertEqual(asked.addresses.withLock { $0 }, [loopback])
 
         // Tailscale up, the server on loopback only: say how to reach it from the tailnet.
-        let up = [ServerInterfaceAddress(name: "tailscale0", address: [100, 101, 102, 103])]
+        #if os(macOS)
+        let tunnel = "utun3"
+        #else
+        let tunnel = "tailscale0"
+        #endif
+        let up = [ServerInterfaceAddress(name: tunnel, address: [100, 101, 102, 103])]
         text = doctor(interfaces: up).text
-        assertContains(text, "· Tailscale is up on tailscale0; for devices on your tailnet, also pass --listen 100.101.102.103:7428")
+        assertContains(text, "· Tailscale is up on \(tunnel); for devices on your tailnet, also pass --listen 100.101.102.103:7428")
         text = doctor(listen: [tailnet], interfaces: up).text
-        assertContains(text, "✓ 100.101.102.103:7428 is Tailscale's address on tailscale0")
+        assertContains(text, "✓ 100.101.102.103:7428 is Tailscale's address on \(tunnel)")
         XCTAssertFalse(text.contains("also pass --listen"), text)
     }
 

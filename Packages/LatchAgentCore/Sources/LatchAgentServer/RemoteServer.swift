@@ -73,8 +73,8 @@ public struct ServerListener: Sendable {
 public final class RemoteServer: Sendable {
     let hub: RemoteRuntimeHub
     let tokens: ServerTokenFile
-    /// In `devices` beside `tokens`.
-    let devices: ServerDeviceTokens
+    /// In `devices` and `watch-devices` beside `tokens`.
+    let devices: [ServerDeviceTokens]
     /// When each token last authenticated, for `latch-server devices`.
     let tokenUse: ServerTokenUse
     let configuration: RemoteServerConfiguration
@@ -122,7 +122,7 @@ public final class RemoteServer: Sendable {
     public init(hub: RemoteRuntimeHub, tokens: ServerTokenFile, configuration: RemoteServerConfiguration, log: ServerLog) {
         self.hub = hub
         self.tokens = tokens
-        devices = ServerDeviceTokens(configDirectory: tokens.directory, owner: tokens.owner)
+        devices = [DeviceAccess.full, .watch].map { ServerDeviceTokens(configDirectory: tokens.directory, access: $0, owner: tokens.owner) }
         tokenUse = ServerTokenUse(configDirectory: tokens.directory)
         self.configuration = configuration
         self.log = log
@@ -212,21 +212,23 @@ public final class RemoteServer: Sendable {
     func acceptedTokens() -> AcceptedTokens {
         var accepted = AcceptedTokens()
         do {
-            accepted.entries.append((nil, try tokens.read()))
+            accepted.entries.append(Credential(device: nil, token: try tokens.read(), access: .full))
         } catch .system {
             accepted.settled = false
         } catch {}
-        do {
-            for device in try devices.read() {
-                switch device.token {
-                case let .success(token): accepted.entries.append((device.name, token))
-                case .failure(.system): accepted.settled = false
-                case .failure: break
+        for kind in devices {
+            do {
+                for device in try kind.read() {
+                    switch device.token {
+                    case let .success(token): accepted.entries.append(Credential(device: device.name, token: token, access: kind.access))
+                    case .failure(.system): accepted.settled = false
+                    case .failure: break
+                    }
                 }
-            }
-        } catch .system {
-            accepted.settled = false
-        } catch {}
+            } catch .system {
+                accepted.settled = false
+            } catch {}
+        }
         return accepted
     }
 
@@ -350,17 +352,24 @@ public final class RemoteServer: Sendable {
     }
 }
 
+/// A token a hello may carry, with the device it belongs to, nil for the server token, and
+/// what it lets that device do.
+struct Credential: Sendable {
+    var device: String?
+    var token: LatchRemoteToken
+    var access: DeviceAccess
+}
+
 /// The tokens hellos may carry, as the files held them at one check: the server's, and each
 /// device's under its name.
 public struct AcceptedTokens: Sendable {
-    /// Each token with its device; nil for the server token.
-    var entries: [(device: String?, token: LatchRemoteToken)] = []
+    var entries: [Credential] = []
     /// False when a file could not be read for a reason that says nothing about it, so a token
     /// missing from `entries` may still be valid.
     var settled = true
 
     /// The entry whose token the hello carried, compared in constant time.
-    func entry(matching presented: String) -> (device: String?, token: LatchRemoteToken)? {
+    func entry(matching presented: String) -> Credential? {
         entries.first { $0.token.matches(presented) }
     }
 

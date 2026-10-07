@@ -445,6 +445,49 @@ final class RemoteServerTests: XCTestCase {
         }
     }
 
+    func testAWatchOnlyDeviceFollowsAgentsAndChangesNothing() async throws {
+        try await withServer { testbed in
+            let viewerToken = try ServerDeviceTokens(configDirectory: testbed.configDirectory, access: .watch).readOrCreate("viewer")
+            let owner = try await testbed.authenticated()
+            let id = AgentRuntimeID("watched")
+            try await owner.ok(.launchAgent(runtimeID: id, agent: testbed.bed.mockAgent, workspace: testbed.bed.workspace.path))
+            try await owner.ok(.newSession(runtimeID: id))
+
+            let viewer = try testbed.connect()
+            viewer.hello(token: viewerToken.rawValue)
+            guard case .welcome = try await viewer.readFrame() else { return XCTFail("expected a welcome") }
+            try await testbed.waitForLog("authenticated as device viewer, watch only")
+            guard case let .runtimes(listed) = try await viewer.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+            XCTAssertEqual(listed.map(\.runtimeID), [id])
+            try await viewer.ok(.attach(runtimeID: id, after: 0))
+
+            // What the owner does, the viewer sees.
+            let turnID = UUID()
+            try await owner.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("go")]))
+            _ = try await viewer.readFrames(until: "the turn's end") { frame in
+                if case let .event(event) = frame, case .turnEnded = event.event { true } else { false }
+            }
+
+            // And it can change nothing.
+            for command: LatchRemoteCommand in [
+                .prompt(runtimeID: id, turnID: UUID(), blocks: [.text("go")]),
+                .cancelPrompt(runtimeID: id),
+                .setMode(runtimeID: id, modeID: "code"),
+                .stopRuntime(runtimeID: id),
+                .launchAgent(runtimeID: AgentRuntimeID("mine"), agent: testbed.bed.mockAgent, workspace: testbed.bed.workspace.path),
+            ] {
+                guard case let .failure(error) = try await viewer.reply(to: viewer.request(command)) else {
+                    return XCTFail("\(command.kind) should be refused")
+                }
+                XCTAssertEqual(error.code, .forbidden, command.kind)
+                XCTAssertTrue(error.message.contains("can only watch"), error.message)
+            }
+            XCTAssertEqual(testbed.bed.lines(in: "prompts.log"), 1)
+            guard case let .runtimes(after) = try await owner.ok(.listRuntimes) else { return XCTFail("expected runtimes") }
+            XCTAssertEqual(after.map(\.lifecycle), [.ready])
+        }
+    }
+
     func testADeviceTokenAuthenticatesAndRevokingItDropsOnlyThatDevice() async throws {
         try await withServer { testbed in
             let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)

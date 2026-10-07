@@ -126,8 +126,13 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertEqual(try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments).output).token,
                        phonePairing.token)
         XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tablet", "--config-dir", config] + rootArguments).status, 0)
+        XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tv", "--watch-only", "--config-dir", config] + rootArguments).status, 0)
+        let twice = try run(["pair", "--host", "vps", "--device", "tv", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(twice.status, 1)
+        XCTAssertTrue(twice.error.contains("device tv already has a token that only watches"), twice.error)
         XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output,
-                       "phone   no connection recorded\ntablet  no connection recorded\n")
+                       "phone   no connection recorded\ntablet  no connection recorded\ntv      watch only, no connection recorded\n")
+        XCTAssertEqual(try run(["devices", "--revoke", "tv", "--config-dir", config] + rootArguments).status, 0)
 
         let revoked = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
         XCTAssertEqual(revoked.status, 0, revoked.error)

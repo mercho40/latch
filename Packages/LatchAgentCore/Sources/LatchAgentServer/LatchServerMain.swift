@@ -57,12 +57,12 @@ public enum LatchServerMain {
                 printError("\(error)")
                 return 1
             }
-        case let .pair(config, host, port, transport, qr, device):
+        case let .pair(config, host, port, transport, qr, device, watchOnly):
             guard let tokens = tokenFile(config) else { return 1 }
             let pairing: String
             do {
                 let token = if let device {
-                    try ServerDeviceTokens(configDirectory: tokens.directory).readOrCreate(device)
+                    try ServerDeviceTokens(configDirectory: tokens.directory, access: watchOnly ? .watch : .full).readOrCreateUnique(device)
                 } else {
                     try tokens.readOrCreate()
                 }
@@ -91,17 +91,16 @@ public enum LatchServerMain {
             }
         case let .devices(config, revoke):
             guard let tokens = tokenFile(config) else { return 1 }
-            let devices = ServerDeviceTokens(configDirectory: tokens.directory)
             do {
                 if let revoke {
-                    guard try devices.revoke(revoke) else {
+                    guard try ServerDeviceTokens.revoke(revoke, configDirectory: tokens.directory) != nil else {
                         printError("no device is named \(revoke)")
                         return 1
                     }
                     printError("revoked \(revoke): running servers drop its connections within \(LatchRemoteProtocol.heartbeatSeconds) seconds, or at once on SIGHUP")
                     return 0
                 }
-                let all = try devices.read()
+                let all = try ServerDeviceTokens.readAll(configDirectory: tokens.directory)
                 let use = ServerTokenUse.read(configDirectory: tokens.directory)
                 let now = Date()
                 func lastUse(_ use: ServerTokenUse.Use?) -> String {
@@ -111,7 +110,7 @@ public enum LatchServerMain {
                 for device in all {
                     let name = device.name.padding(toLength: width, withPad: " ", startingAt: 0)
                     switch device.token {
-                    case .success: print("\(name)  \(lastUse(use?.devices[device.name]))")
+                    case .success: print("\(name)  " + (device.access == .watch ? "watch only, " : "") + lastUse(use?.devices[device.name]))
                     case let .failure(error): print("\(name)  refused: \(error)")
                     }
                 }
@@ -151,19 +150,19 @@ public enum LatchServerMain {
             return 2
         }
         guard let tokens = tokenFile(options.config) else { return 1 }
-        let devices: [(name: String, token: Result<LatchRemoteToken, ServerTokenError>)]
+        let devices: [(name: String, access: DeviceAccess, token: Result<LatchRemoteToken, ServerTokenError>)]
         do {
             try tokens.readOrCreate()
-            devices = try ServerDeviceTokens(configDirectory: tokens.directory).read()
+            devices = try ServerDeviceTokens.readAll(configDirectory: tokens.directory)
         } catch {
             printError("\(error)")
             return 1
         }
         log.log("token file \(tokens.path)")
         if !devices.isEmpty {
-            log.log("device tokens: " + devices.map(\.name).joined(separator: ", "))
+            log.log("device tokens: " + devices.map { $0.name + ($0.access == .watch ? " (watch only)" : "") }.joined(separator: ", "))
         }
-        for case let (name, .failure(error)) in devices {
+        for case let (name, _, .failure(error)) in devices {
             log.log("warning: device \(name) is refused: \(error)")
         }
         let neverUsed = devices.isEmpty && ServerTokenUse.read(configDirectory: tokens.directory)?.server == nil

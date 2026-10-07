@@ -8,7 +8,9 @@ public enum ServerCommand: Equatable, Sendable {
     case token(ConfigOptions, rotate: Bool)
     /// Prints a `latch://` string for pasting into the app, and with `qr` a QR code of it.
     /// With `device`, the string carries that device's own token, created on first use.
-    case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil, device: String? = nil)
+    /// `watchOnly` makes that token one that only watches.
+    case pair(ConfigOptions, host: String, port: UInt16, transport: LatchRemoteTransport = .tcp, qr: PairQRCode? = nil, device: String? = nil,
+              watchOnly: Bool = false)
     /// Lists the devices with a token of their own, or with `revoke`, deletes one's.
     case devices(ConfigOptions, revoke: String?)
     /// Checks what serving with these options needs, changing nothing.
@@ -74,7 +76,7 @@ public enum ServerCommandLine {
     public static let usage = """
     usage: latch-server [options]            serve until SIGTERM or SIGINT
            latch-server token [--rotate]      print the token, creating it if absent
-           latch-server pair --host NAME [--port N] [--wss] [--device DEVICE] [--qr [--invert]]
+           latch-server pair --host NAME [--port N] [--wss] [--device DEVICE [--watch-only]] [--qr [--invert]]
                                               print a latch:// string for the Latch app
            latch-server devices [--revoke DEVICE]
                                               list the devices paired with --device, or
@@ -107,6 +109,9 @@ public enum ServerCommandLine {
       --device DEVICE               with pair, give the string a token of DEVICE's own,
                                     created on first use, that revoking it ends; a name of
                                     letters, digits, '.', '_' and '-'
+      --watch-only                  with --device, a token that lists and follows the
+                                    server's agents and changes nothing: no launch, prompt,
+                                    answer, setting or stop
       --revoke DEVICE               with devices, delete DEVICE's token
       --replace                     with install-service, replace a latch-server.service
                                     it did not write
@@ -133,6 +138,7 @@ public enum ServerCommandLine {
         var device: String?
         var revoke: String?
         var replace = false
+        var watchOnly = false
         var stop: String?
         var version = false
         var help = false
@@ -230,6 +236,10 @@ public enum ServerCommandLine {
                     throw ServerCommandLineError("--stop \(id): expected a runtime ID as `latch-server runtimes` lists it")
                 }
                 stop = id
+            case "--watch-only":
+                try allowed(option, in: ["pair"])
+                try flag()
+                watchOnly = true
             case "--replace":
                 try allowed(option, in: ["install-service"])
                 try flag()
@@ -259,7 +269,9 @@ public enum ServerCommandLine {
             guard qr || !invert else { throw ServerCommandLineError("--invert needs --qr") }
             let style: PairQRCode? = qr ? (invert ? .darkModulesDrawn : .lightModulesDrawn) : nil
             let transport: LatchRemoteTransport = webSocket ? .webSocket : .tcp
-            return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style, device: device)
+            guard device != nil || !watchOnly else { throw ServerCommandLineError("--watch-only needs --device") }
+            return .pair(serve.config, host: host, port: port ?? transport.defaultPort, transport: transport, qr: style, device: device,
+                         watchOnly: watchOnly)
         case "devices":
             return .devices(serve.config, revoke: revoke)
         case "doctor":

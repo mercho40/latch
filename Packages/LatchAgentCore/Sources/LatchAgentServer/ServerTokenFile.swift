@@ -20,6 +20,7 @@ public enum ServerTokenError: Error, Equatable, Sendable, CustomStringConvertibl
     case malformed(String)
     case system(String, call: String, code: Int32)
     case invalidDeviceName(String)
+    case deviceExists(String, access: DeviceAccess)
 
     public var description: String {
         switch self {
@@ -32,6 +33,9 @@ public enum ServerTokenError: Error, Equatable, Sendable, CustomStringConvertibl
         case let .malformed(path): "\(path) does not hold a Latch token; " + Self.replacement(path, "run `latch-server token --rotate`")
         case let .system(path, call, code): "\(path): \(call): \(String(cString: strerror(code)))"
         case let .invalidDeviceName(name): "\(name) is not a device name: use 1 to 64 letters, digits, '.', '_' and '-', not starting with '.'"
+        case let .deviceExists(name, access):
+            "device \(name) already has a token \(access == .watch ? "that only watches" : "with full access"); "
+                + "revoke it first with `latch-server devices --revoke \(name)`"
         }
     }
 
@@ -39,7 +43,7 @@ public enum ServerTokenError: Error, Equatable, Sendable, CustomStringConvertibl
     /// and pairing it again, the server's as `serverAdvice` says.
     private static func replacement(_ path: String, _ serverAdvice: String) -> String {
         let directory = (path as NSString).deletingLastPathComponent
-        guard (directory as NSString).lastPathComponent == ServerDeviceTokens.directoryName else { return serverAdvice }
+        guard [DeviceAccess.full, .watch].map(\.directoryName).contains((directory as NSString).lastPathComponent) else { return serverAdvice }
         let name = (path as NSString).lastPathComponent
         return "run `latch-server devices --revoke \(name)`, then pair the device again"
     }

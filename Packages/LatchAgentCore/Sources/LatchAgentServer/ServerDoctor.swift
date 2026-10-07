@@ -111,14 +111,16 @@ struct ServerDoctor {
         }
 
         do {
-            let devices = try ServerDeviceTokens(configDirectory: configDirectory, owner: owner).read()
+            let devices = try ServerDeviceTokens.readAll(configDirectory: configDirectory, owner: owner)
             let usable = devices.filter { (try? $0.token.get()) != nil }.map(\.name)
+            let watching = Set(devices.filter { $0.access == .watch }.map(\.name))
             if devices.isEmpty {
                 add(.note, "no device has a token of its own; `latch-server pair --device NAME` gives one a token you can revoke alone")
             } else if !usable.isEmpty {
-                add(.ok, (usable.count == 1 ? "1 device has" : "\(usable.count) devices have") + " a token of its own: " + usable.joined(separator: ", "))
+                add(.ok, (usable.count == 1 ? "1 device has" : "\(usable.count) devices have") + " a token of its own: "
+                    + usable.map { watching.contains($0) ? "\($0) (watch only)" : $0 }.joined(separator: ", "))
             }
-            for case let (name, .failure(error)) in devices {
+            for case let (name, _, .failure(error)) in devices {
                 add(.problem, "device \(name) is refused: \(error)")
             }
             // A token is a shell for as long as it lasts: point out the ones nobody uses.
@@ -129,7 +131,8 @@ struct ServerDoctor {
                     if now.timeIntervalSince(last) >= Self.staleDeviceAge {
                         add(.note, "device \(name) last connected \(days) days ago; if it is gone, `latch-server devices --revoke \(name)`")
                     }
-                } else if let paired = Self.modified((configDirectory as NSString).appendingPathComponent("\(ServerDeviceTokens.directoryName)/\(name)")),
+                } else if let paired = Self.modified((configDirectory as NSString).appendingPathComponent(
+                    "\((watching.contains(name) ? DeviceAccess.watch : .full).directoryName)/\(name)")),
                           now.timeIntervalSince(paired) >= 7 * 86_400 {
                     add(.note, "device \(name) has not connected since it was paired \(Int(now.timeIntervalSince(paired) / 86_400)) days ago; if it never will, `latch-server devices --revoke \(name)`")
                 }

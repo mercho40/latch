@@ -9,20 +9,41 @@ import Glibc
 import Musl
 #endif
 
-/// Tokens of their own for single devices: `devices/NAME` in the config directory, each a token
-/// in the form of `server-token` and under the same checks. A device presents its token in
-/// the hello as it would the server's, so its pairing string and the apps are unchanged;
-/// revoking it deletes the file, which closes that device's connections and no other's.
+/// What a device's token lets it do.
+public enum DeviceAccess: Sendable, Equatable {
+    /// Everything the server token does.
+    case full
+    /// List the server's agents and follow them, and nothing that changes them: no launch,
+    /// prompt, answer, setting or stop.
+    case watch
+
+    /// Where its tokens are kept. Each access has a directory of its own, so a file in the
+    /// wrong one never gives a device more than the directory says.
+    public var directoryName: String {
+        switch self {
+        case .full: ServerDeviceTokens.directoryName
+        case .watch: "watch-devices"
+        }
+    }
+}
+
+/// Tokens of their own for single devices: `devices/NAME` in the config directory, or
+/// `watch-devices/NAME` for one that only watches, each a token in the form of
+/// `server-token` and under the same checks. A device presents its token in the hello as it
+/// would the server's, so its pairing string and the apps are unchanged; revoking it deletes
+/// the file, which closes that device's connections and no other's.
 public final class ServerDeviceTokens: Sendable {
     public static let directoryName = "devices"
 
     public let directory: String
+    public let access: DeviceAccess
     private let owner: uid_t
     /// One file per device, kept so each keeps its cache across checks.
     private let files = Mutex<[String: ServerTokenFile]>([:])
 
-    public init(configDirectory: String, owner: uid_t = geteuid()) {
-        directory = (configDirectory as NSString).appendingPathComponent(Self.directoryName)
+    public init(configDirectory: String, access: DeviceAccess = .full, owner: uid_t = geteuid()) {
+        directory = (configDirectory as NSString).appendingPathComponent(access.directoryName)
+        self.access = access
         self.owner = owner
     }
 
@@ -100,6 +121,35 @@ public final class ServerDeviceTokens: Sendable {
             close(descriptor)
         }
         return true
+    }
+
+    /// Every device of either access, sorted by name.
+    public static func readAll(configDirectory: String, owner: uid_t = geteuid())
+        throws(ServerTokenError) -> [(name: String, access: DeviceAccess, token: Result<LatchRemoteToken, ServerTokenError>)] {
+        var all: [(name: String, access: DeviceAccess, token: Result<LatchRemoteToken, ServerTokenError>)] = []
+        for access in [DeviceAccess.full, .watch] {
+            all += try ServerDeviceTokens(configDirectory: configDirectory, access: access, owner: owner).read()
+                .map { ($0.name, access, $0.token) }
+        }
+        return all.sorted { $0.name < $1.name }
+    }
+
+    /// Revokes the device of that name, of whichever access; nil when there is none.
+    public static func revoke(_ name: String, configDirectory: String, owner: uid_t = geteuid()) throws(ServerTokenError) -> DeviceAccess? {
+        for access in [DeviceAccess.full, .watch]
+            where try ServerDeviceTokens(configDirectory: configDirectory, access: access, owner: owner).revoke(name) {
+            return access
+        }
+        return nil
+    }
+
+    /// The device's token, created on first use, unless the name is a device's of the other
+    /// access: one device, one token.
+    public func readOrCreateUnique(_ name: String) throws(ServerTokenError) -> LatchRemoteToken {
+        let other = ServerDeviceTokens(configDirectory: (directory as NSString).deletingLastPathComponent,
+                                       access: access == .full ? .watch : .full, owner: owner)
+        if try other.read().contains(where: { $0.name == name }) { throw .deviceExists(name, access: other.access) }
+        return try readOrCreate(name)
     }
 
     private func names() throws(ServerTokenError) -> [String] {

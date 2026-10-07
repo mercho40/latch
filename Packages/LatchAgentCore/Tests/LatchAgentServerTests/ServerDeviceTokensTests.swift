@@ -119,6 +119,30 @@ final class ServerDeviceTokensTests: XCTestCase {
         XCTAssertTrue("\(ServerTokenError.malformed(root + "/server-token"))".contains("token --rotate"))
     }
 
+    func testADeviceHasOneTokenOfOneAccess() throws {
+        let full = ServerDeviceTokens(configDirectory: root)
+        let watch = ServerDeviceTokens(configDirectory: root, access: .watch)
+        XCTAssertTrue(watch.directory.hasSuffix("/watch-devices"))
+        let phone = try full.readOrCreateUnique("phone")
+        let viewer = try watch.readOrCreateUnique("viewer")
+        XCTAssertThrowsError(try watch.readOrCreateUnique("phone")) {
+            XCTAssertEqual($0 as? ServerTokenError, .deviceExists("phone", access: .full))
+        }
+        XCTAssertThrowsError(try full.readOrCreateUnique("viewer")) {
+            XCTAssertEqual($0 as? ServerTokenError, .deviceExists("viewer", access: .watch))
+        }
+        let all = try ServerDeviceTokens.readAll(configDirectory: root)
+        XCTAssertEqual(all.map(\.name), ["phone", "viewer"])
+        XCTAssertEqual(all.map(\.access), [.full, .watch])
+        XCTAssertEqual(try all.map { try $0.token.get() }, [phone, viewer])
+
+        XCTAssertEqual(try ServerDeviceTokens.revoke("viewer", configDirectory: root), .watch)
+        XCTAssertEqual(try ServerDeviceTokens.revoke("phone", configDirectory: root), .full)
+        XCTAssertNil(try ServerDeviceTokens.revoke("phone", configDirectory: root))
+        // Revoked, the name can be paired with the other access.
+        XCTAssertNoThrow(try watch.readOrCreateUnique("phone"))
+    }
+
     func testAnUnsafeDirectoryRefusesEveryDevice() throws {
         let devices = ServerDeviceTokens(configDirectory: root)
         try devices.readOrCreate("phone")

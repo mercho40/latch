@@ -36,7 +36,7 @@ final class RemoteServerConnection: Sendable {
         /// Set by the reader before the welcome, and never changed after.
         var webSocket = false
         var hubConnection: RemoteConnectionID?
-        var credential: (device: String?, token: LatchRemoteToken)?
+        var credential: Credential?
         var outbox: [Outgoing] = []
         var outstanding = 0
         var wakePending = false
@@ -82,7 +82,7 @@ final class RemoteServerConnection: Sendable {
 
     /// The token this connection authenticated with, and the device it belongs to, nil for
     /// the server token; nil before then.
-    var authenticatedCredential: (device: String?, token: LatchRemoteToken)? {
+    var authenticatedCredential: Credential? {
         state.withLock { $0.credential }
     }
 
@@ -356,7 +356,8 @@ final class RemoteServerConnection: Sendable {
             return false
         }
         ServerSocket.setReceiveTimeout(descriptor, configuration.silenceTimeout)
-        server.log.log("connection \(serial) from \(peer) authenticated" + (credential.device.map { " as device \($0)" } ?? ""))
+        server.log.log("connection \(serial) from \(peer) authenticated"
+            + (credential.device.map { " as device \($0)" + (credential.access == .watch ? ", watch only" : "") } ?? ""))
         server.spawn("latch.server.write") { self.runWriter(hubConnection) }
         return true
     }
@@ -411,10 +412,25 @@ final class RemoteServerConnection: Sendable {
         }
     }
 
+    /// What a watch-only device may ask: what runs, to follow it, and the agent's saved
+    /// sessions, which change nothing.
+    static func watchAllows(_ command: LatchRemoteCommand) -> Bool {
+        switch command {
+        case .listRuntimes, .attach, .detach, .listSessions: true
+        default: false
+        }
+    }
+
     /// Hands the request to the hub in a Task of its own; closing the connection never
     /// cancels it, and its reply is dropped if the connection has gone by then. Requests read
     /// after the connection was closed, as for a rotated token, are not run at all.
     private func submit(_ request: LatchRemoteRequest) -> Bool {
+        if state.withLock({ $0.credential?.access }) == .watch, !Self.watchAllows(request.command) {
+            return reply(request.id, .failure(LatchRemoteError(
+                code: .forbidden,
+                message: "This device can only watch. To prompt, answer or stop agents from it, pair it again without --watch-only."
+            )))
+        }
         enum Admission {
             case closing
             case busy

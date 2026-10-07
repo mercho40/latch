@@ -64,6 +64,8 @@ final class ServerCommandLineTests: XCTestCase {
         XCTAssertEqual(try parse("pair", "--host", "latch.example.com", "--wss", "--device", "phone"),
                        .pair(ConfigOptions(), host: "latch.example.com", port: 443, transport: .webSocket, device: "phone"))
         XCTAssertEqual(try parse("devices"), .devices(ConfigOptions(), revoke: nil))
+        XCTAssertEqual(try parse("pair", "--host", "vps", "--device", "tv", "--watch-only"),
+                       .pair(ConfigOptions(), host: "vps", port: 7428, device: "tv", watchOnly: true))
         var checked = ServeOptions()
         checked.listen = ["100.101.102.103:7428"]
         checked.allowUnencryptedNetwork = true
@@ -122,6 +124,8 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["uninstall-service", "--listen", "127.0.0.1:1"], "does not apply")
         assertRejected(["runtimes", "--stop", "a b"], "--stop a b: expected a runtime ID")
         assertRejected(["--stop", "rt-1"], "does not apply")
+        assertRejected(["pair", "--host", "vps", "--watch-only"], "--watch-only needs --device")
+        assertRejected(["devices", "--watch-only"], "does not apply")
     }
 
     func testPairSuggestsWhatTheHostCanBe() {

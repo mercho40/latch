@@ -62,7 +62,7 @@ public enum LatchServerMain {
             let pairing: String
             do {
                 let token = if let device {
-                    try ServerDeviceTokens(configDirectory: tokens.directory, access: watchOnly ? .watch : .full).readOrCreateUnique(device)
+                    try ServerDeviceTokens.makePairingCode(device, access: watchOnly ? .watch : .full, configDirectory: tokens.directory)
                 } else {
                     try tokens.readOrCreate()
                 }
@@ -75,7 +75,12 @@ public enum LatchServerMain {
                 return 1
             }
             print(pairing)
-            if device == nil {
+            if let device {
+                let paired = (try? ServerDeviceTokens.readAll(configDirectory: tokens.directory))?.contains { $0.name == device } == true
+                printError("this pairing code pairs one device, within \(Int(RemoteServerConfiguration.defaultPairingCodeLifetime / 60)) minutes; "
+                    + "the device then keeps a token of its own"
+                    + (paired ? ". \(device) has a token already: the code gives it a new one, and the old one stops working" : ""))
+            } else {
                 printError("this string carries the server token, which every device paired with it shares; "
                     + "`--device NAME` gives a device a token of its own, which you can revoke alone")
             }
@@ -101,20 +106,36 @@ public enum LatchServerMain {
                     return 0
                 }
                 let all = try ServerDeviceTokens.readAll(configDirectory: tokens.directory)
+                var codes: [(name: String, made: Date?)] = []
+                for access in [DeviceAccess.full, .watch] {
+                    let pending = ServerDeviceTokens.pairingCodes(configDirectory: tokens.directory, access: access)
+                    codes += try pending.read().map { ($0.name, pending.written($0.name)) }
+                }
                 let use = ServerTokenUse.read(configDirectory: tokens.directory)
                 let now = Date()
                 func lastUse(_ use: ServerTokenUse.Use?) -> String {
                     use.map { "last connected \(ServerTokenUse.describe($0.at, now: now)), from \($0.from)" } ?? "no connection recorded"
                 }
-                let width = all.map(\.name.count).max() ?? 0
+                func waiting(_ name: String) -> String? {
+                    guard let code = codes.first(where: { $0.name == name }) else { return nil }
+                    let left = code.made.map { RemoteServerConfiguration.defaultPairingCodeLifetime - now.timeIntervalSince($0) } ?? 0
+                    return left > 0 ? "pairing code waiting, \(max(1, Int(left / 60))) minutes left" : "pairing code expired; pair it again"
+                }
+                let names = Set(all.map(\.name))
+                let width = (all.map(\.name.count) + codes.map(\.name.count)).max() ?? 0
                 for device in all {
                     let name = device.name.padding(toLength: width, withPad: " ", startingAt: 0)
                     switch device.token {
-                    case .success: print("\(name)  " + (device.access == .watch ? "watch only, " : "") + lastUse(use?.devices[device.name]))
+                    case .success:
+                        print("\(name)  " + (device.access == .watch ? "watch only, " : "") + lastUse(use?.devices[device.name])
+                            + (waiting(device.name).map { "; new " + $0 } ?? ""))
                     case let .failure(error): print("\(name)  refused: \(error)")
                     }
                 }
-                if all.isEmpty {
+                for code in codes where !names.contains(code.name) {
+                    print(code.name.padding(toLength: width, withPad: " ", startingAt: 0) + "  " + (waiting(code.name) ?? ""))
+                }
+                if all.isEmpty, codes.isEmpty {
                     printError("no device has a token of its own; `latch-server pair --host NAME --device DEVICE` gives one")
                 }
                 // On stderr, so the rows above stay one per device.

@@ -204,7 +204,12 @@ public final class ServerTokenFile: Sendable {
     /// next check, or at once on SIGHUP.
     @discardableResult
     public func rotate() throws(ServerTokenError) -> LatchRemoteToken {
-        let token = LatchRemoteToken.generate()
+        try replace(with: .generate())
+    }
+
+    /// Replaces the token with `token`.
+    @discardableResult
+    public func replace(with token: LatchRemoteToken) throws(ServerTokenError) -> LatchRemoteToken {
         let temporary = try writeTemporary(token)
         guard rename(temporary, path) == 0 else {
             let code = errno

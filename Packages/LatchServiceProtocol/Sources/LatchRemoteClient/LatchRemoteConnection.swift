@@ -353,7 +353,10 @@ public final class LatchRemoteConnection: Sendable {
                 return nil
             }
             transition(&core, to: .authenticating)
-            write(&core, frame: .hello(LatchRemoteHello(token: options.token.rawValue, client: options.client)))
+            // Whoever keeps the connection's token keeps a device token a pairing code is
+            // exchanged for; one that does not leaves the code to work on, until its device
+            // connects with the token, as the server allows for that.
+            write(&core, frame: .hello(LatchRemoteHello(token: options.token.rawValue, client: options.client, exchangesPairingCode: true)))
             return connection
         }
         if let connection {

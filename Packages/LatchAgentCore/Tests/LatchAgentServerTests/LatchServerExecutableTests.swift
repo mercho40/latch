@@ -120,27 +120,33 @@ final class LatchServerExecutableTests: XCTestCase {
         let shared = try LatchRemotePairing(parsing: sharedRun.output)
         let phone = try run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments)
         XCTAssertEqual(phone.status, 0, phone.error)
-        XCTAssertEqual(phone.error, "")
+        XCTAssertTrue(phone.error.contains("this pairing code pairs one device, within 10 minutes"), phone.error)
         let phonePairing = try LatchRemotePairing(parsing: phone.output)
         XCTAssertNotEqual(phonePairing.token, shared.token)
-        XCTAssertEqual(try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments).output).token,
-                       phonePairing.token)
+        // Each pairing makes a new code, which replaces the one before.
+        let again = try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments).output)
+        XCTAssertNotEqual(again.token, phonePairing.token)
         XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tablet", "--config-dir", config] + rootArguments).status, 0)
         XCTAssertEqual(try run(["pair", "--host", "vps", "--device", "tv", "--watch-only", "--config-dir", config] + rootArguments).status, 0)
-        let twice = try run(["pair", "--host", "vps", "--device", "tv", "--config-dir", config] + rootArguments)
-        XCTAssertEqual(twice.status, 1)
-        XCTAssertTrue(twice.error.contains("device tv already has a token that only watches"), twice.error)
-        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output,
-                       "phone   no connection recorded\ntablet  no connection recorded\ntv      watch only, no connection recorded\n")
+        let rows = try run(["devices", "--config-dir", config] + rootArguments).output.split(separator: "\n")
+        XCTAssertEqual(rows.map { $0.split(separator: " ").first.map(String.init) }, ["phone", "tablet", "tv"])
+        XCTAssertTrue(rows.allSatisfy { $0.contains("pairing code waiting") }, "\(rows)")
         XCTAssertEqual(try run(["devices", "--revoke", "tv", "--config-dir", config] + rootArguments).status, 0)
+
+        // A device's token, once it has one, keeps its name to its access.
+        try ServerDeviceTokens(configDirectory: config, access: .watch).readOrCreate("screen")
+        let other = try run(["pair", "--host", "vps", "--device", "screen", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(other.status, 1)
+        XCTAssertTrue(other.error.contains("device screen already has a token that only watches"), other.error)
 
         let revoked = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
         XCTAssertEqual(revoked.status, 0, revoked.error)
         XCTAssertTrue(revoked.error.contains("revoked phone"), revoked.error)
-        XCTAssertEqual(try run(["devices", "--config-dir", config] + rootArguments).output, "tablet  no connection recorded\n")
-        let again = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
-        XCTAssertEqual(again.status, 1)
-        XCTAssertTrue(again.error.contains("no device is named phone"), again.error)
+        let left = try run(["devices", "--config-dir", config] + rootArguments).output
+        XCTAssertTrue(left.hasPrefix("screen  watch only, no connection recorded\ntablet  pairing code waiting"), left)
+        let gone = try run(["devices", "--revoke", "phone", "--config-dir", config] + rootArguments)
+        XCTAssertEqual(gone.status, 1)
+        XCTAssertTrue(gone.error.contains("no device is named phone"), gone.error)
         // The server's own token is untouched.
         XCTAssertEqual(try ServerTokenFile(directory: config).read(), shared.token)
     }
@@ -336,8 +342,6 @@ final class LatchServerExecutableTests: XCTestCase {
         let status = await server.exitStatus()
         XCTAssertEqual(status, 0)
         let log = try await server.finishedLog()
-        XCTAssertTrue(log.contains("device tokens: phone\n"), log)
-        XCTAssertFalse(log.contains("no device has connected yet"), log)
         XCTAssertTrue(log.contains("authenticated as device phone"), log)
         XCTAssertTrue(log.contains("closed: device phone's token is no longer valid"), log)
         XCTAssertFalse(log.contains(token.rawValue))

@@ -54,7 +54,7 @@ latch-server pair --host vps.example.ts.net --qr
 
 `--host` is the name or address the phone connects to; add `--wss` for a server behind a Cloudflare Tunnel or another TLS proxy. The command prints the `latch://…?token=…` pairing string and, below it, a QR code of the same string.
 
-Add `--device iphone`, or any name you choose, to give the phone a token of its own. `latch-server devices --revoke iphone` then cuts off this phone alone, and rotating the server's token leaves it connected; see [A token for each device](server.md#a-token-for-each-device).
+Add `--device iphone`, or any name you choose, to give the phone a token of its own: the code then works once, within ten minutes, and the app keeps the token the server gives it in the code's place. `latch-server devices --revoke iphone` then cuts off this phone alone, and rotating the server's token leaves it connected; see [A token for each device](server.md#a-token-for-each-device).
 
 With no server added yet, the sessions list, or on iPad the column beside it, shows that command and a Scan Pairing Code button. It opens the camera in Latch; point it at the code. The first time, iOS asks whether Latch may use the camera. A code that is not a pairing code says so under the camera, and scanning goes on until it reads one. A pairing code opens Add Server filled in, with the note "From a pairing link. Check the host, then tap Add." Scanning connects nowhere. The Camera app reads the code too: tap the link it shows and Latch opens the same sheet. Where Latch cannot use the camera, because access is off, restricted, or the device cannot scan codes in apps, as the Simulator cannot, the scanner says why and how else to pair, with a way to Settings when access is off.
 

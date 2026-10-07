@@ -82,7 +82,7 @@ Add `--qr` to print, below the string, a QR code of it for the iPhone: Latch's S
 latch-server pair --host vps.example.ts.net --device phone --qr
 ```
 
-gives the string a token of its own for the device named `phone`, created on first use in `devices/phone` beside `server-token`, with the same modes and checks; running it again prints the same string. A device name is 1 to 64 letters, digits, `.`, `_` and `-`, not starting with `.`. Latch treats the string like any other, so nothing changes in the app, and `--device` goes with `--wss` as with a direct connection. Pair each Mac, iPhone and iPad this way, and losing one costs only its token:
+prints a one-time pairing code for the device named `phone`, in place of the token. It works once, within ten minutes: the app that uses it is given a token of the device's own, kept in `devices/phone` beside `server-token` with the same modes and checks, and connects with that from then on, so a code seen later, in a photo or a scrollback, opens nothing. The code goes on giving the app that same token until the device has connected with it, in case the answer was lost on the way. An app too old to exchange a code keeps the code as the device's token, as `pair` gave out before. Each `pair` makes a new code; pairing a device that has a token gives it a new one, and the old one stops working. A device name is 1 to 64 letters, digits, `.`, `_` and `-`, not starting with `.`, and `--device` goes with `--wss` as with a direct connection. Pair each Mac, iPhone and iPad this way, and losing one costs only its token:
 
 ```sh
 latch-server devices
@@ -90,7 +90,7 @@ latch-server devices --revoke phone
 systemctl --user reload latch-server
 ```
 
-`devices` lists each device with when its token last connected and from which address, and marks any the server refuses, such as one whose file has been loosened; a loosened `devices` directory refuses them all. It also says when the server token was last used, so you can tell whether anything still depends on it before you rotate it. `--revoke` deletes that device's token: the running server closes its connections within 15 seconds, or at once on the reload, which sends SIGHUP, and every other device stays connected. Pair it again for a new token.
+`devices` lists each device with when its token last connected and from which address, and each code still waiting to be used, and marks any the server refuses, such as one whose file has been loosened; a loosened `devices` directory refuses them all. It also says when the server token was last used, so you can tell whether anything still depends on it before you rotate it. `--revoke` deletes that device's token, and any code waiting for it: the running server closes its connections within 15 seconds, or at once on the reload, which sends SIGHUP, and every other device stays connected. Pair it again for a new token.
 
 Add `--watch-only` for a device that should follow agents and change nothing, such as a spare iPad on a desk: its token is kept in `watch-devices/` instead, and lets it list the server's agents, follow them and see their saved sessions, while the server refuses anything else it asks, a new session, a prompt, an answer to a request, a setting or a stop, with a message saying so. To give it full access, revoke it and pair it again without the option.
 

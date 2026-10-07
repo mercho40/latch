@@ -25,6 +25,8 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
     private let continuation: AsyncStream<RemoteServiceEvent>.Continuation
     /// The server as Settings has it now; nil once it has been removed.
     private let readServer: @MainActor @Sendable () -> ServerProfile?
+    /// Keeps a device token the server gave for a pairing code in Settings, in the code's place.
+    private let keepToken: @MainActor @Sendable (LatchRemoteToken) -> Void
     private let backoff: LatchRemoteBackoff
     private let firstConnectionLimit: Duration
     private let state: Mutex<State>
@@ -65,8 +67,10 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
     /// `firstConnectionLimit` bounds a runtime's first connection; see `firstConnection`.
     init(server: ServerProfile, backoff: LatchRemoteBackoff = LatchRemoteBackoff(),
          firstConnectionLimit: Duration = .seconds(15),
-         readServer: @escaping @MainActor @Sendable () -> ServerProfile?) {
+         readServer: @escaping @MainActor @Sendable () -> ServerProfile?,
+         keepToken: @escaping @MainActor @Sendable (LatchRemoteToken) -> Void = { _ in }) {
         self.readServer = readServer
+        self.keepToken = keepToken
         serverID = server.id
         self.backoff = backoff
         self.firstConnectionLimit = firstConnectionLimit
@@ -148,6 +152,7 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
         // Left running on the server, if it still is: stopping it is `SessionModel`'s call.
         if let replaced { release(replaced.id, replaced.channel) }
         relayLinks(channel)
+        relayTokens(channel)
         channel.start()
         return (channel, server)
     }
@@ -465,6 +470,22 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
                     // Told once the events have all been delivered, if it ends this client.
                     break
                 }
+            }
+        }
+    }
+
+    /// Keeps a device token the channel was given for a pairing code. It counts as how the
+    /// server is reached before Settings saves it, so the save does not reconnect the channel.
+    private func relayTokens(_ channel: LatchRemoteRuntimeChannel) {
+        Task { [weak self] in
+            for await token in channel.issuedTokens {
+                guard let self else { return }
+                state.withLock { state in
+                    guard state.runtime?.channel === channel else { return }
+                    state.server.token = token
+                    state.reached.token = token
+                }
+                await keepToken(token)
             }
         }
     }

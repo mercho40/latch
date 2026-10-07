@@ -299,7 +299,13 @@ final class RemoteServerConnection: Sendable {
             close("sent no valid hello")
             return false
         }
-        guard let credential = server.checkToken().entry(matching: hello.token) else {
+        var issued: LatchRemoteToken?
+        var credential = server.checkToken().entry(matching: hello.token)
+        if credential == nil, let redeemed = server.redeem(hello.token, exchanges: hello.exchangesPairingCode) {
+            credential = redeemed.credential
+            issued = redeemed.issued
+        }
+        guard let credential else {
             server.authenticationFailed(self, reason: "wrong token")
             reject(LatchRemoteRejected(reason: .unauthorized, message: "The token is not valid for this server."))
             return false
@@ -319,7 +325,8 @@ final class RemoteServerConnection: Sendable {
             protocolVersion: version,
             server: configuration.serverInfo,
             heartbeatSeconds: configuration.heartbeatSeconds,
-            maxFrameBytes: LatchRemoteProtocol.maxFrameBytes
+            maxFrameBytes: LatchRemoteProtocol.maxFrameBytes,
+            deviceToken: issued
         ))
         // From here the handshake deadline no longer applies.
         let proceed = state.withLock { state in
@@ -357,7 +364,11 @@ final class RemoteServerConnection: Sendable {
         }
         ServerSocket.setReceiveTimeout(descriptor, configuration.silenceTimeout)
         server.log.log("connection \(serial) from \(peer) authenticated"
-            + (credential.device.map { " as device \($0)" + (credential.access == .watch ? ", watch only" : "") } ?? ""))
+            + (credential.device.map { " as device \($0)" + (credential.access == .watch ? ", watch only" : "") } ?? "")
+            + (issued != nil ? ", exchanging a pairing code for its token" : ""))
+        if issued == nil, let device = credential.device, credential.token.matches(hello.token) {
+            server.deviceConnected(device)
+        }
         server.spawn("latch.server.write") { self.runWriter(hubConnection) }
         return true
     }

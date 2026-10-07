@@ -24,6 +24,9 @@ public struct RemoteServerConfiguration: Sendable {
     public var maxUnauthenticatedConnectionsPerPeer = 8
     /// Requests of one connection the hub is working on; more are answered `busy`.
     public var maxOutstandingRequests = 32
+    /// How long a pairing code works before a device has used it.
+    public var pairingCodeLifetime: TimeInterval = Self.defaultPairingCodeLifetime
+    public static let defaultPairingCodeLifetime: TimeInterval = 10 * 60
     /// How often the token file is checked for a rotation, besides every hello and SIGHUP.
     public var tokenCheckInterval: Duration = .seconds(LatchRemoteProtocol.heartbeatSeconds)
     /// Event bytes a writer pulls per round before it looks at its replies again.
@@ -77,6 +80,11 @@ public final class RemoteServer: Sendable {
     let devices: [ServerDeviceTokens]
     /// When each token last authenticated, for `latch-server devices`.
     let tokenUse: ServerTokenUse
+    /// One-time pairing codes by access, and those exchanged and not yet followed by their
+    /// device's token, by device name. Exchanges hold the lock throughout, so two hellos with
+    /// one code make one token.
+    private let pairingCodes: [ServerDeviceTokens]
+    private let exchangedCodes = Mutex<[String: LatchRemoteToken]>([:])
     let configuration: RemoteServerConfiguration
     let log: ServerLog
     private let state = Mutex(State())
@@ -124,6 +132,9 @@ public final class RemoteServer: Sendable {
         self.tokens = tokens
         devices = [DeviceAccess.full, .watch].map { ServerDeviceTokens(configDirectory: tokens.directory, access: $0, owner: tokens.owner) }
         tokenUse = ServerTokenUse(configDirectory: tokens.directory)
+        pairingCodes = [DeviceAccess.full, .watch].map {
+            ServerDeviceTokens.pairingCodes(configDirectory: tokens.directory, access: $0, owner: tokens.owner)
+        }
         self.configuration = configuration
         self.log = log
         guard let stopPipe = ServerSocket.makePipe() else { fatalError("pipe: \(String(cString: strerror(errno)))") }
@@ -206,6 +217,54 @@ public final class RemoteServer: Sendable {
             connection.close(credential.device.map { "device \($0)'s token is no longer valid" } ?? "the server token changed")
         }
         return accepted
+    }
+
+    /// A hello's one-time pairing code, if it carried one that still works, as the device it
+    /// pairs. A client that `exchanges` it gets the device a token of its own, replacing any
+    /// it had, as `issued`, to put in the welcome; the code goes on giving that same token
+    /// until the device first connects with it, so a welcome lost on the way is not the end of
+    /// it. An app too old to exchange it keeps the code as the device's token. A code not yet
+    /// exchanged works for `pairingCodeLifetime` after `pair` made it.
+    func redeem(_ presented: String, exchanges: Bool) -> (credential: Credential, issued: LatchRemoteToken?)? {
+        exchangedCodes.withLock { exchanged in
+            for codes in pairingCodes {
+                guard let entries = try? codes.read(),
+                      let entry = entries.first(where: { (try? $0.token.get())?.matches(presented) == true }),
+                      case let .success(code) = entry.token else { continue }
+                let name = entry.name
+                let devices = ServerDeviceTokens(configDirectory: tokens.directory, access: codes.access, owner: tokens.owner)
+                do {
+                    if exchanged[name] == code {
+                        let token = try ServerTokenFile(directory: devices.directory, name: name, owner: tokens.owner).read()
+                        return (Credential(device: name, token: token, access: codes.access), exchanges ? token : nil)
+                    }
+                    guard let made = codes.written(name), Date().timeIntervalSince(made) <= configuration.pairingCodeLifetime else {
+                        return nil
+                    }
+                    // A name has one token of one access, whichever code came first.
+                    try devices.checkUnique(name)
+                    if exchanges {
+                        let token = try devices.replace(name)
+                        exchanged[name] = code
+                        return (Credential(device: name, token: token, access: codes.access), token)
+                    }
+                    try devices.replace(name, with: code)
+                    _ = try? codes.revoke(name)
+                    return (Credential(device: name, token: code, access: codes.access), nil)
+                } catch {
+                    return nil
+                }
+            }
+            return nil
+        }
+    }
+
+    /// A device connected with its own token: the code that paired it has done its work.
+    func deviceConnected(_ name: String) {
+        exchangedCodes.withLock { exchanged in
+            guard exchanged.removeValue(forKey: name) != nil else { return }
+            for codes in pairingCodes { _ = try? codes.revoke(name) }
+        }
     }
 
     /// The tokens a hello may carry now, read without closing anything.

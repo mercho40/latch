@@ -14,6 +14,11 @@ final class LatchRemoteGoldenTests: XCTestCase {
                 token: Sample.token,
                 client: LatchRemoteClientInfo(name: "Latch", version: "0.2.0", platform: "macOS 26.0")
             )), #"{"client":{"name":"Latch","platform":"macOS 26.0","version":"0.2.0"},"protocol":{"max":1,"min":1},"token":"latch_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","type":"hello"}"#),
+            (.hello(LatchRemoteHello(
+                token: Sample.token,
+                client: LatchRemoteClientInfo(name: "Latch", version: "0.3.0", platform: "iOS 18.0"),
+                exchangesPairingCode: true
+            )), #"{"client":{"name":"Latch","platform":"iOS 18.0","version":"0.3.0"},"exchangesPairingCode":true,"protocol":{"max":1,"min":1},"token":"latch_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","type":"hello"}"#),
             (.request(LatchRemoteRequest(id: Sample.frameID, command: .listRuntimes)), #"{"command":{"kind":"listRuntimes"},"id":"00000000-0000-0000-0000-00000000000C","type":"request"}"#),
             (.ping, #"{"type":"ping"}"#),
         ]
@@ -26,6 +31,8 @@ final class LatchRemoteGoldenTests: XCTestCase {
         let server = LatchRemoteServerInfo(version: "0.2.0", hostname: "vps", os: "Linux", arch: "aarch64", home: "/home/me")
         let cases: [(LatchRemoteServerFrame, String)] = [
             (.welcome(LatchRemoteWelcome(protocolVersion: 1, server: server)), #"{"heartbeatSeconds":15,"maxFrameBytes":8454144,"protocol":1,"server":{"arch":"aarch64","home":"/home/me","hostname":"vps","os":"Linux","version":"0.2.0"},"type":"welcome"}"#),
+            (.welcome(LatchRemoteWelcome(protocolVersion: 1, server: server, deviceToken: LatchRemoteToken(Sample.token)!)),
+             #"{"deviceToken":"latch_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","heartbeatSeconds":15,"maxFrameBytes":8454144,"protocol":1,"server":{"arch":"aarch64","home":"/home/me","hostname":"vps","os":"Linux","version":"0.2.0"},"type":"welcome"}"#),
             (.rejected(LatchRemoteRejected(
                 reason: .protocolMismatch, message: "Update Latch.", supported: LatchRemoteVersionRange(min: 1, max: 1)
             )), #"{"message":"Update Latch.","reason":"protocolMismatch","supported":{"max":1,"min":1},"type":"rejected"}"#),

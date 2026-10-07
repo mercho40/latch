@@ -25,6 +25,14 @@ public enum DeviceAccess: Sendable, Equatable {
         case .watch: "watch-devices"
         }
     }
+
+    /// Where one-time pairing codes for devices of this access wait to be used.
+    public var pairingCodeDirectoryName: String {
+        switch self {
+        case .full: "pairing-codes"
+        case .watch: "watch-pairing-codes"
+        }
+    }
 }
 
 /// Tokens of their own for single devices: `devices/NAME` in the config directory, or
@@ -45,6 +53,33 @@ public final class ServerDeviceTokens: Sendable {
         directory = (configDirectory as NSString).appendingPathComponent(access.directoryName)
         self.access = access
         self.owner = owner
+    }
+
+    /// The one-time pairing codes waiting for devices of `access`, one per device name, kept
+    /// and checked as tokens are: `pairing-codes/NAME` or `watch-pairing-codes/NAME`.
+    public static func pairingCodes(configDirectory: String, access: DeviceAccess = .full, owner: uid_t = geteuid()) -> ServerDeviceTokens {
+        ServerDeviceTokens(directory: (configDirectory as NSString).appendingPathComponent(access.pairingCodeDirectoryName),
+                           access: access, owner: owner)
+    }
+
+    private init(directory: String, access: DeviceAccess, owner: uid_t) {
+        self.directory = directory
+        self.access = access
+        self.owner = owner
+    }
+
+    /// A new token for the device in place of any it had, as a code's exchange or a new
+    /// pairing code needs; `token` to make it that one.
+    @discardableResult
+    public func replace(_ name: String, with token: LatchRemoteToken = .generate()) throws(ServerTokenError) -> LatchRemoteToken {
+        guard Self.isValidName(name) else { throw .invalidDeviceName(name) }
+        try ServerConfigDirectory.prepare(directory, owner: owner)
+        return try ServerTokenFile(directory: directory, name: name, owner: owner).replace(with: token)
+    }
+
+    /// When the device's file was last written: for a pairing code, when it was made.
+    public func written(_ name: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: (directory as NSString).appendingPathComponent(name)))?[.modificationDate] as? Date
     }
 
     /// 1 to 64 letters, digits, `.`, `_` and `-`, not starting with `.`: a file name with no
@@ -134,22 +169,38 @@ public final class ServerDeviceTokens: Sendable {
         return all.sorted { $0.name < $1.name }
     }
 
-    /// Revokes the device of that name, of whichever access; nil when there is none.
+    /// Revokes the device of that name, of whichever access, and any pairing code waiting for
+    /// it; nil when there was neither.
     public static func revoke(_ name: String, configDirectory: String, owner: uid_t = geteuid()) throws(ServerTokenError) -> DeviceAccess? {
-        for access in [DeviceAccess.full, .watch]
-            where try ServerDeviceTokens(configDirectory: configDirectory, access: access, owner: owner).revoke(name) {
-            return access
+        var revoked: DeviceAccess?
+        for access in [DeviceAccess.full, .watch] {
+            if try pairingCodes(configDirectory: configDirectory, access: access, owner: owner).revoke(name) { revoked = access }
+            if try ServerDeviceTokens(configDirectory: configDirectory, access: access, owner: owner).revoke(name) { revoked = access }
         }
-        return nil
+        return revoked
+    }
+
+    /// A new one-time pairing code for the device, in place of any waiting for it with either
+    /// access.
+    public static func makePairingCode(_ name: String, access: DeviceAccess, configDirectory: String,
+                                       owner: uid_t = geteuid()) throws(ServerTokenError) -> LatchRemoteToken {
+        try ServerDeviceTokens(configDirectory: configDirectory, access: access, owner: owner).checkUnique(name)
+        _ = try pairingCodes(configDirectory: configDirectory, access: access == .full ? .watch : .full, owner: owner).revoke(name)
+        return try pairingCodes(configDirectory: configDirectory, access: access, owner: owner).replace(name)
     }
 
     /// The device's token, created on first use, unless the name is a device's of the other
     /// access: one device, one token.
     public func readOrCreateUnique(_ name: String) throws(ServerTokenError) -> LatchRemoteToken {
-        let other = ServerDeviceTokens(configDirectory: (directory as NSString).deletingLastPathComponent,
-                                       access: access == .full ? .watch : .full, owner: owner)
-        if try other.read().contains(where: { $0.name == name }) { throw .deviceExists(name, access: other.access) }
+        try checkUnique(name)
         return try readOrCreate(name)
+    }
+
+    /// Throws when the name is a device's of the other access.
+    public func checkUnique(_ name: String) throws(ServerTokenError) {
+        let configDirectory = (directory as NSString).deletingLastPathComponent
+        let other = ServerDeviceTokens(configDirectory: configDirectory, access: access == .full ? .watch : .full, owner: owner)
+        if try other.read().contains(where: { $0.name == name }) { throw .deviceExists(name, access: other.access) }
     }
 
     private func names() throws(ServerTokenError) -> [String] {

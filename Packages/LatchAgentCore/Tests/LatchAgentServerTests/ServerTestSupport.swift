@@ -102,8 +102,9 @@ final class TestSocketClient: Sendable {
         ServerSocket.shutdownBoth(descriptor)
     }
 
-    func hello(token: String, range: LatchRemoteVersionRange = .supported) {
-        send(.hello(LatchRemoteHello(protocolRange: range, token: token, client: LatchRemoteClientInfo(name: "test", version: "1", platform: "test"))))
+    func hello(token: String, range: LatchRemoteVersionRange = .supported, exchangesPairingCode: Bool = false) {
+        send(.hello(LatchRemoteHello(protocolRange: range, token: token, client: LatchRemoteClientInfo(name: "test", version: "1", platform: "test"),
+                                     exchangesPairingCode: exchangesPairingCode)))
     }
 
     /// Sends a request and returns its id.

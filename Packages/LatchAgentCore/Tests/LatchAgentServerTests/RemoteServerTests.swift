@@ -445,6 +445,102 @@ final class RemoteServerTests: XCTestCase {
         }
     }
 
+    // MARK: Pairing codes
+
+    /// What the welcome gave the hello, or nil when it was refused.
+    private func exchange(_ code: LatchRemoteToken, on testbed: ServerTestbed, exchanges: Bool = true) async throws -> LatchRemoteWelcome? {
+        let client = try testbed.connect()
+        client.hello(token: code.rawValue, exchangesPairingCode: exchanges)
+        switch try await client.readFrame() {
+        case let .welcome(welcome): return welcome
+        case .rejected: return nil
+        default: throw HubTestError.unexpected("neither a welcome nor a rejection")
+        }
+    }
+
+    func testAPairingCodeIsExchangedForADeviceTokenOnce() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("phone", access: .full, configDirectory: testbed.configDirectory)
+            let first = try await exchange(code, on: testbed)
+            let token = try XCTUnwrap(first?.deviceToken)
+            XCTAssertNotEqual(token, code)
+            try await testbed.waitForLog("authenticated as device phone, exchanging a pairing code for its token")
+            // A welcome lost on its way: the code gives the same token again.
+            let retried = try await exchange(code, on: testbed)
+            XCTAssertEqual(retried?.deviceToken, token)
+
+            // The device connects with its token: the code is spent.
+            let device = try testbed.connect()
+            device.hello(token: token.rawValue, exchangesPairingCode: true)
+            guard case let .welcome(welcome) = try await device.readFrame() else { return XCTFail("expected a welcome") }
+            XCTAssertNil(welcome.deviceToken)
+            let spent = try await exchange(code, on: testbed)
+            XCTAssertNil(spent)
+            XCTAssertEqual(try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory).map(\.name), ["phone"])
+            XCTAssertEqual(try ServerDeviceTokens.pairingCodes(configDirectory: testbed.configDirectory).read().count, 0)
+        }
+    }
+
+    func testAnAppThatCannotExchangeKeepsTheCodeAsItsToken() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("old-phone", access: .full, configDirectory: testbed.configDirectory)
+            let welcome = try await exchange(code, on: testbed, exchanges: false)
+            XCTAssertNotNil(welcome)
+            XCTAssertNil(welcome?.deviceToken)
+            let devices = try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory)
+            XCTAssertEqual(devices.map(\.name), ["old-phone"])
+            XCTAssertEqual(try devices[0].token.get(), code)
+            // It goes on working, as the device's token now.
+            let again = try await exchange(code, on: testbed, exchanges: false)
+            XCTAssertNotNil(again)
+        }
+    }
+
+    func testAPairingCodeNobodyUsesExpires() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("late", access: .full, configDirectory: testbed.configDirectory)
+            let codes = ServerDeviceTokens.pairingCodes(configDirectory: testbed.configDirectory)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-11 * 60)],
+                                                  ofItemAtPath: codes.directory + "/late")
+            let expired = try await exchange(code, on: testbed)
+            XCTAssertNil(expired)
+            XCTAssertEqual(try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory).count, 0)
+        }
+    }
+
+    func testPairingADeviceAgainReplacesItsToken() async throws {
+        try await withServer { testbed in
+            let devices = ServerDeviceTokens(configDirectory: testbed.configDirectory)
+            let old = try devices.readOrCreate("phone")
+            let oldPhone = try testbed.connect()
+            oldPhone.hello(token: old.rawValue)
+            guard case .welcome = try await oldPhone.readFrame() else { return XCTFail("expected a welcome") }
+
+            let code = try ServerDeviceTokens.makePairingCode("phone", access: .full, configDirectory: testbed.configDirectory)
+            let exchanged = try await exchange(code, on: testbed)
+            let new = try XCTUnwrap(exchanged?.deviceToken)
+            XCTAssertNotEqual(new, old)
+            testbed.server.checkToken()
+            try await oldPhone.expectClosed()
+        }
+    }
+
+    func testAWatchOnlyCodePairsAWatchOnlyDevice() async throws {
+        try await withServer { testbed in
+            let code = try ServerDeviceTokens.makePairingCode("tv", access: .watch, configDirectory: testbed.configDirectory)
+            let exchanged = try await exchange(code, on: testbed)
+            let token = try XCTUnwrap(exchanged?.deviceToken)
+            let tv = try testbed.connect()
+            tv.hello(token: token.rawValue)
+            guard case .welcome = try await tv.readFrame() else { return XCTFail("expected a welcome") }
+            guard case let .failure(error) = try await tv.reply(to: tv.request(.stopRuntime(runtimeID: AgentRuntimeID("x")))) else {
+                return XCTFail("expected a refusal")
+            }
+            XCTAssertEqual(error.code, .forbidden)
+            XCTAssertEqual(try ServerDeviceTokens.readAll(configDirectory: testbed.configDirectory).map(\.access), [.watch])
+        }
+    }
+
     func testAWatchOnlyDeviceFollowsAgentsAndChangesNothing() async throws {
         try await withServer { testbed in
             let viewerToken = try ServerDeviceTokens(configDirectory: testbed.configDirectory, access: .watch).readOrCreate("viewer")

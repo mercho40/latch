@@ -87,6 +87,35 @@ final class ServerDoctorTests: XCTestCase {
                        "No problems found.")
     }
 
+    func testDevicesNobodyUsesArePointedOut() throws {
+        try ServerConfigDirectory.prepare(config)
+        try ServerTokenFile(directory: config).readOrCreate()
+        let devices = ServerDeviceTokens(configDirectory: config)
+        for name in ["phone", "old-ipad", "spare", "new"] { try devices.readOrCreate(name) }
+        let now = Date()
+        let use = ServerTokenUse(configDirectory: config, now: { now.addingTimeInterval(-40 * 86_400) })
+        use.note(device: "old-ipad", from: "100.64.0.2")
+        ServerTokenUse(configDirectory: config, now: { now.addingTimeInterval(-3600) }).note(device: "phone", from: "100.64.0.1")
+        // Paired ten days ago and never seen; "new" was paired just now. An hour more, so the
+        // round trip through the file's timestamp cannot make it 9.99 days.
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-10 * 86_400 - 3600)], ofItemAtPath: devices.directory + "/spare")
+        try install("claude-agent-acp")
+        var doctor = ServerDoctor(
+            configDirectory: config, owner: geteuid(), runsAsRoot: false, allowRoot: false, listen: [loopback],
+            allowUnencryptedNetwork: false, interfaces: [],
+            environment: AgentLaunchEnvironment(environment: ["PATH": bin.path], home: root, includeCommonLocations: false),
+            homeDirectory: root.path, nodeVersion: { _ in nil }, ask: { _, _ in .welcomed(version: "1", hostname: "h") })
+        doctor.now = now
+        let sections = doctor.sections()
+        let text = ServerDoctor.render(sections, header: "doctor")
+        assertContains(text,
+                       "· device old-ipad last connected 40 days ago; if it is gone, `latch-server devices --revoke old-ipad`",
+                       "· device spare has not connected since it was paired 10 days ago")
+        XCTAssertFalse(text.contains("device phone last"), text)
+        XCTAssertFalse(text.contains("device new has"), text)
+        XCTAssertFalse(ServerDoctor.hasProblems(sections), text)
+    }
+
     func testNothingSetUpYetSaysWhatComesFirst() {
         let asked = Asked()
         let (sections, text) = doctor(asked: asked)

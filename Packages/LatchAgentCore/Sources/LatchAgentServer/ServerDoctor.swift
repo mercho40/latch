@@ -50,6 +50,10 @@ struct ServerDoctor {
     var nodeVersion: (String) -> String?
     /// Sends a hello with the token to a listen address and reports what answered.
     var ask: (ServerSocketAddress, LatchRemoteToken) -> Answer
+    var now = Date()
+
+    /// A device unused this long is pointed out as one that may be gone.
+    static let staleDeviceAge: TimeInterval = 30 * 86_400
 
     func sections() -> [Section] {
         let (configuration, token) = configurationSection()
@@ -116,6 +120,19 @@ struct ServerDoctor {
             }
             for case let (name, .failure(error)) in devices {
                 add(.problem, "device \(name) is refused: \(error)")
+            }
+            // A token is a shell for as long as it lasts: point out the ones nobody uses.
+            let use = ServerTokenUse.read(configDirectory: configDirectory)
+            for name in usable {
+                if let last = use?.devices[name]?.at {
+                    let days = Int(now.timeIntervalSince(last) / 86_400)
+                    if now.timeIntervalSince(last) >= Self.staleDeviceAge {
+                        add(.note, "device \(name) last connected \(days) days ago; if it is gone, `latch-server devices --revoke \(name)`")
+                    }
+                } else if let paired = Self.modified((configDirectory as NSString).appendingPathComponent("\(ServerDeviceTokens.directoryName)/\(name)")),
+                          now.timeIntervalSince(paired) >= 7 * 86_400 {
+                    add(.note, "device \(name) has not connected since it was paired \(Int(now.timeIntervalSince(paired) / 86_400)) days ago; if it never will, `latch-server devices --revoke \(name)`")
+                }
             }
         } catch {
             add(.problem, "\(error)")
@@ -226,6 +243,10 @@ struct ServerDoctor {
             add(.note, "sign-in is not checked: sign in to each agent as this user, as with `claude` or `codex login`")
         }
         return Section(title: "Agents, found as latch-server finds them: on this PATH and in the usual install locations", findings: findings)
+    }
+
+    private static func modified(_ path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
     }
 
     /// 22 for `v22.10.0`.

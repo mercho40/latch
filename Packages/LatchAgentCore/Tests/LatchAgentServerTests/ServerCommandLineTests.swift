@@ -61,6 +61,14 @@ final class ServerCommandLineTests: XCTestCase {
         checked.config.configDirectory = "/c"
         XCTAssertEqual(try parse("doctor", "--listen", "100.101.102.103:7428", "--allow-unencrypted-network", "--config-dir", "/c"), .doctor(checked))
         XCTAssertEqual(try parse("doctor"), .doctor(ServeOptions()))
+        var service = ServeOptions()
+        service.listen = ["127.0.0.1:7801"]
+        service.detachedTimeout = .seconds(3600)
+        service.logAgentStandardError = true
+        XCTAssertEqual(try parse("install-service", "--listen", "127.0.0.1:7801", "--detached-timeout", "1h", "--log-agent-stderr", "--replace"),
+                       .installService(service, replace: true))
+        XCTAssertEqual(try parse("install-service"), .installService(ServeOptions(), replace: false))
+        XCTAssertEqual(try parse("uninstall-service", "--config-dir", "/c"), .uninstallService(ConfigOptions(configDirectory: "/c")))
         XCTAssertEqual(try parse("devices", "--revoke=phone", "--config-dir", "/c"), .devices(ConfigOptions(configDirectory: "/c"), revoke: "phone"))
         XCTAssertEqual(try parse("--version"), .version)
         XCTAssertEqual(try parse("--help"), .help)
@@ -97,6 +105,8 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["devices", "--revoke", "a", "--revoke", "b"], "twice")
         assertRejected(["doctor", "--detached-timeout", "1h"], "does not apply")
         assertRejected(["doctor", "--qr"], "does not apply")
+        assertRejected(["--replace"], "does not apply")
+        assertRejected(["uninstall-service", "--listen", "127.0.0.1:1"], "does not apply")
     }
 
     func testDurations() {

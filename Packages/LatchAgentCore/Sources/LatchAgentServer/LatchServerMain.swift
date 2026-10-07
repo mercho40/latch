@@ -119,6 +119,10 @@ public enum LatchServerMain {
             }
         case let .doctor(options):
             return doctor(options)
+        case let .installService(options, replace):
+            return installService(options, replace: replace)
+        case let .uninstallService(config):
+            return uninstallService(config)
         case let .serve(options):
             return serve(options)
         }
@@ -244,6 +248,67 @@ public enum LatchServerMain {
         let user = getpwuid(geteuid()).map { String(cString: $0.pointee.pw_name) } ?? "uid \(geteuid())"
         print(ServerDoctor.render(sections, header: "latch-server \(LatchServerVersion.current) on \(info.hostname), \(info.os) \(info.arch), as \(user)"))
         return ServerDoctor.hasProblems(sections) ? 1 : 0
+    }
+
+    /// The unit for serving with `options`, after the checks serving would make, with the
+    /// server token created so the next step can be pairing.
+    private static func installService(_ options: ServeOptions, replace: Bool) -> Int32 {
+        #if os(macOS)
+        printError("install-service writes a systemd user unit, for Linux; on a Mac, run latch-server from a launch agent you write")
+        return 1
+        #else
+        let interfaces = ServerListenPolicy.systemInterfaces()
+        do {
+            for value in options.listenAddresses {
+                let address = try ServerListenPolicy.parse(value)
+                switch ServerListenPolicy.evaluate(address, allowUnencryptedNetwork: options.allowUnencryptedNetwork, interfaces: interfaces) {
+                case let .refused(message):
+                    printError(message)
+                    return 2
+                case .tailnetNotUp:
+                    printError("\(address) is not on a Tailscale interface yet; the service waits for it when it starts")
+                case .allowed, .allowedUnencrypted:
+                    break
+                }
+            }
+        } catch {
+            printError("\(error)")
+            return 2
+        }
+        guard let tokens = tokenFile(options.config) else { return 1 }
+        do {
+            try tokens.readOrCreate()
+        } catch {
+            printError("\(error)")
+            return 1
+        }
+        let outcome = service().install(
+            executable: URL(fileURLWithPath: "/proc/self/exe").resolvingSymlinksInPath().path, options: options, replace: replace
+        )
+        outcome.lines.forEach { print($0) }
+        return outcome.status
+        #endif
+    }
+
+    private static func uninstallService(_ config: ConfigOptions) -> Int32 {
+        #if os(macOS)
+        printError("uninstall-service removes the systemd user unit install-service writes, on Linux")
+        return 1
+        #else
+        let outcome = service().uninstall()
+        outcome.lines.forEach { print($0) }
+        return outcome.status
+        #endif
+    }
+
+    private static func service() -> ServerService {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return ServerService(
+            unitDirectory: ServerService.unitDirectory(environment: ProcessInfo.processInfo.environment, homeDirectory: home),
+            homeDirectory: home,
+            user: getpwuid(geteuid()).map { String(cString: $0.pointee.pw_name) } ?? "\(geteuid())",
+            run: ServerService.runCommand
+        )
     }
 
     private static func tokenFile(_ config: ConfigOptions) -> ServerTokenFile? {

@@ -96,7 +96,13 @@ systemctl --user reload latch-server
 
 ## Run it as a systemd user service
 
-Create the directory for user units, which a new user does not have yet:
+```sh
+latch-server install-service
+```
+
+writes `~/.config/systemd/user/latch-server.service`, which runs this binary with the options you give the command, such as `--listen` (see Tailscale below), then enables and starts the service, and enables lingering for your user, which starts your user's services at boot and keeps them running after you log out; where lingering needs `sudo`, it prints the command. Install the binary where it will stay, such as `~/.local/bin`, first: the unit runs it from where it is. Run `install-service` again with other options to change them, and the running service restarts with them. It does not replace a `latch-server.service` you wrote yourself unless you pass `--replace`. `latch-server uninstall-service` stops the service, and with it every agent it runs, and removes the unit it wrote; the token and device tokens stay.
+
+To write the unit yourself instead, create the directory for user units, which a new user does not have yet:
 
 ```sh
 mkdir -p ~/.config/systemd/user

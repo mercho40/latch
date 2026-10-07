@@ -13,6 +13,11 @@ public enum ServerCommand: Equatable, Sendable {
     case devices(ConfigOptions, revoke: String?)
     /// Checks what serving with these options needs, changing nothing.
     case doctor(ServeOptions)
+    /// Writes a systemd user unit that serves with these options, and starts it; `replace`
+    /// replaces a unit the user wrote.
+    case installService(ServeOptions, replace: Bool)
+    /// Stops the service and removes the unit `installService` wrote.
+    case uninstallService(ConfigOptions)
     case version
     case help
 }
@@ -71,6 +76,10 @@ public enum ServerCommandLine {
                                               revoke one
            latch-server doctor [--listen HOST:PORT] [--allow-unencrypted-network]
                                               check what serving with those options needs
+           latch-server install-service [options] [--replace]
+                                              run latch-server with those options as a
+                                              systemd user service, now and at boot
+           latch-server uninstall-service    stop that service and remove its unit
            latch-server --version | --help
 
     options:
@@ -92,6 +101,8 @@ public enum ServerCommandLine {
                                     created on first use, that revoking it ends; a name of
                                     letters, digits, '.', '_' and '-'
       --revoke DEVICE               with devices, delete DEVICE's token
+      --replace                     with install-service, replace a latch-server.service
+                                    it did not write
 
     SIGHUP re-reads the token files at once; a rotated or revoked token closes the connections that used it.
     """
@@ -113,6 +124,7 @@ public enum ServerCommandLine {
         var webSocket = false
         var device: String?
         var revoke: String?
+        var replace = false
         var version = false
         var help = false
         var seen: Set<String> = []
@@ -144,10 +156,10 @@ public enum ServerCommandLine {
 
             switch option {
             case "--listen":
-                try allowed(option, in: [nil, "doctor"])
+                try allowed(option, in: [nil, "doctor", "install-service"])
                 serve.listen.append(try value())
             case "--allow-unencrypted-network":
-                try allowed(option, in: [nil, "doctor"])
+                try allowed(option, in: [nil, "doctor", "install-service"])
                 try flag()
                 serve.allowUnencryptedNetwork = true
             case "--config-dir":
@@ -155,14 +167,14 @@ public enum ServerCommandLine {
                 guard !path.isEmpty else { throw ServerCommandLineError("--config-dir needs a path") }
                 serve.config.configDirectory = path
             case "--detached-timeout":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "install-service"])
                 let text = try value()
                 guard let duration = parseDuration(text) else {
                     throw ServerCommandLineError("--detached-timeout \(text): expected a duration such as 24h, 90m, 30s or 0")
                 }
                 serve.detachedTimeout = duration
             case "--log-agent-stderr":
-                try allowed(option, in: [nil])
+                try allowed(option, in: [nil, "install-service"])
                 try flag()
                 serve.logAgentStandardError = true
             case "--allow-root":
@@ -202,6 +214,10 @@ public enum ServerCommandLine {
                     throw ServerCommandLineError("\(option) \(name): expected 1 to 64 letters, digits, '.', '_' and '-', not starting with '.'")
                 }
                 if option == "--device" { device = name } else { revoke = name }
+            case "--replace":
+                try allowed(option, in: ["install-service"])
+                try flag()
+                replace = true
             case "--version":
                 try flag()
                 version = true
@@ -232,6 +248,10 @@ public enum ServerCommandLine {
             return .devices(serve.config, revoke: revoke)
         case "doctor":
             return .doctor(serve)
+        case "install-service":
+            return .installService(serve, replace: replace)
+        case "uninstall-service":
+            return .uninstallService(serve.config)
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }

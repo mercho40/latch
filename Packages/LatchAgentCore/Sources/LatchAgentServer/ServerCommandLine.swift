@@ -63,6 +63,8 @@ public struct ServerCommandLineError: Error, Equatable, Sendable, CustomStringCo
     init(_ description: String) {
         self.description = description
     }
+
+    static let pairNeedsHost = ServerCommandLineError("pair needs --host, the name or address your device connects to")
 }
 
 public enum ServerCommandLine {
@@ -239,7 +241,7 @@ public enum ServerCommandLine {
         case "token":
             return .token(serve.config, rotate: rotate)
         case "pair":
-            guard let host else { throw ServerCommandLineError("pair needs --host, the name or address clients reach this server at") }
+            guard let host else { throw ServerCommandLineError.pairNeedsHost }
             guard qr || !invert else { throw ServerCommandLineError("--invert needs --qr") }
             let style: PairQRCode? = qr ? (invert ? .darkModulesDrawn : .lightModulesDrawn) : nil
             let transport: LatchRemoteTransport = webSocket ? .webSocket : .tcp
@@ -255,6 +257,19 @@ public enum ServerCommandLine {
         case let other?:
             throw ServerCommandLineError("unknown command \(other)")
         }
+    }
+
+    /// What `--host` can be on this machine, for `pair` without one: its tailnet addresses,
+    /// loopback through an SSH tunnel, and a TLS proxy's host name.
+    static func hostSuggestions(interfaces: [ServerInterfaceAddress]) -> [String] {
+        var seen = Set<String>()
+        let tailnet = interfaces.filter { interface in
+            interface.address.count == 4 && LatchRemoteAddressPolicy.classify(interface.address) == .tailnet
+                && ServerListenPolicy.defaultTunnelPrefixes.contains { interface.name.hasPrefix($0) }
+        }.map { ServerSocketAddress(bytes: $0.address, port: 0).host }.filter { seen.insert($0).inserted }
+        return tailnet.map { "  --host \($0)    over Tailscale: this machine's tailnet address, or its MagicDNS name" }
+            + ["  --host 127.0.0.1    from a Mac through an SSH tunnel, or from this machine",
+               "  --host NAME --wss   through a Cloudflare Tunnel or another TLS proxy, at its host name"]
     }
 
     /// `0`, or whole numbers with units `d`, `h`, `m` and `s` in that order, such as `24h`,

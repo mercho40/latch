@@ -115,9 +115,12 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertTrue(none.error.contains("no device has a token of its own"), none.error)
         XCTAssertTrue(none.error.contains("the server token: no connection recorded"), none.error)
 
-        let shared = try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--config-dir", config] + rootArguments).output)
+        let sharedRun = try run(["pair", "--host", "vps", "--config-dir", config] + rootArguments)
+        XCTAssertTrue(sharedRun.error.contains("which every device paired with it shares"), sharedRun.error)
+        let shared = try LatchRemotePairing(parsing: sharedRun.output)
         let phone = try run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments)
         XCTAssertEqual(phone.status, 0, phone.error)
+        XCTAssertEqual(phone.error, "")
         let phonePairing = try LatchRemotePairing(parsing: phone.output)
         XCTAssertNotEqual(phonePairing.token, shared.token)
         XCTAssertEqual(try LatchRemotePairing(parsing: run(["pair", "--host", "vps", "--device", "phone", "--config-dir", config] + rootArguments).output).token,
@@ -171,6 +174,7 @@ final class LatchServerExecutableTests: XCTestCase {
         defer { server.kill() }
         let token = try ServerTokenFile(directory: server.config).read()
         XCTAssertFalse(server.stderr.text.contains(token.rawValue))
+        XCTAssertTrue(server.stderr.text.contains("no device has connected yet: pair one with `latch-server pair"), server.stderr.text)
 
         let client = try await server.authenticated()
         let id = AgentRuntimeID("pid")
@@ -291,6 +295,7 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertEqual(status, 0)
         let log = try await server.finishedLog()
         XCTAssertTrue(log.contains("device tokens: phone\n"), log)
+        XCTAssertFalse(log.contains("no device has connected yet"), log)
         XCTAssertTrue(log.contains("authenticated as device phone"), log)
         XCTAssertTrue(log.contains("closed: device phone's token is no longer valid"), log)
         XCTAssertFalse(log.contains(token.rawValue))

@@ -10,6 +10,15 @@ final class ServerCommandLineTests: XCTestCase {
         try ServerCommandLine.parse(arguments)
     }
 
+    private static func parseError(_ arguments: [String]) -> ServerCommandLineError? {
+        do {
+            _ = try ServerCommandLine.parse(arguments)
+            return nil
+        } catch {
+            return error
+        }
+    }
+
     private func assertRejected(_ arguments: [String], _ fragment: String, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertThrowsError(try ServerCommandLine.parse(arguments), file: file, line: line) { error in
             XCTAssertTrue("\(error)".contains(fragment), "\(error)", file: file, line: line)
@@ -107,6 +116,20 @@ final class ServerCommandLineTests: XCTestCase {
         assertRejected(["doctor", "--qr"], "does not apply")
         assertRejected(["--replace"], "does not apply")
         assertRejected(["uninstall-service", "--listen", "127.0.0.1:1"], "does not apply")
+    }
+
+    func testPairSuggestsWhatTheHostCanBe() {
+        XCTAssertEqual(Self.parseError(["pair"]), .pairNeedsHost)
+        let suggestions = ServerCommandLine.hostSuggestions(interfaces: [
+            ServerInterfaceAddress(name: ServerListenPolicy.defaultTunnelPrefixes[0] + "0", address: [100, 101, 102, 103]),
+            ServerInterfaceAddress(name: "eth0", address: [192, 168, 1, 7]),
+            ServerInterfaceAddress(name: "lo", address: [127, 0, 0, 1]),
+        ])
+        XCTAssertEqual(suggestions.count, 3)
+        XCTAssertTrue(suggestions[0].hasPrefix("  --host 100.101.102.103 "), suggestions[0])
+        XCTAssertTrue(suggestions[1].hasPrefix("  --host 127.0.0.1 "), suggestions[1])
+        XCTAssertTrue(suggestions[2].hasPrefix("  --host NAME --wss "), suggestions[2])
+        XCTAssertFalse(suggestions.joined().contains("192.168"), "an unencrypted network is never suggested")
     }
 
     func testDurations() {

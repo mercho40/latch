@@ -29,6 +29,10 @@ public enum LatchServerMain {
         let command: ServerCommand
         do {
             command = try ServerCommandLine.parse(arguments)
+        } catch .pairNeedsHost {
+            printError("\(ServerCommandLineError.pairNeedsHost), such as:\n"
+                + ServerCommandLine.hostSuggestions(interfaces: ServerListenPolicy.systemInterfaces()).joined(separator: "\n"))
+            return 2
         } catch {
             printError("\(error)\n\n\(ServerCommandLine.usage)")
             return 2
@@ -71,6 +75,10 @@ public enum LatchServerMain {
                 return 1
             }
             print(pairing)
+            if device == nil {
+                printError("this string carries the server token, which every device paired with it shares; "
+                    + "`--device NAME` gives a device a token of its own, which you can revoke alone")
+            }
             guard let qr else { return 0 }
             do {
                 let symbol = try QRCode(pairing)
@@ -155,6 +163,9 @@ public enum LatchServerMain {
         }
         for case let (name, .failure(error)) in devices {
             log.log("warning: device \(name) is refused: \(error)")
+        }
+        if devices.isEmpty, ServerTokenUse.read(configDirectory: tokens.directory)?.server == nil {
+            log.log("no device has connected yet: pair one with `latch-server pair --host NAME --device DEVICE --qr`, and check the setup with `latch-server doctor`")
         }
 
         let controller = ServeController(log: log)

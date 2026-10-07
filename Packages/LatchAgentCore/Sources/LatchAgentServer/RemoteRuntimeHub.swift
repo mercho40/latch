@@ -30,6 +30,15 @@ public struct RemoteRuntimeHubConfiguration: Sendable {
     /// Exited runtimes whose record stays attachable, and whose IDs cannot be reused.
     public var retainedExitedRuntimes = 8
     public var retainedTurns = 64
+    /// Text chunks of one agent message or thought that follow the first within this long go
+    /// out as one event with their text joined. Agents stream a few characters per chunk, and
+    /// each event otherwise costs its envelope in the journal and a frame on every connection.
+    /// Zero, the default, journals each chunk as it comes; `latch-server` uses
+    /// `servedChunkCoalescingWindow`.
+    public var chunkCoalescingWindow: Duration = .zero
+    public static let servedChunkCoalescingWindow: Duration = .milliseconds(50)
+    /// Joined text past this many bytes goes out at once.
+    public var maxCoalescedChunkBytes = 32 * 1024
 
     public init() {}
 }
@@ -99,6 +108,7 @@ public actor RemoteRuntimeHub {
     private var exited: [AgentRuntimeID] = []
     private var nextIncarnation: UInt64 = 0
     private var nextBinding: UInt64 = 0
+    private var nextCoalescing: UInt64 = 0
     private var isShutDown = false
     private var eventTask: Task<Void, Never>?
     private var reaperTask: Task<Void, Never>?
@@ -392,8 +402,9 @@ public actor RemoteRuntimeHub {
     /// so they may precede `turnEnded`; only `exited` being last is guaranteed.
     private func finish(_ id: AgentRuntimeID, exit: LatchRemoteExit, keepJournal: Bool, retain: Bool = true) {
         guard runtimes[id]?.lifecycle != .exited else { return }
-        // What waited for history that will not come now goes first.
+        // What waited for history that will not come now goes first, and text held to be joined.
         endReplayDrain(id)
+        flushCoalescedChunk(id)
         guard var state = runtimes[id] else { return }
         let before = journal.lastSequence(of: id)
         if let turnID = state.activeTurnID {
@@ -841,6 +852,7 @@ public actor RemoteRuntimeHub {
     /// than journaled as `omitted`, which would tell the client that loaded it, and has it,
     /// that output was lost.
     private func publishReplayed(_ notification: ACPSessionNotification, encoded: Data? = nil, for id: AgentRuntimeID) {
+        flushCoalescedChunk(id)
         collectReplayTitle(id, from: notification)
         let encoded = encoded ?? Self.encodedReplay(of: notification)
         guard fitsAFrame(encoded) else { return }
@@ -861,6 +873,7 @@ public actor RemoteRuntimeHub {
     /// journaled before or among it. Ended by an update from the frame before the reply or
     /// later, by the runtime finishing, or by the timeout.
     private func beginReplayDrain(_ id: AgentRuntimeID, loadedThrough: UInt64, token: UInt64) {
+        flushCoalescedChunk(id)
         runtimes[id]!.replayDrain = ReplayDrain(loadedThrough: loadedThrough, token: token)
         let timeout = configuration.replayDrainTimeout
         Task { [weak self] in
@@ -900,12 +913,53 @@ public actor RemoteRuntimeHub {
     }
 
     /// Encodes once; every frame that carries the event splices these bytes. While a load's
-    /// history is still on its way, the event waits for it.
+    /// history is still on its way, the event waits for it. A text chunk may wait to be joined
+    /// by the next ones; anything else goes out after it.
     private func publish(_ event: LatchRemoteEvent, for id: AgentRuntimeID) {
         if runtimes[id]?.replayDrain != nil {
             runtimes[id]!.replayDrain!.deferred.append(event)
             return
         }
+        if coalesce(event, for: id) { return }
+        flushCoalescedChunk(id)
+        journalEvent(event, for: id)
+    }
+
+    /// Holds a text chunk of the agent's, or joins it to the one held when both belong to the
+    /// same message and differ in nothing but their text. The joined chunk carries the latest
+    /// one's `localSequence`. False for any other event.
+    private func coalesce(_ event: LatchRemoteEvent, for id: AgentRuntimeID) -> Bool {
+        guard configuration.chunkCoalescingWindow > .zero, runtimes[id] != nil,
+              case let .sessionUpdate(notification, false) = event,
+              let chunk = CoalescingChunk(notification, token: nextCoalescing + 1) else { return false }
+        if var held = runtimes[id]!.coalescing, held.shape == chunk.shape,
+           held.text.utf8.count + chunk.text.utf8.count <= configuration.maxCoalescedChunkBytes {
+            held.text += chunk.text
+            held.latest = notification
+            runtimes[id]!.coalescing = held
+            return true
+        }
+        flushCoalescedChunk(id)
+        nextCoalescing += 1
+        runtimes[id]!.coalescing = chunk
+        let window = configuration.chunkCoalescingWindow
+        let token = chunk.token
+        Task { [weak self] in
+            try? await Task.sleep(for: window)
+            await self?.flushCoalescedChunk(id, token: token)
+        }
+        return true
+    }
+
+    /// Journals the chunk held for the runtime, if any. With a `token`, only that chunk, as
+    /// its window ends.
+    private func flushCoalescedChunk(_ id: AgentRuntimeID, token: UInt64? = nil) {
+        guard let held = runtimes[id]?.coalescing, token.map({ $0 == held.token }) ?? true else { return }
+        runtimes[id]!.coalescing = nil
+        journalEvent(.sessionUpdate(notification: held.joined), for: id)
+    }
+
+    private func journalEvent(_ event: LatchRemoteEvent, for id: AgentRuntimeID) {
         var encoded = (try? LatchRemoteCoding.encodeEvent(event)) ?? Data()
         if encoded.isEmpty || encoded.count > configuration.maxEncodedEventBytes {
             // A request left out could never be answered: it goes as its summary instead.
@@ -1081,6 +1135,40 @@ private enum SessionBindingState {
     case bound(LatchRemoteSessionBinding)
 }
 
+/// An agent's text chunk, held to be joined by the next ones of the same message.
+struct CoalescingChunk {
+    /// The notification with its text left out: chunks are joined only when theirs match, so
+    /// a joined chunk differs from those it replaces in nothing but its text.
+    let shape: ACPJSONValue
+    var text: String
+    /// The chunk joined last, whose `localSequence` the joined one carries.
+    var latest: ACPSessionNotification
+    let token: UInt64
+
+    /// Only an `agent_message_chunk` or `agent_thought_chunk` whose content is text.
+    init?(_ notification: ACPSessionNotification, token: UInt64) {
+        guard case var .object(update) = notification.update,
+              case let .string(kind)? = update["sessionUpdate"], kind == "agent_message_chunk" || kind == "agent_thought_chunk",
+              case var .object(content)? = update["content"], content["type"] == .string("text"),
+              case let .string(text)? = content["text"] else { return nil }
+        content["text"] = nil
+        update["content"] = .object(content)
+        shape = .object(["sessionId": .string(notification.sessionId), "update": .object(update), "_meta": notification.meta ?? .null])
+        self.text = text
+        latest = notification
+        self.token = token
+    }
+
+    /// The latest chunk with the joined text.
+    var joined: ACPSessionNotification {
+        guard case var .object(update) = latest.update, case var .object(content)? = update["content"] else { return latest }
+        content["text"] = .string(text)
+        update["content"] = .object(content)
+        return ACPSessionNotification(sessionId: latest.sessionId, update: .object(update), meta: latest.meta,
+                                      localSequence: latest.localSequence)
+    }
+}
+
 private struct RuntimeState {
     /// Distinguishes this launch from a later one under the same ID.
     let incarnation: UInt64
@@ -1103,6 +1191,8 @@ private struct RuntimeState {
     var heldUpdates = HeldUpdates()
     /// From a load's reply until the history it replayed is all journaled.
     var replayDrain: ReplayDrain?
+    /// A text chunk waiting for the next ones of its message.
+    var coalescing: CoalescingChunk?
     /// The first user message of a load's history so far; nil once it has named the runtime.
     var replayedPrompt: String? = ""
     /// The latest notification of each kind in `stateKinds`.

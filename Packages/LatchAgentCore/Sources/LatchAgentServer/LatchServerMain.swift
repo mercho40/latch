@@ -147,6 +147,7 @@ public enum LatchServerMain {
         let standardErrorLog = options.logAgentStandardError ? AgentStandardErrorLog(log: log) : nil
         var configuration = RemoteRuntimeHubConfiguration()
         configuration.detachedTimeout = options.detachedTimeout
+        configuration.chunkCoalescingWindow = RemoteRuntimeHubConfiguration.servedChunkCoalescingWindow
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var standardError: (@Sendable (AgentRuntimeID, Data) -> Void)?
         if let standardErrorLog {

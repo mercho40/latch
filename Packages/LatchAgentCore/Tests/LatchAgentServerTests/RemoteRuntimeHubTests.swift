@@ -112,6 +112,93 @@ final class RemoteRuntimeHubTests: XCTestCase {
         }
     }
 
+    /// Chunks of one message that come close together go out as one event with their text
+    /// joined, in their place among the turn's other events.
+    func testCoalescedChunksKeepTheirTextAndTheirPlace() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.chunkCoalescingWindow = .seconds(30)
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("joined")
+            try await bed.launchWithSession(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            let turnID = UUID()
+            try await bed.ok(.prompt(runtimeID: id, turnID: turnID, blocks: [.text("hello")]))
+            let frames = try await viewer.pull(until: "the turn's end") { $0.turnEnded != nil }
+            // The turn's end does not wait out the window: it sends the held text first.
+            XCTAssertEqual(frames.map(\.sequence), [1, 2, 3])
+            XCTAssertEqual(frames.chunkTexts, ["onetwothree"])
+            XCTAssertEqual(frames.last?.event, .turnEnded(turnID: turnID, stopReason: "end_turn", error: nil))
+        }
+    }
+
+    /// Text held for its window goes out when the window ends, though the turn runs on.
+    func testAHeldChunkGoesOutWhenItsWindowEnds() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.chunkCoalescingWindow = .milliseconds(100)
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("flood")
+            try await bed.launchWithSession(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("flood")]))
+            let all = (0..<300).map { "flood-\($0)" }.joined()
+            // The agent answers five seconds after its last chunk.
+            let frames = try await viewer.pull(until: "every chunk") { $0.chunkTexts.joined() == all }
+            XCTAssertNil(frames.turnEnded)
+            XCTAssertLessThanOrEqual(frames.chunkTexts.count, 30, "\(frames.chunkTexts.count) events for 300 chunks")
+            try await bed.ok(.stopRuntime(runtimeID: id))
+        }
+    }
+
+    /// Any other update goes out after the text held before it, and text on either side of it
+    /// stays apart. A permission request is not ordered against updates: it reaches the hub
+    /// through a stream of its own.
+    func testAnotherUpdateFollowsTheTextHeldBeforeIt() async throws {
+        var configuration = RemoteRuntimeHubConfiguration()
+        configuration.chunkCoalescingWindow = .seconds(30)
+        try await withTestbed(configuration: configuration) { bed in
+            let id = AgentRuntimeID("interleave")
+            try await bed.launchWithSession(id)
+            let viewer = bed.viewer()
+            try await viewer.attach(id)
+            try await bed.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("interleave")]))
+            let frames = try await viewer.pull(until: "the turn's end") { $0.turnEnded != nil }
+            XCTAssertEqual(frames.compactMap(\.updateSummary), [
+                "agent_message_chunk: before", "tool_call", "agent_message_chunk: after",
+            ])
+        }
+    }
+
+    func testOnlyTextChunksOfOneMessageAreJoined() throws {
+        func chunk(_ kind: String, _ content: ACPJSONValue, meta: ACPJSONValue? = nil, sequence: UInt64 = 1) -> ACPSessionNotification {
+            var update: [String: ACPJSONValue] = ["sessionUpdate": .string(kind), "content": content]
+            if let meta { update["_meta"] = meta }
+            return ACPSessionNotification(sessionId: "s", update: .object(update), localSequence: sequence)
+        }
+        func text(_ value: String) -> ACPJSONValue { .object(["type": .string("text"), "text": .string(value)]) }
+        let subagent: ACPJSONValue = .object(["claudeCode": .object(["parentToolUseId": .string("tool-1")])])
+
+        let first = try XCTUnwrap(CoalescingChunk(chunk("agent_message_chunk", text("one"), sequence: 4), token: 1))
+        let second = try XCTUnwrap(CoalescingChunk(chunk("agent_message_chunk", text("two"), sequence: 5), token: 2))
+        XCTAssertEqual(first.shape, second.shape)
+        var joined = first
+        joined.text += second.text
+        joined.latest = second.latest
+        XCTAssertEqual(joined.joined, chunk("agent_message_chunk", text("onetwo"), sequence: 5))
+
+        for other in [
+            chunk("agent_thought_chunk", text("one")),
+            chunk("agent_message_chunk", text("one"), meta: subagent),
+            chunk("agent_message_chunk", .object(["type": .string("text"), "text": .string("one"), "annotations": .object([:])])),
+        ] {
+            XCTAssertNotEqual(try XCTUnwrap(CoalescingChunk(other, token: 3)).shape, first.shape)
+        }
+        XCTAssertNil(CoalescingChunk(chunk("user_message_chunk", text("one")), token: 4))
+        XCTAssertNil(CoalescingChunk(chunk("agent_message_chunk", .object(["type": .string("image"), "data": .string("AA==")])), token: 5))
+        XCTAssertNil(CoalescingChunk(chunk("tool_call", text("one")), token: 6))
+    }
+
     /// Updates that never arrive hold a turn's end only so long.
     func testATurnsEndWaitsForItsUpdatesOnlySoLong() async throws {
         var configuration = RemoteRuntimeHubConfiguration()

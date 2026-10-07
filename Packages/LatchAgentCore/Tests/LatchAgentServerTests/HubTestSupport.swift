@@ -69,6 +69,7 @@ enum MockAgent {
             *oversize*) chunk "$(printf '%04000d' 0)"; reply "$id" '{"stopReason":"end_turn"}' ;;
             *flood*) i=0; while [ $i -lt 300 ]; do chunk "flood-$i"; i=$((i+1)); done; sleep 5; reply "$id" '{"stopReason":"end_turn"}' ;;
             *slow*) sleep 1; chunk one; chunk two; chunk three; reply "$id" '{"stopReason":"end_turn"}' ;;
+            *interleave*) chunk before; update '{"sessionUpdate":"tool_call","toolCallId":"call-i","title":"Read notes","status":"completed"}'; chunk after; reply "$id" '{"stopReason":"end_turn"}' ;;
             *) chunk one; chunk two; chunk three; reply "$id" '{"stopReason":"end_turn"}' ;;
           esac ;;
         *\"method\":\"_session*/steering\"*)

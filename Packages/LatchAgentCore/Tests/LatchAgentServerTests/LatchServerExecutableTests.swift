@@ -195,6 +195,33 @@ final class LatchServerExecutableTests: XCTestCase {
         XCTAssertFalse(log.contains(token.rawValue))
     }
 
+    /// latch-server joins an agent's streamed chunks; the hub's own default does not.
+    func testTheServerJoinsStreamedChunks() async throws {
+        let workspace = root.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try MockAgent.script.write(to: workspace.appendingPathComponent("agent.sh"), atomically: true, encoding: .utf8)
+        let server = try await ServerProcess.start(binary(), config: root.appendingPathComponent("config").path, extra: rootArguments)
+        defer { server.kill() }
+        let client = try await server.authenticated()
+        let id = AgentRuntimeID("flood")
+        let agent = LatchRemoteAgent.custom("/bin/sh " + AgentCommand.quotedArgument(workspace.appendingPathComponent("agent.sh").path))
+        try await client.ok(.launchAgent(runtimeID: id, agent: agent, workspace: workspace.path))
+        try await client.ok(.newSession(runtimeID: id))
+        try await client.ok(.attach(runtimeID: id, after: 0))
+        try await client.ok(.prompt(runtimeID: id, turnID: UUID(), blocks: [.text("flood")]))
+        let all = (0..<300).map { "flood-\($0)" }.joined()
+        var texts: [String] = []
+        _ = try await client.readFrames(until: "every chunk") { frame in
+            if case let .event(event) = frame, let text = event.chunkText { texts.append(text) }
+            return texts.joined() == all
+        }
+        XCTAssertLessThanOrEqual(texts.count, 30, "\(texts.count) events for 300 chunks")
+        try await client.ok(.stopRuntime(runtimeID: id))
+        XCTAssertEqual(kill(server.process.processIdentifier, SIGTERM), 0)
+        let status = await server.exitStatus()
+        XCTAssertEqual(status, 0)
+    }
+
     /// Much sooner than the periodic check, which is 15 s apart.
     func testSIGHUPDropsConnectionsThatUsedARotatedToken() async throws {
         let server = try await ServerProcess.start(binary(), config: root.appendingPathComponent("config").path, extra: rootArguments)

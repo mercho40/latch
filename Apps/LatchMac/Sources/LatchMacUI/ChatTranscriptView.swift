@@ -637,6 +637,10 @@ private final class TranscriptMessageView: NSView {
     var onDisclosure: (() -> Void)?
     private let label = NSTextField(labelWithString: "")
     private let copy = TranscriptCopyButton(title: "Copy", target: nil, action: nil)
+    /// Over the code block under the pointer, at its top trailing corner.
+    private let codeCopy = NSButton(title: "", target: nil, action: nil)
+    /// Where in the text the block under the pointer starts.
+    private var hoveredCodeBlock: Int?
     private let disclosure = NSButton(title: "", target: nil, action: nil)
     private(set) var rawText: String?
     /// A sent message's files and images, listed above its text. Set once: a user message never changes.
@@ -711,6 +715,16 @@ private final class TranscriptMessageView: NSView {
         textView.onFocusChange = { [weak self] in self?.copy.needsDisplay = true }
         textView.source = { [weak self] in self?.rawText ?? "" }
         addSubview(copy)
+        codeCopy.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")
+        codeCopy.symbolConfiguration = .init(pointSize: 12, weight: .regular)
+        codeCopy.isBordered = false
+        codeCopy.imagePosition = .imageOnly
+        codeCopy.contentTintColor = .secondaryLabelColor
+        codeCopy.toolTip = "Copy Code"
+        codeCopy.target = self
+        codeCopy.action = #selector(copyHoveredCode)
+        codeCopy.isHidden = true
+        addSubview(codeCopy)
         disclosure.bezelStyle = .disclosure
         disclosure.setButtonType(.pushOnPushOff)
         disclosure.target = self
@@ -903,7 +917,8 @@ private final class TranscriptMessageView: NSView {
         return piece
     }
 
-    /// Each attachment as a symbol and its name, in the secondary colour, on the line above the text.
+    /// Each attachment as a symbol and its name, in the secondary colour, on the line above the
+    /// text; the name links to the file while it is still there.
     static func attachmentLine(_ attachments: [ChatAttachment], paragraph: NSParagraphStyle) -> NSAttributedString {
         let font = NSFont.systemFont(ofSize: ChatMarkdown.bodyFontSize - 1)
         let attributes: [NSAttributedString.Key: Any] = [
@@ -925,7 +940,14 @@ private final class TranscriptMessageView: NSView {
                 piece.addAttributes(attributes, range: NSRange(location: 0, length: piece.length))
                 line.append(piece)
             }
-            line.append(NSAttributedString(string: " " + attachment.name, attributes: attributes))
+            line.append(NSAttributedString(string: " ", attributes: attributes))
+            var name = attributes
+            // A file still on this Mac opens from its name, in whatever opens it, as in Mail.
+            if let path = attachment.path, FileManager.default.fileExists(atPath: path) {
+                name[.link] = URL(fileURLWithPath: path)
+                name[.toolTip] = "Open “\(attachment.name)”"
+            }
+            line.append(NSAttributedString(string: attachment.name, attributes: name))
         }
         return line
     }
@@ -1134,7 +1156,8 @@ private final class TranscriptMessageView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let hoverTracking { removeTrackingArea(hoverTracking) }
-        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                                      owner: self)
         addTrackingArea(tracking)
         hoverTracking = tracking
     }
@@ -1147,6 +1170,36 @@ private final class TranscriptMessageView: NSView {
     override func mouseExited(with event: NSEvent) {
         hovered = false
         copy.needsDisplay = true
+        showCodeCopy(for: nil)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        guard !textView.isHidden else { return showCodeCopy(for: nil) }
+        let point = textView.convert(event.locationInWindow, from: nil)
+        showCodeCopy(for: textView.codeBlock(at: point))
+    }
+
+    /// The button sits inside the block's panel, so it never covers the text beside it.
+    private func showCodeCopy(for block: (range: NSRange, rect: NSRect)?) {
+        hoveredCodeBlock = block?.range.location
+        codeCopy.isHidden = block == nil
+        guard let block else { return }
+        let panel = block.rect.offsetBy(dx: textView.frame.minX, dy: textView.frame.minY)
+        let size: CGFloat = 22
+        codeCopy.frame = NSRect(x: panel.maxX - size - 4, y: panel.minY + 3, width: size, height: size)
+        codeCopy.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")
+    }
+
+    @objc private func copyHoveredCode() {
+        guard let start = hoveredCodeBlock, textView.copyCodeBlock(at: start) else { return }
+        // Says it worked where the click was, then goes back to what it does.
+        codeCopy.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Copied")
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.2))
+            guard let self, hoveredCodeBlock == start else { return }
+            codeCopy.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")
+        }
     }
 
     private func updateDisclosureAccessibility() {
@@ -1188,9 +1241,19 @@ private final class TranscriptCopyButton: NSButton {
     }
 }
 
+/// The row's attachment line, for tests.
 @MainActor
-private final class TranscriptTextView: NSTextView {
+enum TranscriptMessageViewAccess {
+    static func attachmentLine(_ attachments: [ChatAttachment]) -> NSAttributedString {
+        TranscriptMessageView.attachmentLine(attachments, paragraph: .default)
+    }
+}
+
+@MainActor
+final class TranscriptTextView: NSTextView {
     var source: (() -> String)?
+    /// Copy Code writes here. Tests substitute a private pasteboard for the user's clipboard.
+    var pasteboard = NSPasteboard.general
     var onFocusChange: (() -> Void)?
 
     override func becomeFirstResponder() -> Bool {
@@ -1208,9 +1271,56 @@ private final class TranscriptTextView: NSTextView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = (super.menu(for: event)?.copy() as? NSMenu) ?? NSMenu()
         menu.addItem(.separator())
+        if let block = codeBlock(at: convert(event.locationInWindow, from: nil)) {
+            let item = menu.addItem(withTitle: "Copy Code Block", action: #selector(copyCodeBlockFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = block.range.location
+        }
         let item = menu.addItem(withTitle: "Copy Message Source", action: #selector(copySource), keyEquivalent: "")
         item.target = self
         return menu
+    }
+
+    /// The code block under `point`, as characters and as the panel the layout manager draws.
+    func codeBlock(at point: NSPoint) -> (range: NSRange, rect: NSRect)? {
+        guard let manager = layoutManager, let container = textContainer, let storage = textStorage,
+              storage.length > 0 else { return nil }
+        let inContainer = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        var fraction: CGFloat = 0
+        let glyph = manager.glyphIndex(for: inContainer, in: container, fractionOfDistanceThroughGlyph: &fraction)
+        let index = manager.characterIndexForGlyph(at: glyph)
+        guard index < storage.length else { return nil }
+        var range = NSRange()
+        guard storage.attribute(.latchCodeBlock, at: index, longestEffectiveRange: &range,
+                                in: NSRange(location: 0, length: storage.length)) != nil else { return nil }
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return nil }
+        let first = manager.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+        let last = manager.lineFragmentRect(forGlyphAt: NSMaxRange(glyphs) - 1, effectiveRange: nil)
+        let rect = NSRect(x: textContainerOrigin.x, y: textContainerOrigin.y + first.minY,
+                          width: container.size.width, height: last.maxY - first.minY)
+        // Only over the panel: a point past the text's end is not in the last block.
+        guard rect.contains(point) else { return nil }
+        return (range, rect)
+    }
+
+    /// Copies the code block that starts at `start`, without the line break that ends it.
+    @discardableResult
+    func copyCodeBlock(at start: Int) -> Bool {
+        guard let storage = textStorage, start < storage.length else { return false }
+        var range = NSRange()
+        guard storage.attribute(.latchCodeBlock, at: start, longestEffectiveRange: &range,
+                                in: NSRange(location: 0, length: storage.length)) != nil else { return false }
+        var code = (storage.string as NSString).substring(with: range)
+        while code.hasSuffix("\n") { code.removeLast() }
+        pasteboard.clearContents()
+        pasteboard.setString(code, forType: .string)
+        return true
+    }
+
+    @objc private func copyCodeBlockFromMenu(_ sender: NSMenuItem) {
+        guard let start = sender.representedObject as? Int else { return }
+        copyCodeBlock(at: start)
     }
 
     @objc private func copySource() {

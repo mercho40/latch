@@ -135,6 +135,15 @@ final class SessionBannerView: NSView {
     /// Show `problem`, or hide when it is nil. Returns without touching the view when the
     /// same problem is already on screen or has been dismissed. `detail` is what the agent
     /// itself said, shown between the title and Latch's `message`.
+    /// The banner's lines as one sentence each, for VoiceOver: a line that already ends in a
+    /// full stop gets no second one before the next.
+    static func spoken(_ lines: [String]) -> String {
+        let lines = lines.filter { !$0.isEmpty }
+        return lines.enumerated().map { index, line in
+            index < lines.count - 1 && line.hasSuffix(".") ? String(line.dropLast()) : line
+        }.joined(separator: ". ")
+    }
+
     func update(key: String?, title: String, message: String, detail: String = "", severity: Severity, actions: [Action]) {
         guard let key else {
             self.key = nil
@@ -160,7 +169,7 @@ final class SessionBannerView: NSView {
         actionRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for action in actions { actionRow.addArrangedSubview(button(for: action)) }
         actionRow.isHidden = actions.isEmpty
-        setAccessibilityLabel([title, detail, message].filter { !$0.isEmpty }.joined(separator: ". "))
+        setAccessibilityLabel(Self.spoken([title, detail, message]))
         needsDisplay = true
         guard isHidden else { return }
         isHidden = false

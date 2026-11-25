@@ -34,7 +34,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
                      lastActiveAt: model.lastActiveAt,
                      serverID: location.serverID,
                      remote: pendingNewContext ? nil : model.remoteBinding,
-                     adoptedAgentTitle: adoptedAgentTitle == sessionTitle ? adoptedAgentTitle : nil)
+                     adoptedAgentTitle: adoptedAgentTitle == sessionTitle ? adoptedAgentTitle : nil,
+                     configChoices: model.configChoices.isEmpty ? nil : model.configChoices)
     }
 
     /// The server's name for a remote session, even once the server has left Settings.
@@ -53,6 +54,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
 
     /// Asks the window for a sibling session in this workspace on the given harness.
     var onForkSession: ((AgentPreset, String) -> Void)?
+    /// This session now starts on another agent, in place, before any conversation.
+    var onAgentChange: ((AgentPreset) -> Void)?
     /// Asks the window for a session that goes on with a copy of this conversation.
     var onForkConversation: ((SavedSession) -> Void)?
     /// The agent conversations the window's other sessions go on with.
@@ -105,9 +108,18 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             let elapsed = model.promptStartedAt.map { RelativeTime.duration(now.timeIntervalSince($0)) }
             return (.working, elapsed.map { "Working · \($0)" } ?? model.status)
         case .connecting, .stopping, .prompting: return (.working, model.status)
-        case .ready: return (hasUnseenReply ? .unseen : .resting, selectedAgent.title)
+        case .ready where hasUnseenReply: return (.unseen, selectedAgent.title)
+        // A session at rest with a message half written says so, as a mailbox shows a draft.
+        case .ready: return (.resting, Self.draftDetail(prompt.string) ?? selectedAgent.title)
         case .disconnected: return (.resting, displayStatus)
         }
+    }
+
+    /// "Draft: " and the unsent draft's first line, if there is one.
+    static func draftDetail(_ draft: String) -> String? {
+        let line = draft.split(whereSeparator: \.isNewline).lazy
+            .map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
+        return line.map { "Draft: \($0.prefix(80))" }
     }
 
     /// Whether the sidebar should tick every second for this session.
@@ -189,6 +201,18 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     func disconnectSession() {
         guard canDisconnect else { return }
         disconnect()
+    }
+
+    /// Stops the agent, if it runs, and starts it again on the same conversation: the way out of
+    /// an agent that has wedged, or one that should pick up a change to its own setup.
+    var canRestartAgent: Bool {
+        canEditLaunch && operation == nil && launchProblem == nil
+            && !(model.phase == .disconnected && model.archivedWithoutContext)
+    }
+
+    func restartAgent() {
+        guard canRestartAgent else { return }
+        retryConnection()
     }
 
     /// Opens a sibling session on the same harness and command, beside this one: with a copy of
@@ -341,7 +365,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private var launchEnvironment: AgentLaunchEnvironment
     private let injectedLaunchEnvironment: AgentLaunchEnvironment?
     private var drainTask: Task<Void, Never>?
-    private var selectedAgent: AgentPreset = .custom
+    private(set) var selectedAgent: AgentPreset = .custom
     private var customCommand = ""
     private var selectedRecipe: AgentLaunchRecipe?
     /// What Latch will actually run for the selected harness, resolved from the catalog.
@@ -381,6 +405,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private let attachmentStrip = ComposerAttachmentStrip()
     /// Escape closes the menu for this draft only; typing on, or starting over, opens it again.
     private var dismissedCommandDraft: String?
+    /// Where Up and Down stand in the prompts sent before, while the composer holds one of them.
+    private var promptRecall: PromptHistory.Recall?
     private let prompt = ChatInputView(frame: .zero)
     private let composer = ChatComposerScrollView(frame: .zero)
     private let send = NSButton(title: "Send", target: nil, action: nil)
@@ -390,8 +416,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private let effortPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let permissionModePicker = NSPopUpButton(frame: .zero, pullsDown: false)
     /// The agent's other options, such as Claude Code's Fast mode, in its order; hidden when
-    /// it offers none, and any past these are not shown.
-    private let extraPickers = [NSPopUpButton(frame: .zero, pullsDown: false), NSPopUpButton(frame: .zero, pullsDown: false)]
+    /// it offers none, and any past these are not shown. Four is more than any agent offers today.
+    private let extraPickers = (0..<4).map { _ in NSPopUpButton(frame: .zero, pullsDown: false) }
     /// How full the agent's context is, before the composer's buttons.
     private let usageLabel = NSTextField(labelWithString: "")
     /// Messages written while the agent works, over the composer and under the plan.
@@ -404,7 +430,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Only the settings that change between messages. The harness is chosen once per
     /// session and then locked, so it lives in the window's toolbar, not in the composer.
     private lazy var composerControls = ComposerControlsView(
-        pickers: [.init(modelPicker, maximumWidth: 260),
+        pickers: [.init(modelPicker, maximumWidth: 260, folds: false),
                   .init(effortPicker, maximumWidth: 150),
                   .init(permissionModePicker)] + extraPickers.map { .init($0, maximumWidth: 180) },
         actions: [attach, cancel, send], accessory: usageLabel)
@@ -465,7 +491,8 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             prompt.string = savedSession.draft
             model.restore(messages: savedSession.messages, agentSessionID: savedSession.agentSessionID,
                           lastActiveAt: savedSession.lastActiveAt,
-                          remote: location.isRemote ? savedSession.remote : nil)
+                          remote: location.isRemote ? savedSession.remote : nil,
+                          configChoices: savedSession.configChoices ?? [:])
         } else {
             // A new session was last active when it was made, so it sorts and reads as "now".
             model.restore(messages: [], agentSessionID: nil, lastActiveAt: model.now())
@@ -479,6 +506,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             self?.onTranscriptChange?()
         }
         model.onQueueReturned = { [weak self] in self?.returnToComposer($0) }
+        model.onChoiceMade = { [weak self] kind, key, value in
+            guard let self else { return }
+            settings.remember(kind, key: key, value: value, for: selectedAgent)
+        }
         NotificationCenter.default.addObserver(self, selector: #selector(agentSettingsChanged),
                                                name: AgentSettings.didChangeNotification, object: settings)
         if location.isRemote {
@@ -846,7 +877,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// session stays as it was: the turn, the agent and any pending decision wait for it.
     /// Named as Settings has the server now, in case it was renamed since the launch.
     private var reconnectingTitle: String? {
-        guard case let .reconnecting(server, _) = model.linkState, model.phase != .disconnected else { return nil }
+        guard case let .reconnecting(server, _, _) = model.linkState, model.phase != .disconnected else { return nil }
         let name = serverName ?? server
         return model.phase == .connecting ? "Connecting to \(name)…" : "Reconnecting to \(name)…"
     }
@@ -858,16 +889,23 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         // Waiting for a server is not a failure, but it explains why nothing is arriving, and
         // it outranks an earlier prompt's error. Keyed on the outage, so a dismissed one stays
         // dismissed. A server not yet reached may be misconfigured, so Settings is offered.
-        if let reconnecting = reconnectingTitle, case let .reconnecting(_, since) = model.linkState,
+        if let reconnecting = reconnectingTitle, case let .reconnecting(_, since, lastAttempt) = model.linkState,
            launchProblem == nil, !shuttingDown {
             let message = switch model.phase {
             case .connecting: "It has not answered yet. Latch keeps trying for a few seconds."
             case .prompting: "The agent keeps working on the server. Latch catches up once it answers again."
             default: "The agent is still running there. Latch reconnects on its own."
             }
-            banner.update(key: "link\u{0}\(since.timeIntervalSinceReferenceDate)\u{0}\(message)", title: reconnecting,
-                          message: message, severity: .info,
-                          actions: model.phase == .connecting ? [serverSettingsAction] : [])
+            // Why the last try failed, once one has, in Latch's own words after its advice: a new
+            // reason is news, so it is keyed apart.
+            let explained = [message, lastAttempt.map { "Last try: \($0)." }].compactMap { $0 }.joined(separator: " ")
+            let retry = SessionBannerView.Action(title: "Retry Now") { [weak self] in
+                guard let model = self?.model else { return }
+                Task { await model.retryLinkNow() }
+            }
+            banner.update(key: "link\u{0}\(since.timeIntervalSinceReferenceDate)\u{0}\(explained)", title: reconnecting,
+                          message: explained, severity: .info,
+                          actions: model.phase == .connecting ? [retry, serverSettingsAction] : [retry])
             bannerRow.isHidden = banner.isHidden
             return
         }
@@ -897,6 +935,9 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             let builtIn = selectedAgent != .custom && disconnected
             let advice = model.errorAdvice ?? (builtIn ? selectedRecipe?.setup : nil) ?? ""
             if model.stoppedOnServer, let serverName { return ("The agent was stopped on \(serverName).", advice) }
+            // Not reaching a server is said in Latch's own words, so it reads as advice rather than
+            // as something quoted from the agent.
+            if model.errorIsConnectionFailure { return ("", [message, advice].filter { !$0.isEmpty }.joined(separator: " ")) }
             return (Self.agentWords(builtIn ? withoutLaunchInternals(message) : message), advice)
         } ?? launchProblem.map { ("", $0) }
         guard let failure, !shuttingDown else {
@@ -913,14 +954,18 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             detail: failure.detail,
             // An agent stopped on purpose, by another client or the server, is not a fault.
             severity: disconnected && !model.stoppedOnServer ? .error : .warning,
-            actions: [
-                SessionBannerView.Action(title: "Retry") { [weak self] in self?.retryConnection() },
+            // An agent still running said something went wrong, such as refusing a model: starting
+            // it again is no remedy for that, so the banner only explains, and can be dismissed.
+            actions: disconnected ? [
+                SessionBannerView.Action(title: model.agentExitStatus == nil ? "Retry" : "Restart") { [weak self] in
+                    self?.retryConnection()
+                },
                 location.isRemote
                     ? serverSettingsAction
                     : SessionBannerView.Action(title: "Agent Settings…") {
                         NSApp.sendAction(#selector(LatchApplicationDelegate.showAgentSettings(_:)), to: nil, from: nil)
                     },
-            ])
+            ] : [])
         bannerRow.isHidden = banner.isHidden
     }
 
@@ -935,9 +980,12 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     /// Whose failure it is. A remote session names its server: an unreachable server is not
     /// the agent's fault, and an agent that cannot start there may start fine on this Mac.
     private func failureTitle(disconnected: Bool) -> String {
+        let quit = disconnected && model.agentExitStatus != nil
         guard let serverName else {
+            if quit { return "\(selectedAgent.title) quit unexpectedly" }
             return disconnected ? "\(selectedAgent.title) can’t start" : "\(selectedAgent.title) reported a problem"
         }
+        if quit { return "\(selectedAgent.title) quit unexpectedly on \(serverName)" }
         if model.errorIsConnectionFailure { return "Can’t connect to \(serverName)" }
         if disconnected, model.stoppedOnServer {
             return "\(selectedAgent.title) stopped on \(serverName)"
@@ -982,9 +1030,10 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     private func refreshPickers() {
         let placeholder = model.phase == .disconnected || model.phase == .connecting ? "Available after connection" : "Not available"
         if renderedConfiguration != model.configuration || renderedPickerPlaceholder != placeholder {
-            populate(modelPicker, from: model.configuration.model, placeholder: placeholder)
-            populate(effortPicker, from: model.configuration.effort, placeholder: placeholder)
-            populate(permissionModePicker, from: model.configuration.permissionMode, placeholder: placeholder)
+            populate(modelPicker, from: model.configuration.model, placeholder: placeholder, symbol: "cpu")
+            populate(effortPicker, from: model.configuration.effort, placeholder: placeholder, symbol: "brain")
+            populate(permissionModePicker, from: model.configuration.permissionMode, placeholder: placeholder,
+                     symbol: "lock.shield")
             renderedConfiguration = model.configuration
             renderedPickerPlaceholder = placeholder
         }
@@ -998,7 +1047,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         for (index, picker) in extraPickers.enumerated() {
             let extra = model.configuration.extras.indices.contains(index) ? model.configuration.extras[index] : nil
             if picker.identifier?.rawValue != extra.map(Self.configID) || picker.titleOfSelectedItem != extra.flatMap(Self.currentName) {
-                populate(picker, from: extra, placeholder: placeholder)
+                populate(picker, from: extra, placeholder: placeholder, name: extra?.name)
                 picker.identifier = extra.map { NSUserInterfaceItemIdentifier(Self.configID($0)) }
                 picker.setAccessibilityLabel(extra?.name)
                 picker.toolTip = extra.map { [$0.name, $0.description].compactMap { $0 }.joined(separator: ": ") }
@@ -1061,8 +1110,14 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         return current == "New Session" || current == fromPrompt || current == adoptedBefore ? title : nil
     }
 
-    private func populate(_ button: NSPopUpButton, from picker: SessionPicker?, placeholder: String) {
+    /// Fills a pop-up with the agent's choices. The capsule shows the current one after a glyph
+    /// for what it sets, or after the option's own name, so "High" reads as an effort and "Off"
+    /// says what is off; the menu lists the agent's names alone.
+    private func populate(_ button: NSPopUpButton, from picker: SessionPicker?, placeholder: String,
+                          symbol: String? = nil, name: String? = nil) {
         button.removeAllItems()
+        let cell = button.cell as? NSPopUpButtonCell
+        cell?.usesItemFromMenu = true
         guard let picker else {
             button.addItem(withTitle: placeholder)
             button.toolTip = placeholder == "Available after connection" ? "Options are supplied when the selected harness connects." : "This agent does not expose this setting for the current session."
@@ -1093,6 +1148,33 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         button.select(selected)
         button.toolTip = picker.description ?? selected?.subtitle ?? selected?.title
+        if let selected, symbol != nil || name != nil {
+            let shown = NSMenuItem(title: name.map { "\($0): \(selected.title)" } ?? selected.title, action: nil, keyEquivalent: "")
+            shown.image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+                    .applying(.init(paletteColors: [.secondaryLabelColor])))
+            cell?.usesItemFromMenu = false
+            cell?.menuItem = shown
+        }
+    }
+
+    /// Whether a picker's menu can open from the keyboard: the agent offers it and it is not busy.
+    func canChoose(_ kind: SessionPicker.Kind) -> Bool {
+        let button = pickerButton(kind)
+        return !button.isHidden && button.isEnabled && view.window != nil
+    }
+
+    func choose(_ kind: SessionPicker.Kind) {
+        guard canChoose(kind) else { return }
+        composerControls.showMenu(of: pickerButton(kind))
+    }
+
+    private func pickerButton(_ kind: SessionPicker.Kind) -> NSPopUpButton {
+        switch kind {
+        case .model: modelPicker
+        case .effort: effortPicker
+        case .permissionMode: permissionModePicker
+        }
     }
 
     @objc private func selectModel() { select(.model, from: modelPicker) }
@@ -1283,7 +1365,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
     }
 
     private func handleCommandMenuKey(_ key: ChatInputView.MenuKey) -> Bool {
-        guard !commandMenu.isHidden else { return false }
+        guard !commandMenu.isHidden else { return recallPrompt(key) }
         switch key {
         case .up: commandMenu.moveSelection(by: -1)
         case .down: commandMenu.moveSelection(by: 1)
@@ -1294,6 +1376,34 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             dismissedCommandDraft = prompt.string
             refreshCommandMenu()
         }
+        return true
+    }
+
+    /// Up on the draft's first line brings back the prompt sent before, as a shell does; Down
+    /// on its last line the one after, and past the newest an empty composer again.
+    private func recallPrompt(_ key: ChatInputView.MenuKey) -> Bool {
+        let text = prompt.string as NSString
+        let selection = prompt.selectedRange()
+        guard prompt.isEditable, selection.length == 0 else { return false }
+        let prompts = PromptHistory.prompts(in: model.messages)
+        let step: PromptHistory.Step?
+        switch key {
+        case .up where !text.substring(to: selection.location).contains("\n"):
+            step = PromptHistory.older(prompts, composer: prompt.string, recall: promptRecall)
+        case .down where !text.substring(from: selection.location).contains("\n"):
+            step = PromptHistory.newer(prompts, composer: prompt.string, recall: promptRecall)
+        default:
+            step = nil
+        }
+        guard let step else { return false }
+        let whole = NSRange(location: 0, length: text.length)
+        guard prompt.shouldChangeText(in: whole, replacementString: step.text) else { return false }
+        // A recalled command is a prompt to send again, not a query for the command menu.
+        dismissedCommandDraft = step.text
+        prompt.replaceCharacters(in: whole, with: step.text)
+        prompt.didChangeText()
+        prompt.setSelectedRange(NSRange(location: (step.text as NSString).length, length: 0))
+        promptRecall = step.recall
         return true
     }
 
@@ -1346,9 +1456,13 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
             return fork(agent: selection, command: customCommand)
         }
         let unchanged = selection == selectedAgent
-        if !unchanged { pendingNewContext = true }
+        if !unchanged {
+            pendingNewContext = true
+            model.forgetChoices()
+        }
         selectedAgent = selection
         updateAgentCommand()
+        if !unchanged { onAgentChange?(selection) }
         if unchanged && operation == nil && model.phase == .ready {
             refresh()
             return
@@ -1436,6 +1550,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let environment = launchEnvironment
         let valid = launchProblem == nil
         let startNewSession = pendingNewContext
+        model.newSessionChoices = settings.choices(for: selectedAgent)
         operation = token
         operationTask = Task {
             defer {
@@ -1461,6 +1576,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         let agent: LatchRemoteAgent = selectedAgent == .custom ? .custom(customCommand) : .preset(selectedAgent.rawValue)
         let valid = launchProblem == nil
         let startNewSession = pendingNewContext
+        model.newSessionChoices = settings.choices(for: selectedAgent)
         operation = token
         operationTask = Task {
             defer {
@@ -2331,7 +2447,7 @@ final class SessionViewController: NSViewController, NSTextViewDelegate, NSTextF
         }
         view.window?.contentView?.layoutSubtreeIfNeeded()
         try smokeTestComposerBounds()
-        for picker in [modelPicker, effortPicker, permissionModePicker] {
+        for picker in [modelPicker, effortPicker, permissionModePicker] where !composerControls.isFolded(picker) {
             let bounds = picker.convert(picker.bounds, to: view)
             guard bounds.minX >= 0, bounds.maxX <= view.bounds.width,
                   picker.frame.height >= picker.intrinsicContentSize.height,

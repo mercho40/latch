@@ -68,11 +68,11 @@ final class SessionContextTests: XCTestCase {
 
     // MARK: The agent's other options
 
-    func testTheAgentsOtherOptionsAreInTheMenu() async throws {
+    func testTheAgentsOtherOptionsAreInTheOptionsChip() async throws {
         let fixture = await shown(ScriptedSessionClient(configOptions: ScriptedConfiguration.options))
         func fast() throws -> UIMenu {
-            let menu = try XCTUnwrap(fixture.screen.menuButton.menu)
-            let pickers = (menu.children.first as? UIMenu)?.children.compactMap { $0 as? UIMenu } ?? []
+            let menu = try XCTUnwrap(fixture.screen.composer.optionsButton.menu)
+            let pickers = menu.children.compactMap { $0 as? UIMenu }
             return try XCTUnwrap(pickers.first { $0.title == "Fast mode" })
         }
         var picker = try fast()

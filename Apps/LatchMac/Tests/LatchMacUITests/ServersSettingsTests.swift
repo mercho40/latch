@@ -190,6 +190,23 @@ final class ServersSettingsTests: XCTestCase {
         XCTAssertEqual(pane?.selectedServer?.id, second.id)
     }
 
+    func testAddServerOpensTheServersPaneWithItsSheet() async throws {
+        let controller = SettingsWindowController(
+            settings: AgentSettings(defaults: UserDefaults(suiteName: "LatchServers-\(UUID().uuidString)")!),
+            servers: InMemoryServerStore())
+        controller.select(pane: "Agents")
+        controller.showWindow(nil)
+        defer { controller.close() }
+        controller.beginAddServer()
+        XCTAssertEqual(controller.selectedPane, "Servers")
+        let pane = try XCTUnwrap(controller.contentViewController?.children.compactMap { $0 as? ServersSettingsViewController }.first)
+        for _ in 0..<50 where pane.serverSheet == nil { try await Task.sleep(for: .milliseconds(20)) }
+        let sheet = try XCTUnwrap(pane.serverSheet)
+        XCTAssertNil(sheet.original, "Adding, not editing")
+        sheet.cancel()
+        XCTAssertNil(pane.serverSheet)
+    }
+
     func testEditSavesOverTheSelectedServer() throws {
         let first = ServerProfile(name: "vps", host: "vps", token: token)
         let second = ServerProfile(name: "mini", host: "127.0.0.1", port: 9000, token: token)
@@ -334,6 +351,28 @@ final class ServersSettingsTests: XCTestCase {
         XCTAssertGreaterThan(window.frame.height, empty)
     }
 
+    func testEachRowSaysWhatItsCheckFoundAndTheSelectedOneSaysItInFull() async throws {
+        let older = ServerProfile(name: "old", host: "203.0.113.4", token: token)
+        let refused = ServerProfile(name: "refused", host: "203.0.113.5", token: token)
+        let (pane, _) = pane([older, refused]) { options in
+            guard options.host == "203.0.113.4" else { throw LatchRemoteClientError.unauthorized(message: "The token was not accepted.") }
+            return LatchRemoteServerInfo(version: "0.2.0", hostname: "vps-1", os: "Ubuntu 24.04", arch: "x86_64", home: "/home/me")
+        }
+        pane.appVersion = "0.3.0"
+        pane.testConnection()
+        pane.table.selectRowIndexes([1], byExtendingSelection: false)
+        pane.testConnection()
+        await pane.testFinished()
+        XCTAssertEqual(pane.check(of: older), .reachable(summary: "vps-1 · Ubuntu 24.04 · Latch 0.2.0", version: "0.2.0"))
+        XCTAssertEqual(pane.check(of: refused), .failed(reason: "The token was not accepted.", brief: "Token not accepted"))
+        let row = try XCTUnwrap(pane.table.view(atColumn: 0, row: 1, makeIfNecessary: true))
+        XCTAssertEqual(row.accessibilityLabel(), "refused, 203.0.113.5:7428, Can’t connect, Token not accepted")
+        XCTAssertEqual(pane.testResult.stringValue, "The token was not accepted.")
+        pane.table.selectRowIndexes([0], byExtendingSelection: false)
+        XCTAssertEqual(pane.testResult.stringValue, "vps-1 · Ubuntu 24.04 · Latch 0.2.0\n"
+            + "latch-server 0.2.0 is older than this app (0.3.0): update it to use everything this app offers.")
+    }
+
     func testTestConnectionShowsTheServerOrTheFailureInPlainWords() async {
         let server = ServerProfile(name: "vps", host: "203.0.113.4", token: token)
         let (ok, _) = pane([server]) { options in
@@ -357,6 +396,26 @@ final class ServersSettingsTests: XCTestCase {
         XCTAssertEqual(unauthorized.testResult.stringValue, "The token was not accepted.")
     }
 
+    func testReachingTheServersPaneThroughItsTabChecksEachServerOnce() async throws {
+        let first = ServerProfile(name: "vps", host: "203.0.113.4", token: token)
+        let second = ServerProfile(name: "mini", host: "203.0.113.5", token: token)
+        let checked = CheckCounter()
+        let controller = SettingsWindowController(
+            settings: AgentSettings(defaults: UserDefaults(suiteName: "LatchServers-\(UUID().uuidString)")!),
+            servers: InMemoryServerStore([first, second]),
+            serverCheck: { options in
+                await checked.add(options.host)
+                return LatchRemoteServerInfo(version: "0.2.0", hostname: "vps-1", os: "Ubuntu 24.04", arch: "x86_64", home: "/home/me")
+            })
+        controller.showWindow(nil)
+        defer { controller.close() }
+        controller.select(pane: "Servers")
+        try await eventually("both servers checked") { await checked.hosts.count == 2 }
+        try await Task.sleep(for: .milliseconds(200))
+        let hosts = await checked.hosts
+        XCTAssertEqual(hosts.sorted(), ["203.0.113.4", "203.0.113.5"], "Once each, not again on the same appearance")
+    }
+
     func testSettingsOffersAServersPaneBesideAgents() {
         let controller = SettingsWindowController(
             settings: AgentSettings(defaults: UserDefaults(suiteName: "LatchServers-\(UUID().uuidString)")!),
@@ -371,4 +430,9 @@ final class ServersSettingsTests: XCTestCase {
         let agents = controller.window?.frame.height ?? 0
         XCTAssertNotEqual(servers, agents, "Each pane gets its own height")
     }
+}
+
+private actor CheckCounter {
+    private(set) var hosts: [String] = []
+    func add(_ host: String) { hosts.append(host) }
 }

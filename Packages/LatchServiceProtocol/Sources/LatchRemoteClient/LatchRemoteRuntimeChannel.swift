@@ -11,8 +11,9 @@ public enum LatchRemoteLinkState: Equatable, Sendable {
     case connecting
     /// Handshake done and, when the channel is attached, re-attached.
     case connected
-    /// The link was lost at `since` and has not come back yet.
-    case reconnecting(since: Date)
+    /// The link was lost at `since` and has not come back yet. `lastAttempt` is why the latest
+    /// try to reconnect failed; nil until one has.
+    case reconnecting(since: Date, lastAttempt: LatchRemoteClientError? = nil)
     /// Permanent: the channel's streams have finished and every call fails with this.
     case failed(LatchRemoteClientError)
 }
@@ -71,6 +72,10 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         public var backoff: LatchRemoteBackoff
         /// How long `probe()` and `detach()` wait for the server.
         public var probeTimeout: Duration
+        /// How long a connection must last before the failures before it are forgotten, so a
+        /// link that drops soon after every connect backs off rather than reconnecting, and
+        /// re-attaching, as fast as the first time.
+        public var steadyConnection: Duration = .seconds(30)
 
         public init(
             host: String,
@@ -143,8 +148,12 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         var connection: LatchRemoteConnection?
         /// Connected and, if attached, re-attached: queued commands may go out.
         var commandsReady = false
-        /// Connection attempts since the channel was last connected, including its re-attach.
+        /// Connection attempts since the channel was last steadily connected, including its
+        /// re-attach. A link that drops soon after connecting keeps counting, so one that
+        /// flaps backs off rather than reconnecting, and re-attaching, every second.
         var failures = 0
+        /// When the current connection was made, if it was.
+        var connectedAt: ContinuousClock.Instant?
         var lostAt: Date?
         var reconnectTimer = 0
         var waitingToReconnect = false
@@ -590,7 +599,7 @@ public final class LatchRemoteRuntimeChannel: Sendable {
 
     private func connected(_ core: inout Core) {
         core.hasConnected = true
-        core.failures = 0
+        core.connectedAt = .now
         core.commandsReady = true
         core.lostAt = nil
         setLink(.connected, &core)
@@ -598,6 +607,12 @@ public final class LatchRemoteRuntimeChannel: Sendable {
     }
 
     private func connectionClosed(_ error: LatchRemoteClientError, _ core: inout Core) {
+        // A drop of a connection that was made is not a failed attempt; one that never was, is.
+        let attemptFailed = core.connectedAt == nil
+        if let connectedAt = core.connectedAt, .now - connectedAt >= options.steadyConnection {
+            core.failures = 0
+        }
+        core.connectedAt = nil
         core.connection = nil
         core.commandsReady = false
         for index in core.commands.indices {
@@ -609,7 +624,9 @@ public final class LatchRemoteRuntimeChannel: Sendable {
         }
         let lostAt = core.lostAt ?? Date()
         core.lostAt = lostAt
-        setLink(.reconnecting(since: lostAt), &core)
+        let lastAttempt: LatchRemoteClientError? = if attemptFailed { error }
+            else if case let .reconnecting(_, previous) = core.link { previous } else { nil }
+        setLink(.reconnecting(since: lostAt, lastAttempt: lastAttempt), &core)
 
         let delay = core.reconnectImmediately ? .zero : options.backoff.jitteredDelay(afterFailures: core.failures)
         core.reconnectImmediately = false

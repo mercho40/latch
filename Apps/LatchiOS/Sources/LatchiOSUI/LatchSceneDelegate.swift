@@ -41,9 +41,12 @@ final class LatchSceneDelegate: UIResponder, UIWindowSceneDelegate {
         let remoteSmoke = RemoteSmoke.request
         let connector = remoteSmoke == nil ? ChannelRemoteSessionConnector(servers: servers)
             : ChannelRemoteSessionConnector(servers: servers, backoff: RemoteSmoke.backoff)
+        // The remote smoke drops its link on purpose, and must see the backoff alone bring it back.
+        if remoteSmoke == nil { connector.probeOnNetworkChange() }
         let badge = remoteSmoke == nil ? ApprovalBadge() : nil
         #else
         let connector = ChannelRemoteSessionConnector(servers: servers)
+        connector.probeOnNetworkChange()
         let badge: ApprovalBadge? = ApprovalBadge()
         #endif
         let memory = ServerMemory()

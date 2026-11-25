@@ -477,17 +477,23 @@ final class SessionDetailViewControllerTests: XCTestCase {
 
     // MARK: Menu
 
-    func testTheMenuOffersWhatTheAgentAdvertises() async throws {
+    func testTheComposerOffersWhatTheAgentAdvertises() async throws {
         let fixture = SessionScreenFixture(client: ScriptedSessionClient(configOptions: ScriptedConfiguration.options))
         show(fixture)
+        let composer = fixture.screen.composer
+        XCTAssertTrue(composer.modelButton.isHidden, "Nothing to choose before the agent says")
+        XCTAssertTrue(composer.optionsButton.isHidden)
         await fixture.connect()
-        var menu = try XCTUnwrap(fixture.screen.menuButton.menu)
-        let sections = menu.children.compactMap { $0 as? UIMenu }
-        XCTAssertEqual(sections.count, 3)
-        let pickers = sections[0].children.compactMap { $0 as? UIMenu }
-        XCTAssertEqual(pickers.map(\.title), ["Model", "Effort", "Permission Mode", "Fast mode"])
-        XCTAssertEqual(pickers.map(\.subtitle), ["Sonnet", "Medium", "Ask First", "Off"])
-        let group = try XCTUnwrap(pickers[0].children.first as? UIMenu)
+        // The model is a chip of its own; the rest are menus in the options chip.
+        XCTAssertFalse(composer.modelButton.isHidden)
+        XCTAssertEqual(composer.modelButton.configuration?.title, "Sonnet")
+        XCTAssertEqual(composer.modelButton.accessibilityLabel, "Model")
+        XCTAssertEqual(composer.modelButton.accessibilityValue, "Sonnet")
+        var options = try XCTUnwrap(composer.optionsButton.menu).children.compactMap { $0 as? UIMenu }
+        XCTAssertEqual(options.map(\.title), ["Effort", "Permission Mode", "Fast mode"])
+        XCTAssertEqual(options.map(\.subtitle), ["Medium", "Ask First", "Off"])
+        XCTAssertEqual(composer.optionsButton.accessibilityValue, "Effort, Medium; Permission Mode, Ask First; Fast mode, Off")
+        let group = try XCTUnwrap(composer.modelButton.menu?.children.first as? UIMenu)
         XCTAssertEqual(group.title, "Claude")
         XCTAssertTrue(group.options.contains(.displayInline))
         let models = group.children.compactMap { $0 as? UIAction }
@@ -495,9 +501,12 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertEqual(models.map(\.state), [.on, .off])
         XCTAssertEqual(models.map(\.subtitle), ["Fast and capable", "Most capable"])
         XCTAssertTrue(models.allSatisfy { !$0.attributes.contains(.disabled) })
-        XCTAssertEqual(sections[1].children.compactMap { ($0 as? UIAction)?.title }, ["Copy Path"])
-        XCTAssertEqual(sections[2].children.count, 1, "Nothing to start while the agent runs")
-        let stop = try XCTUnwrap(sections[2].children.first as? UIAction)
+        // The session's menu keeps what is done to the session, not the agent's settings.
+        let sections = try XCTUnwrap(fixture.screen.menuButton.menu).children.compactMap { $0 as? UIMenu }
+        XCTAssertEqual(sections.count, 2)
+        XCTAssertEqual(sections[0].children.compactMap { ($0 as? UIAction)?.title }, ["Copy Path"])
+        XCTAssertEqual(sections[1].children.count, 1, "Nothing to start while the agent runs")
+        let stop = try XCTUnwrap(sections[1].children.first as? UIAction)
         XCTAssertEqual(stop.title, "Stop Agent")
         XCTAssertTrue(stop.attributes.contains(.destructive))
 
@@ -507,28 +516,45 @@ final class SessionDetailViewControllerTests: XCTestCase {
             fixture.client.commands.contains { if case .setSessionConfigOption(_, "model", "opus") = $0 { true } else { false } }
         }
         await waitUntil("the confirmed value") { fixture.model.configuration.model?.currentValue == "opus" }
-        menu = try XCTUnwrap(fixture.screen.menuButton.menu)
-        let updated = ((menu.children[0] as? UIMenu)?.children.first as? UIMenu)
-        XCTAssertEqual(updated?.subtitle, "Opus")
+        XCTAssertEqual(composer.modelButton.configuration?.title, "Opus")
 
         await sendPrompt(fixture, "Busy")
-        menu = try XCTUnwrap(fixture.screen.menuButton.menu)
-        let busy = (((menu.children[0] as? UIMenu)?.children.first as? UIMenu)?.children.first as? UIMenu)?.children
-            .compactMap { $0 as? UIAction } ?? []
+        let busy = (composer.modelButton.menu?.children.first as? UIMenu)?.children.compactMap { $0 as? UIAction } ?? []
         XCTAssertFalse(busy.isEmpty)
         XCTAssertTrue(busy.allSatisfy { $0.attributes.contains(.disabled) }, "No changes while a turn runs")
+        options = try XCTUnwrap(composer.optionsButton.menu).children.compactMap { $0 as? UIMenu }
+        XCTAssertTrue(options.flatMap(\.children).compactMap { $0 as? UIAction }.allSatisfy { $0.attributes.contains(.disabled) })
         fixture.client.endTurn()
+    }
+
+    /// The options chip names the effort and the permission mode where the row has room for
+    /// both, and the effort alone where it has not, rather than cutting either short.
+    func testTheOptionsChipFitsItsTitleToTheRow() {
+        let composer = SessionComposerView(frame: CGRect(x: 0, y: 0, width: 700, height: 120))
+        let menu = UIMenu(children: [])
+        composer.setChips(model: .init(symbol: "cpu", title: "Sonnet", spoken: "Sonnet", menu: menu),
+                          options: .init(symbol: "slider.horizontal.3", title: "Medium · Ask First", shortTitle: "Medium",
+                                         spoken: "", menu: menu))
+        composer.layoutIfNeeded()
+        XCTAssertEqual(composer.optionsButton.configuration?.title, "Medium · Ask First")
+        composer.frame.size.width = 250
+        composer.layoutIfNeeded()
+        XCTAssertEqual(composer.optionsButton.configuration?.title, "Medium")
+        composer.frame.size.width = 700
+        composer.layoutIfNeeded()
+        XCTAssertEqual(composer.optionsButton.configuration?.title, "Medium · Ask First", "Widened, the whole title comes back")
     }
 
     func testAnAgentWithoutSettingsHasOnlyCopyPathAndStop() async throws {
         let fixture = SessionScreenFixture()
         show(fixture)
         await fixture.connect()
+        XCTAssertTrue(fixture.screen.composer.modelButton.isHidden)
+        XCTAssertTrue(fixture.screen.composer.optionsButton.isHidden)
         let menu = try XCTUnwrap(fixture.screen.menuButton.menu)
-        XCTAssertEqual((menu.children[0] as? UIMenu)?.children.count, 0)
         let pasteboard = UIPasteboard.withUniqueName()
         fixture.screen.pasteboard = pasteboard
-        ((menu.children[1] as? UIMenu)?.children.first as? UIAction)?.performWithSender(nil, target: nil)
+        ((menu.children[0] as? UIMenu)?.children.first as? UIAction)?.performWithSender(nil, target: nil)
         XCTAssertEqual(pasteboard.string, "/home/simon/latch", "The whole path, though the title shows ~")
         UIPasteboard.remove(withName: pasteboard.name)
     }
@@ -560,6 +586,12 @@ final class SessionDetailViewControllerTests: XCTestCase {
         XCTAssertEqual(banner.message, "The agent keeps working on the server. Latch catches up once it answers again.")
         XCTAssertTrue(banner.isWaiting)
         XCTAssertEqual(banner.severity, .info)
+        XCTAssertEqual(banner.actions.map(\.title), ["Retry Now"])
+        XCTAssertEqual(banner.detail, "")
+        let since = Date()
+        fixture.client.emit(.link(.reconnecting(server: "vps", since: since, lastAttempt: "Didn’t answer")))
+        await waitUntil("the reason") { fixture.screen.currentBanner?.message.hasSuffix(" Last try: Didn’t answer.") == true }
+        XCTAssertEqual(fixture.screen.currentBanner?.detail, "", "Latch's own words, not quoted ones")
         fixture.client.emit(.link(.connected))
         await waitUntil("the banner to go") { fixture.screen.currentBanner == nil }
         fixture.client.endTurn()

@@ -595,6 +595,19 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         XCTAssertEqual(result, LatchRemoteTurnOutcome(turnID: turnID, stopReason: "end_turn", error: nil, deliveredThrough: 2))
     }
 
+    func testALostLinkSaysWhyTheNextTryFailed() async throws {
+        let first = try await attached(after: 3)
+        first.drop()
+        let lost = try await observer.waitForLink { if case .reconnecting = $0 { true } else { false } }
+        // Losing a link that was up is not a failed try.
+        guard case .reconnecting(_, nil) = lost else { return XCTFail("\(lost)") }
+        let second = try await server.nextConnection()
+        second.drop()
+        let failed = try await observer.waitForLink { if case .reconnecting(_, .some) = $0 { true } else { false } }
+        guard case let .reconnecting(since, _) = failed, case let .reconnecting(lostSince, _) = lost else { return XCTFail() }
+        XCTAssertEqual(since, lostSince, "Still the same outage")
+    }
+
     func testCommandsWaitForTheReattachReply() async throws {
         let channel = channel!
         let first = try await attached(after: 3)
@@ -644,9 +657,10 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         try await second.acceptAttach(after: 0)
     }
 
-    func testBackoffGrowsWhileReattachFailsAndResetsOnceConnected() async throws {
+    func testBackoffGrowsWhileReattachFailsAndResetsOnceSteadilyConnected() async throws {
         var options = server.channelOptions()
         options.backoff = LatchRemoteBackoff(initial: .milliseconds(200), maximum: .seconds(30))
+        options.steadyConnection = .milliseconds(300)
         let channel = LatchRemoteRuntimeChannel(options: options)
         defer { channel.close() }
         async let attachment = withTimeout { try await channel.attach(after: 0) }
@@ -671,9 +685,18 @@ final class LatchRemoteRuntimeChannelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(arrivals[1] - arrivals[0], .milliseconds(175))
         XCTAssertGreaterThanOrEqual(arrivals[2] - arrivals[1], .milliseconds(350))
 
-        try await Task.sleep(for: .milliseconds(100))
+        // A link that drops at once is a flap, not a recovery: the backoff keeps growing.
         peer.drop()
-        let dropped = ContinuousClock.now
+        var dropped = ContinuousClock.now
+        peer = try await server.nextConnection()
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - dropped, .milliseconds(700))
+        try await peer.acceptAttach(after: 0)
+
+        // One that stayed up as long as the channel asks is forgotten, and the next drop
+        // reconnects as fast as the first.
+        try await Task.sleep(for: options.steadyConnection + .milliseconds(50))
+        peer.drop()
+        dropped = ContinuousClock.now
         try await server.nextConnection().acceptAttach(after: 0)
         XCTAssertLessThan(ContinuousClock.now - dropped, .milliseconds(600))
     }

@@ -397,6 +397,7 @@ final class SessionStreamingTests: XCTestCase {
             await fulfillment(of: [lost], timeout: 3)
             XCTAssertEqual(transcriptChanges, 0)
             XCTAssertEqual(model.status, serviceLoss ? "Agent service disconnected" : "Agent exited (23)")
+            XCTAssertEqual(model.agentExitStatus, serviceLoss ? nil : 23)
             model.onChange = nil
             model.onTranscriptChange = nil
             // An old command completion cannot resurrect the lost runtime.

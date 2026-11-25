@@ -10,6 +10,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         var sessions: [SessionViewController] = []
         init(location: WorkspaceLocation) { self.location = location }
 
+        /// The session last active here, which a new session in this group takes its agent from.
+        @MainActor var latestSession: SessionViewController? {
+            // Reversed, so a tie goes to the row further down: the one made later.
+            sessions.reversed().max { ($0.model.lastActiveAt ?? .distantPast) < ($1.model.lastActiveAt ?? .distantPast) }
+        }
+
         /// The folder of a local group.
         @available(*, deprecated, message: "Local groups only: use location")
         var url: URL { location.localURL ?? URL(fileURLWithPath: location.path) }
@@ -25,8 +31,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private(set) var workspaces: [Workspace] = []
     var onSelect: ((SessionViewController?) -> Void)?
     var onCloseSession: ((SessionViewController) -> Void)?
+    /// Another session in a group's place, from its context menu.
+    var onNewSession: ((Workspace) -> Void)?
     /// A folder dropped on the list opens a session in it.
     var onOpenWorkspace: ((URL) -> Void)?
+    /// A session was marked read or unread from its context menu.
+    var onUnreadChange: (() -> Void)?
     /// A remote group's server name, looked up when the row is drawn so a rename shows.
     var serverName: ((UUID) -> String?)?
     /// Copy Path writes here. Tests substitute a private pasteboard for the user's clipboard.
@@ -244,24 +254,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         if let workspace = item as? Workspace {
             let identifier = NSUserInterfaceItemIdentifier("workspace")
-            let cell = outlineView.makeView(withIdentifier: identifier, owner: nil) as? NSTableCellView ?? {
-                let cell = NSTableCellView()
-                cell.identifier = identifier
-                let label = NSTextField(labelWithString: "")
-                label.lineBreakMode = .byTruncatingMiddle
-                label.translatesAutoresizingMaskIntoConstraints = false
-                cell.addSubview(label)
-                cell.textField = label
-                NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: SessionCellView.textInset),
-                    label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
-                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                ])
-                return cell
-            }()
+            let cell = outlineView.makeView(withIdentifier: identifier, owner: nil) as? WorkspaceCellView
+                ?? WorkspaceCellView(identifier: identifier)
             let title = groupTitle(workspace.location)
-            cell.textField?.stringValue = title.name
-            cell.toolTip = title.tooltip
+            let server = workspace.location.serverID.flatMap { id in
+                ServerStatus.of(allSessions.filter { $0.location.serverID == id })
+            }
+            cell.configure(title: title.name, tooltip: title.tooltip, server: server)
             return cell
         }
         guard let session = item as? SessionViewController else { return nil }
@@ -284,8 +283,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// A local group is its folder's name; a remote one also names its server, so the same
     /// folder name on two servers, or here and on a server, never reads as one group.
     func groupTitle(_ location: WorkspaceLocation) -> (name: String, tooltip: String) {
+        Self.groupTitle(location) { [serverName] in serverName?($0) }
+    }
+
+    /// The same names wherever a place is listed, as in the recent places.
+    nonisolated static func groupTitle(_ location: WorkspaceLocation, serverName: (UUID) -> String?) -> (name: String, tooltip: String) {
         guard let serverID = location.serverID else { return (location.folderName, location.path) }
-        let server = serverName?(serverID) ?? "Removed server"
+        let server = serverName(serverID) ?? "Removed server"
         return ("\(server) · \(location.folderName)", "\(server) · \(location.path)")
     }
 
@@ -335,11 +339,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// test can read it without a real right-click.
     func contextMenuItems(for item: Any) -> [NSMenuItem] {
         if let workspace = item as? Workspace {
-            return locationItems(workspace.location, reveal: "Reveal in Finder", terminal: "Open in Terminal",
-                                 copy: "Copy Path")
+            // No ellipsis: it asks nothing, and starts on the agent the group's latest session runs.
+            let new = entry("New Session in “\(groupTitle(workspace.location).name)”",
+                            #selector(newSessionInClickedWorkspace), workspace)
+            new.isEnabled = workspace.location.serverID.map { serverName?($0) != nil } ?? true
+            return [new, .separator()]
+                + locationItems(workspace.location, reveal: "Reveal in Finder", terminal: "Open in Terminal",
+                                copy: "Copy Path")
         }
         guard let session = item as? SessionViewController else { return [] }
-        return [entry("Rename…", #selector(renameClickedSession), session), .separator(),
+        // Read is what selecting a session does; unread waits until it is selected again.
+        let unread = session.hasUnseenReply ? entry("Mark as Read", #selector(markClickedRead), session)
+            : entry("Mark as Unread", #selector(markClickedUnread), session)
+        return [entry("Rename…", #selector(renameClickedSession), session), unread, .separator(),
                 entry("Fork Session", #selector(forkClickedSession), session), .separator()]
             + locationItems(session.location, reveal: "Reveal Workspace in Finder",
                             terminal: "Open Workspace in Terminal", copy: "Copy Workspace Path")
@@ -354,7 +366,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         revealItem.isEnabled = url != nil
         let terminalItem = entry(terminal, #selector(openClickedInTerminal), url)
         terminalItem.isEnabled = url != nil
-        return [revealItem, terminalItem, entry(copy, #selector(copyClickedPath), location.path)]
+        // Open With, as the Finder offers it: the applications that open a folder, such as an editor.
+        let openWith = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+        openWith.submenu = WorkspaceApplicationsMenu(title: "Open With") { url }
+        openWith.isEnabled = url != nil
+        let items = [revealItem, terminalItem, openWith, entry(copy, #selector(copyClickedPath), location.path)]
+        guard let serverID = location.serverID else { return items }
+        let settings = NSMenuItem(title: "Server Settings…", action: #selector(LatchApplicationDelegate.showServerSettings(_:)),
+                                  keyEquivalent: "")
+        settings.representedObject = ServerReference(serverID)
+        return items + [.separator(), settings]
     }
 
     private func entry(_ title: String, _ action: Selector, _ object: Any?) -> NSMenuItem {
@@ -364,9 +385,25 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return item
     }
 
+    @objc private func newSessionInClickedWorkspace(_ sender: NSMenuItem) {
+        guard let workspace = sender.representedObject as? Workspace else { return }
+        onNewSession?(workspace)
+    }
+
     @objc private func closeClickedSession(_ sender: NSMenuItem) {
         guard let session = sender.representedObject as? SessionViewController else { return }
         onCloseSession?(session)
+    }
+
+    @objc private func markClickedUnread(_ sender: NSMenuItem) { markClicked(sender, unread: true) }
+
+    @objc private func markClickedRead(_ sender: NSMenuItem) { markClicked(sender, unread: false) }
+
+    private func markClicked(_ sender: NSMenuItem, unread: Bool) {
+        guard let session = sender.representedObject as? SessionViewController else { return }
+        session.hasUnseenReply = unread
+        refreshRows()
+        onUnreadChange?()
     }
 
     @objc private func forkClickedSession(_ sender: NSMenuItem) {
@@ -603,5 +640,42 @@ final class SessionCellView: NSTableCellView, NSTextFieldDelegate {
         time.isHidden = !showsTime
         titleClearsTime.isActive = showsTime
         titleClearsAccessory.isActive = closing || status != .resting
+    }
+}
+
+/// A group's title, and for a server's group a dot saying whether the server answers the
+/// sessions on it: at the row's end, where a session row's status sits.
+@MainActor
+final class WorkspaceCellView: NSTableCellView {
+    private let label = NSTextField(labelWithString: "")
+    let dot = ServerStatusDot()
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        label.lineBreakMode = .byTruncatingMiddle
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addSubview(label)
+        addSubview(dot)
+        textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SessionCellView.textInset),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -6),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SessionCellView.textInset),
+            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 8),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("Not used") }
+
+    func configure(title: String, tooltip: String, server: (status: ServerStatus, detail: String?)?) {
+        label.stringValue = title
+        dot.status = server?.status
+        let state = server.map { [$0.status.words, $0.detail].compactMap { $0 }.joined(separator: ": ") }
+        toolTip = [tooltip, state].compactMap { $0 }.joined(separator: "\n")
+        label.setAccessibilityLabel([title, server?.status.words].compactMap { $0 }.joined(separator: ", "))
     }
 }

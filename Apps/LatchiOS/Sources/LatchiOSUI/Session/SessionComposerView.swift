@@ -3,11 +3,13 @@ import LatchSessionKit
 import UIKit
 
 /// The field at the bottom of a session: a growing text view with the photos to send above
-/// it, an Add Photos button before it, and one button after it that sends, or stops the turn
-/// that is running; while the agent works and the draft has something in it, Send, with Stop
-/// beside it. Before them, once the agent says, how much of its context is in use. Over it
-/// all, while the agent has one, the agent's plan, and under that the messages waiting for the
-/// turn to end. It holds the draft; the session decides what each state allows.
+/// it and a row under it, with an Add Photos button before the field. The row has the agent's
+/// model and its other options as quiet chips, once the agent offers them, and at its end one
+/// button that sends, or stops the turn that is running; while the agent works and the draft
+/// has something in it, Send, with Stop beside it. Before them, once the agent says, how much
+/// of its context is in use. Over it all, while the agent has one, the agent's plan, and under
+/// that the messages waiting for the turn to end. It holds the draft; the session decides what
+/// each state allows.
 final class SessionComposerView: UIView, UITextViewDelegate {
     enum Action: Equatable {
         case send(enabled: Bool)
@@ -29,6 +31,11 @@ final class SessionComposerView: UIView, UITextViewDelegate {
     /// "25%" of the context in use; its menu has the tokens and the cost.
     let usageButton = UIButton(type: .system)
     private(set) var usage: ContextUsageSummary?
+    /// The agent's model, its menu the agent's models.
+    let modelButton = UIButton(type: .system)
+    /// The agent's other options, such as effort and permission mode, each a menu in its menu.
+    let optionsButton = UIButton(type: .system)
+    private let chips = UIStackView()
     let planView = SessionPlanView()
     let queueView = SessionQueueView()
     /// The plan over the queue, over the field.
@@ -171,7 +178,22 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         // Never squeezed by the text, but gone entirely while there is nothing to show.
         usageButton.setContentHuggingPriority(.required, for: .horizontal)
         usageButton.setContentCompressionResistancePriority(.defaultHigh + 10, for: .horizontal)
-        for view in [fieldBackground, dropHighlight, strip, textView, placeholderLabel, usageButton, stopButton, actionButton] {
+        for button in [modelButton, optionsButton] {
+            button.showsMenuAsPrimaryAction = true
+            button.showsLargeContentViewer = true
+            button.isPointerInteractionEnabled = true
+            button.isHidden = true
+            // Captions beside the field's text, as the usage is.
+            button.maximumContentSizeCategory = .extraExtraLarge
+            chips.addArrangedSubview(button)
+        }
+        // The model's name is the one to keep whole; the options' summary gives way first.
+        modelButton.setContentCompressionResistancePriority(.defaultHigh - 1, for: .horizontal)
+        optionsButton.setContentCompressionResistancePriority(.defaultHigh - 2, for: .horizontal)
+        chips.axis = .horizontal
+        chips.spacing = 0
+        chips.alignment = .center
+        for view in [fieldBackground, dropHighlight, strip, textView, placeholderLabel, chips, usageButton, stopButton, actionButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             field.addSubview(view)
         }
@@ -219,7 +241,10 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             stripStack.bottomAnchor.constraint(equalTo: strip.contentLayoutGuide.bottomAnchor),
             stripStack.heightAnchor.constraint(equalTo: strip.frameLayoutGuide.heightAnchor, constant: -4),
             textView.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: 16),
-            textView.trailingAnchor.constraint(equalTo: usageButton.leadingAnchor),
+            textView.trailingAnchor.constraint(equalTo: field.trailingAnchor, constant: -16),
+            chips.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: 6),
+            chips.trailingAnchor.constraint(lessThanOrEqualTo: usageButton.leadingAnchor),
+            chips.centerYAnchor.constraint(equalTo: actionButton.centerYAnchor),
             usageButton.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor),
             usageButton.centerYAnchor.constraint(equalTo: actionButton.centerYAnchor),
             usageButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
@@ -229,12 +254,13 @@ final class SessionComposerView: UIView, UITextViewDelegate {
             stopButton.heightAnchor.constraint(equalToConstant: 44),
             stopWidth,
             textView.topAnchor.constraint(equalTo: strip.bottomAnchor),
-            textView.bottomAnchor.constraint(equalTo: field.bottomAnchor),
+            // The row's buttons are inset in their 44 points, so the text comes a little closer.
+            textView.bottomAnchor.constraint(equalTo: actionButton.topAnchor, constant: 4),
             textHeight,
             placeholderLabel.leadingAnchor.constraint(equalTo: textView.leadingAnchor),
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: textView.trailingAnchor),
             placeholderBaseline,
-            actionButton.trailingAnchor.constraint(equalTo: field.trailingAnchor),
+            actionButton.trailingAnchor.constraint(equalTo: field.trailingAnchor, constant: -2),
             actionButton.bottomAnchor.constraint(equalTo: field.bottomAnchor),
             actionButton.widthAnchor.constraint(equalToConstant: 44),
             actionButton.heightAnchor.constraint(equalToConstant: 44),
@@ -402,6 +428,54 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         usageButton.configuration = configuration
     }
 
+    /// The agent's choices, once it offers them: each chip a glyph, what is chosen now, and a
+    /// menu to choose again. Nil hides a chip.
+    struct Chip {
+        let symbol: String
+        let title: String
+        /// What it says where the whole title would not fit, rather than cutting it short.
+        var shortTitle: String? = nil
+        let spoken: String
+        let menu: UIMenu
+    }
+
+    private var optionsChip: Chip?
+
+    func setChips(model: Chip?, options: Chip?) {
+        optionsChip = options
+        for (button, chip) in [(modelButton, model), (optionsButton, options)] {
+            button.isHidden = chip == nil
+            guard let chip else { button.menu = nil; continue }
+            configureChip(button, chip, title: chip.title)
+            button.menu = chip.menu
+            button.accessibilityValue = chip.spoken
+            button.largeContentTitle = chip.title
+            button.largeContentImage = UIImage(systemName: chip.symbol)
+        }
+        modelButton.accessibilityLabel = "Model"
+        optionsButton.accessibilityLabel = "Options"
+        // The options' title is fitted to the room once the row is laid out.
+        setNeedsLayout()
+    }
+
+    private func configureChip(_ button: UIButton, _ chip: Chip, title: String) {
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: chip.symbol)
+        configuration.preferredSymbolConfigurationForImage = .init(textStyle: .footnote, scale: .medium)
+        configuration.imagePadding = 5
+        configuration.title = title
+        configuration.titleLineBreakMode = .byTruncatingTail
+        configuration.indicator = .popup
+        configuration.baseForegroundColor = .secondaryLabel
+        configuration.contentInsets = .init(top: 6, leading: 10, bottom: 6, trailing: 8)
+        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = .preferredFont(forTextStyle: .subheadline)
+            return attributes
+        }
+        button.configuration = configuration
+    }
+
     /// The agent's plan, as it last listed it; empty when it has none.
     func setPlan(_ plan: [ACPPlanEntry]) {
         planView.show(plan)
@@ -471,6 +545,23 @@ final class SessionComposerView: UIView, UITextViewDelegate {
         let width = textView.bounds.width
         super.layoutSubviews()
         if abs(textView.bounds.width - width) > 0.5 { textChanged(notify: false) }
+        fitOptionsTitle()
+    }
+
+    /// The options chip says all it can in the room the row leaves it, and its short title
+    /// where the whole one would be cut off.
+    private func fitOptionsTitle() {
+        guard let chip = optionsChip, let short = chip.shortTitle, !optionsButton.isHidden else { return }
+        // From the field's width, which is set by now; the row inside it is laid out after this.
+        let room = field.bounds.width - 6 - 2 - 44 - (stopButton.isHidden ? 0 : 44)
+            - (usageButton.isHidden ? 0 : usageButton.intrinsicContentSize.width)
+            - (modelButton.isHidden ? 0 : modelButton.intrinsicContentSize.width)
+        let measure = UIButton(type: .system)
+        measure.traitOverrides.preferredContentSizeCategory = optionsButton.traitCollection.preferredContentSizeCategory
+        configureChip(measure, chip, title: chip.title)
+        let title = measure.intrinsicContentSize.width <= room ? chip.title : short
+        guard optionsButton.configuration?.title != title else { return }
+        configureChip(optionsButton, chip, title: title)
     }
 }
 

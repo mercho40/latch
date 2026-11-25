@@ -132,6 +132,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     private var focusesComposer = false
     /// The slash suggestions were dismissed with Escape, until the draft changes.
     private var suggestionsDismissed = false
+    /// Where Up and Down stand in the prompts sent before, while the composer holds one of them.
+    private var promptRecall: PromptHistory.Recall?
 
     init(model: SessionModel, context: SessionDetailContext) {
         self.model = model
@@ -531,7 +533,8 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         let suggesting = !suggestions.isHidden
         return switch key {
         case .return: suggesting || canSend
-        case .up, .down, .tab, .escape: suggesting
+        case .up, .down: suggesting || recall(key) != nil
+        case .tab, .escape: suggesting
         }
     }
 
@@ -539,11 +542,37 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         switch key {
         case .return where suggestions.isHidden: send()
         case .return, .tab: if let command = suggestions.highlighted { choose(command) }
+        case .up where suggestions.isHidden, .down where suggestions.isHidden:
+            guard let step = recall(key) else { return }
+            composer.text = step.text
+            composer.textView.selectedRange = NSRange(location: (step.text as NSString).length, length: 0)
+            promptRecall = step.recall
+            context.onDraftChange(step.text)
+            // A recalled command is a prompt to send again, not a query for the suggestions.
+            suggestionsDismissed = true
+            refresh()
         case .up: suggestions.moveHighlight(by: -1)
         case .down: suggestions.moveHighlight(by: 1)
         case .escape:
             suggestionsDismissed = true
             refreshSuggestions()
+        }
+    }
+
+    /// With a hardware keyboard, Up on the draft's first line brings back the prompt sent
+    /// before, as a shell does; Down on its last line the one after, and past the newest an
+    /// empty composer again.
+    private func recall(_ key: SessionComposerView.Key) -> PromptHistory.Step? {
+        let text = composer.text as NSString
+        let selection = composer.textView.selectedRange
+        guard composer.isEditable, selection.length == 0, selection.location <= text.length else { return nil }
+        let prompts = PromptHistory.prompts(in: model.messages)
+        return switch key {
+        case .up where !text.substring(to: selection.location).contains("\n"):
+            PromptHistory.older(prompts, composer: composer.text, recall: promptRecall)
+        case .down where !text.substring(from: selection.location).contains("\n"):
+            PromptHistory.newer(prompts, composer: composer.text, recall: promptRecall)
+        default: nil
         }
     }
 
@@ -645,7 +674,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     /// "Reconnecting to vps…" while a live session's server is out of reach. Named as the
     /// Servers list has the server now, in case it was renamed.
     private var reconnectingTitle: String? {
-        guard case let .reconnecting(server, _) = model.linkState, model.phase != .disconnected else { return nil }
+        guard case let .reconnecting(server, _, _) = model.linkState, model.phase != .disconnected else { return nil }
         let name = context.serverName.isEmpty ? server : context.serverName
         return model.phase == .connecting ? "Connecting to \(name)…" : "Reconnecting to \(name)…"
     }
@@ -654,15 +683,19 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     /// server outranks an earlier failure, a refused photo is said only when nothing failed,
     /// a read-only conversation is a state rather than a failure, then the failure itself.
     var currentBanner: SessionBanner? {
-        if let title = reconnectingTitle, case let .reconnecting(_, since) = model.linkState {
+        if let title = reconnectingTitle, case let .reconnecting(_, since, lastAttempt) = model.linkState {
             let message = switch model.phase {
             case .connecting: "It has not answered yet. Latch keeps trying for a few seconds."
             case .prompting: "The agent keeps working on the server. Latch catches up once it answers again."
             default: "The agent is still running there. Latch reconnects on its own."
             }
-            return SessionBanner(key: "link\u{0}\(since.timeIntervalSinceReferenceDate)\u{0}\(message)", title: title,
-                                 message: message, severity: .info, isWaiting: true,
-                                 actions: model.phase == .connecting ? [Self.serverSettingsAction] : [])
+            // Why the last try failed, once one has, in Latch's own words after its advice: a new
+            // reason is news, so it is keyed apart.
+            let explained = [message, lastAttempt.map { "Last try: \($0)." }].compactMap { $0 }.joined(separator: " ")
+            return SessionBanner(key: "link\u{0}\(since.timeIntervalSinceReferenceDate)\u{0}\(explained)", title: title,
+                                 message: explained, severity: .info, isWaiting: true,
+                                 actions: model.phase == .connecting ? [Self.retryNowAction, Self.serverSettingsAction]
+                                     : [Self.retryNowAction])
         }
         if let notice = attachmentNotice, model.errorMessage == nil {
             return SessionBanner(key: "attachments\u{0}\(notice.id)", title: notice.title, message: notice.message,
@@ -743,6 +776,7 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
     private static let retryAction = SessionBanner.Action(title: "Retry", id: "retry")
     private static let startAction = SessionBanner.Action(title: "Start Agent", id: "retry")
     private static let serverSettingsAction = SessionBanner.Action(title: "Server Settings", id: "serverSettings")
+    private static let retryNowAction = SessionBanner.Action(title: "Retry Now", id: "retryNow")
 
     /// Whose failure it is: an unreachable server is not the agent's fault.
     private func failureTitle(disconnected: Bool) -> String {
@@ -769,6 +803,9 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
             context.onRetry()
         case Self.serverSettingsAction.id:
             context.onServerSettings()
+        case Self.retryNowAction.id:
+            let model = model
+            Task { await model.retryLinkNow() }
         default:
             break
         }
@@ -803,29 +840,44 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
         guard state != renderedMenu else { return }
         renderedMenu = state
         menuButton.menu = makeMenu(state)
+        let chips = makeChips(state)
+        composer.setChips(model: chips.model, options: chips.options)
     }
 
-    private func makeMenu(_ state: MenuState) -> UIMenu {
-        let pickers: [(SessionPicker.Kind, String, String)] = [
-            (.model, "Model", "cpu"),
-            (.effort, "Effort", "gauge.with.dots.needle.50percent"),
-            (.permissionMode, "Permission Mode", "lock.shield"),
-        ]
-        var settings = pickers.compactMap { kind, title, symbol -> UIMenu? in
+    /// The agent's choices, under the composer's text where they change between messages: its
+    /// model, and a menu of the others with what they are now as its title.
+    private func makeChips(_ state: MenuState) -> (model: SessionComposerView.Chip?, options: SessionComposerView.Chip?) {
+        func menu(_ kind: SessionPicker.Kind, _ title: String, _ symbol: String) -> UIMenu? {
             guard let picker = state.configuration[kind], !picker.choices.isEmpty else { return nil }
             return pickerMenu(picker, title: title, symbol: symbol, enabled: state.editable) { [weak self] value in
                 guard let self else { return }
                 Task { await self.model.select(kind, value: value) }
             }
         }
+        var model: SessionComposerView.Chip?
+        if let models = menu(.model, "Model", "cpu"), let current = models.subtitle {
+            model = .init(symbol: "cpu", title: current, spoken: current, menu: UIMenu(title: "Model", children: models.children))
+        }
+        let primary = [menu(.effort, "Effort", "brain"), menu(.permissionMode, "Permission Mode", "lock.shield")].compactMap { $0 }
         // The agent's other options, such as Claude Code's Fast mode, under its names for them.
-        settings += state.configuration.extras.compactMap { picker -> UIMenu? in
+        let extras = state.configuration.extras.compactMap { picker -> UIMenu? in
             guard case let .config(id) = picker.route, !picker.choices.isEmpty else { return nil }
             return pickerMenu(picker, title: picker.name ?? id, symbol: "slider.horizontal.3", enabled: state.editable) { [weak self] value in
                 guard let self else { return }
                 Task { await self.model.select(option: id, value: value) }
             }
         }
+        let options = primary + extras
+        guard !options.isEmpty else { return (model, nil) }
+        // "Medium · Ask First": the effort and the permission mode, which say most about a turn.
+        let summary = (primary.isEmpty ? Array(extras.prefix(1)) : primary).compactMap(\.subtitle)
+        let spoken = options.compactMap { option in option.subtitle.map { "\(option.title), \($0)" } }
+        return (model, .init(symbol: "slider.horizontal.3", title: summary.isEmpty ? "Options" : summary.joined(separator: " · "),
+                             shortTitle: summary.first, spoken: spoken.joined(separator: "; "),
+                             menu: UIMenu(title: "Options", children: options)))
+    }
+
+    private func makeMenu(_ state: MenuState) -> UIMenu {
         let copyPath = UIAction(title: "Copy Path", image: UIImage(systemName: "doc.on.doc"),
                                 attributes: state.folderPath.isEmpty ? .disabled : []) { [weak self] _ in
             self?.copyPath()
@@ -854,7 +906,6 @@ final class SessionDetailViewController: UIViewController, PHPickerViewControlle
                                          attributes: resume ? [] : .disabled) { [weak self] _ in self?.resumeConversation() })
         }
         return UIMenu(children: [
-            UIMenu(options: .displayInline, children: settings),
             conversation.isEmpty ? nil : UIMenu(options: .displayInline, children: conversation),
             UIMenu(options: .displayInline, children: state.canRename ? [rename, copyPath] : [copyPath]),
             UIMenu(options: .displayInline, children: state.canStartAgent ? [start, stop] : [stop]),

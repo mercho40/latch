@@ -93,7 +93,11 @@ public final class LatchAppDelegate: UIResponder, UIApplicationDelegate {
                         UIKeyCommand.inputDownArrow, [.command, .alternate]),
                 command("Previous Session", nil, #selector(root.previousSessionCommand), "[", attributes: .hidden, variant: "bracket"),
                 command("Next Session", nil, #selector(root.nextSessionCommand), "]", attributes: .hidden, variant: "bracket"),
-            ]),
+            ] + (1...9).map { number in
+                // Out of the menu, as Safari keeps its tab shortcuts, but working.
+                command(number == 9 ? "Last Session" : "Session \(number)", nil, #selector(root.goToSessionCommand(_:)),
+                        "\(number)", attributes: .hidden, variant: "\(number)")
+            }),
         ])
     }
 }

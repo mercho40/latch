@@ -261,7 +261,11 @@ final class SessionStatusBannerView: UIView, UIContextMenuInteractionDelegate {
     /// Everything the banner says, in reading order.
     private var fullText: String {
         guard let banner else { return "" }
-        return [banner.title, banner.detail, banner.message].filter { !$0.isEmpty }.joined(separator: ". ")
+        // A line that already ends in a full stop gets no second one before the next.
+        let lines = [banner.title, banner.detail, banner.message].filter { !$0.isEmpty }
+        return lines.enumerated().map { index, line in
+            index < lines.count - 1 && line.hasSuffix(".") ? String(line.dropLast()) : line
+        }.joined(separator: ". ")
     }
 
     func contextMenuInteraction(_ interaction: UIContextMenuInteraction,

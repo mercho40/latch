@@ -469,8 +469,9 @@ public final class RemoteAgentServiceClient: AgentServiceClient {
                 switch link {
                 case .idle, .connecting, .connected:
                     yield(.link(.connected), from: channel)
-                case let .reconnecting(since):
-                    yield(.link(.reconnecting(server: serverName, since: since)), from: channel)
+                case let .reconnecting(since, lastAttempt):
+                    yield(.link(.reconnecting(server: serverName, since: since, lastAttempt: lastAttempt.map(ServerCheckText.brief))),
+                          from: channel)
                 case .failed:
                     // Told once the events have all been delivered, if it ends this client.
                     break

@@ -4,7 +4,8 @@ import LatchSessionKit
 
 /// Sidebar of workspaces and sessions beside the selected session's detail view.
 @MainActor
-final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSMenuItemValidation {
+final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSMenuItemValidation,
+    NSMenuDelegate {
     private let split = NSSplitViewController()
     private let sidebar = SidebarViewController()
     private let detail = DetailHostViewController()
@@ -34,6 +35,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     private let serverCheck: ServerCheck
     /// The New Remote Session sheet while it is open.
     private(set) var remoteSessionSheet: NewRemoteSessionController?
+    /// Where sessions were started, here and on servers. In memory unless the app passes the saved list.
+    let recents: RecentWorkspaces
     private(set) var persistenceError: String?
 
     var savedLibrary: SavedSessionLibrary {
@@ -46,8 +49,10 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     /// notification, claims the Dock badge, or adds a status item.
     init(store: SessionStore? = nil, attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil,
          settings: AgentSettings? = nil, servers: (any ServerStore)? = nil,
-         remoteConnector: (any RemoteSessionConnector)? = nil, serverCheck: ServerCheck? = nil) {
+         remoteConnector: (any RemoteSessionConnector)? = nil, serverCheck: ServerCheck? = nil,
+         recents: RecentWorkspaces? = nil) {
         self.store = store
+        self.recents = recents ?? RecentWorkspaces(defaults: nil)
         self.attention = attention
         self.menuBar = menuBar
         self.settings = settings ?? .shared
@@ -94,11 +99,17 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         sidebar.onSelect = { [weak self] session in self?.show(session) }
         sidebar.onCloseSession = { [weak self] session in self?.close(session) }
         sidebar.onOpenWorkspace = { [weak self] url in self?.openWorkspace(url) }
+        sidebar.onNewSession = { [weak self] workspace in self?.newSession(in: workspace) }
+        sidebar.onUnreadChange = { [weak self] in self?.publishAttention() }
         sidebar.serverName = { [weak self] id in self?.servers.server(id: id)?.name }
         NotificationCenter.default.addObserver(self, selector: #selector(serversChanged),
                                                name: .serverStoreDidChange, object: self.servers)
         detail.onNewSession = { [weak self] in self?.newSession(nil) }
         detail.onOpenWorkspace = { [weak self] url in self?.openWorkspace(url) }
+        detail.onOpenPlace = { [weak self] place in self?.startSession(at: place) }
+        detail.onNewRemoteSession = { [weak self] in self?.newRemoteSession(nil) }
+        detail.recentPlaces = { [weak self] in self?.recentPlaces(limit: StartView.maximumRecents) ?? [] }
+        detail.offersRemote = { [weak self] in !(self?.servers.servers.isEmpty ?? true) }
         attention?.isSessionVisible = { [weak self] id in
             guard let self, NSApp.isActive, self.window?.isVisible == true else { return false }
             return self.sidebar.selectedSession?.id == id
@@ -112,6 +123,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         menuBar?.sessions = { [weak self] in self?.sidebar.allSessions.map(\.menuBarRow) ?? [] }
         menuBar?.onSelect = { [weak self] id in self?.reveal(id) }
         menuBar?.onNewSession = { [weak self] in self?.newSession(nil) }
+        menuBar?.onNewRemoteSession = { [weak self] in self?.newRemoteSession(nil) }
+        menuBar?.canStartRemoteSession = { [weak self] in !(self?.servers.servers.isEmpty ?? true) }
         menuBar?.apply()
         show(nil)
         // Centre only the first launch; afterwards the window reopens where it was left.
@@ -130,7 +143,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     // MARK: Sessions
 
     @objc func newSession(_ sender: Any?) {
-        guard let window, !shuttingDown, restoreFinished else { return }
+        guard let window, !shuttingDown, restoreFinished, window.attachedSheet == nil else { return }
         // The menu bar extra can start a session with the window closed; a sheet needs it.
         window.makeKeyAndOrderFront(nil)
         let panel = NSOpenPanel()
@@ -145,8 +158,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         }
     }
 
-    /// Every route to a new session — ⌘N, a dropped folder, Open Recent, or the Dock —
-    /// arrives here, so all of them are remembered as recent workspaces.
+    /// Every route to a new session in a folder on this Mac — ⌘N, a dropped folder, a recent
+    /// one, or the Dock — arrives here, so all of them are remembered as recent workspaces.
     func openWorkspace(_ url: URL) {
         guard !shuttingDown, restoreFinished else { return }
         window?.makeKeyAndOrderFront(nil)
@@ -159,17 +172,37 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         adopt(session)
         sidebar.add(session)
         NSDocumentController.shared.noteNewRecentDocumentURL(workspace)
+        recents.note(.local(workspace), agent: nil)
         scheduleSave()
         return session
     }
 
-    /// Session ▸ New Remote Session…: a server, a folder on it, and an agent. There is no
+    /// File ▸ New Remote Session…: a server, a folder on it, and an agent. There is no
     /// remote browser, so the folder is typed, starting from the server's home.
     @objc func newRemoteSession(_ sender: Any?) {
         guard let window, !shuttingDown, restoreFinished, !servers.servers.isEmpty,
               window.attachedSheet == nil else { return }
         window.makeKeyAndOrderFront(nil)
-        let sheet = NewRemoteSessionController(servers: servers.servers, check: serverCheck)
+        // Where sessions on each server worked, open or remembered, the most recent first; the sheet
+        // starts on the selected session's server, else the one used last.
+        var worked: [(serverID: UUID, recent: NewRemoteSessionController.Recent, date: Date)] = []
+        for session in sidebar.allSessions {
+            guard let id = session.location.serverID else { continue }
+            worked.append((id, .init(path: session.location.path, agent: session.selectedAgent),
+                           session.model.lastActiveAt ?? .distantPast))
+        }
+        for entry in recents.entries {
+            guard let id = entry.serverID, let agent = entry.agent.flatMap(AgentPreset.init(rawValue:)) else { continue }
+            worked.append((id, .init(path: entry.path, agent: agent), entry.date))
+        }
+        worked.sort { $0.date > $1.date }
+        var recent: [UUID: [NewRemoteSessionController.Recent]] = [:]
+        for place in worked { recent[place.serverID, default: []].append(place.recent) }
+        let exists: (UUID) -> Bool = { [servers] in servers.server(id: $0) != nil }
+        let preferred = sidebar.selectedSession?.location.serverID.flatMap { exists($0) ? $0 : nil }
+            ?? worked.first { exists($0.serverID) }?.serverID
+        let sheet = NewRemoteSessionController(servers: servers.servers, check: serverCheck, recent: recent,
+                                               preferredServer: preferred)
         sheet.onFinish = { [weak self] choice in
             guard let self else { return }
             self.remoteSessionSheet = nil
@@ -185,8 +218,61 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         let session = makeSession(.remote(serverID: serverID, path: path), initialAgent: agent)
         adopt(session)
         sidebar.add(session)
+        // Never the system's recent documents: they are for files on this Mac.
+        recents.note(session.location, agent: agent)
         scheduleSave()
         return session
+    }
+
+    /// Recent places as every list shows them: those that can still be reached, newest first.
+    func recentPlaces(limit: Int) -> [RecentPlace] {
+        RecentWorkspaces.places(recents.entries, serverName: { [servers] in servers.server(id: $0)?.name }, limit: limit)
+    }
+
+    /// A recent place from a menu: File ▸ Open Recent or the toolbar's. Both target this
+    /// controller, so both are disabled behind a sheet; it works with the window closed.
+    @objc func openRecentPlace(_ sender: Any?) {
+        guard let place = ((sender as? NSMenuItem)?.representedObject as? RecentPlaceBox)?.place else { return }
+        startSession(at: place)
+    }
+
+    /// File ▸ Open Recent ▸ Clear Menu: the empty window lists the same places.
+    func clearRecentPlaces() {
+        recents.clear()
+        detail.reloadStart()
+    }
+
+    /// One click from a recent place: a folder here starts as any folder does, and one on a
+    /// server on the agent last started there.
+    func startSession(at place: RecentPlace) {
+        guard let window, !shuttingDown, restoreFinished, window.attachedSheet == nil else { return }
+        switch place.location {
+        case let .local(url):
+            openWorkspace(url)
+        case let .remote(serverID, path):
+            guard let server = servers.server(id: serverID) else { return }
+            window.makeKeyAndOrderFront(nil)
+            // The sheet's own fallback, its first row, when the agent is unknown or the server
+            // no longer has the custom command it ran.
+            let agent = place.agent.flatMap { $0 == .custom && server.customCommand.isEmpty ? nil : $0 }
+                ?? AgentPreset.allCases[0]
+            addRemoteSession(serverID: serverID, path: path, agent: agent)
+        }
+    }
+
+    /// Another session in a sidebar group's place, on the agent its latest session runs. A new
+    /// session takes the command Settings or its server has now, not the one that session kept.
+    func newSession(in workspace: SidebarViewController.Workspace) {
+        guard let window, !shuttingDown, restoreFinished, window.attachedSheet == nil,
+              let template = workspace.latestSession else { return }
+        if let serverID = workspace.location.serverID, servers.server(id: serverID) == nil { return }
+        window.makeKeyAndOrderFront(nil)
+        let session = makeSession(template.location, launchEnvironment: template.injectedEnvironment,
+                                  initialAgent: template.selectedAgent)
+        adopt(session)
+        sidebar.add(session)
+        recents.note(session.location, agent: template.selectedAgent)
+        scheduleSave()
     }
 
     private func makeSession(_ location: WorkspaceLocation, launchEnvironment: AgentLaunchEnvironment? = nil,
@@ -202,6 +288,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         sidebar.refreshRows()
         refreshHarness()
         updateTitle()
+        fillComposeMenu(composePopUp.menu)
+        detail.reloadStart()
     }
 
     /// Bring a session on screen because something outside the window asked for it.
@@ -217,6 +305,11 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         session.onForkSession = { [weak self, weak session] agent, command in
             guard let self, let session else { return }
             self.forkSession(from: session, agent: agent, command: command)
+        }
+        // A server's folder starts again on the agent last started there, not the one it was made with.
+        session.onAgentChange = { [weak self, weak session] agent in
+            guard let self, let session else { return }
+            recents.note(session.location, agent: agent)
         }
         session.openAgentSessionIDs = { [weak self, weak session] in
             Set(self?.sidebar.allSessions.filter { $0 !== session }.compactMap { $0.savedSession.agentSessionID } ?? [])
@@ -239,6 +332,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
                                initialAgent: agent, initialCommand: command)
         adopt(fork)
         sidebar.add(fork, after: session)
+        recents.note(fork.location, agent: agent)
         scheduleSave()
     }
 
@@ -291,6 +385,14 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 
     @objc func disconnectSession(_ sender: Any?) { sidebar.selectedSession?.disconnectSession() }
 
+    @objc func restartAgent(_ sender: Any?) { sidebar.selectedSession?.restartAgent() }
+
+    @objc func chooseModel(_ sender: Any?) { sidebar.selectedSession?.choose(.model) }
+
+    @objc func chooseEffort(_ sender: Any?) { sidebar.selectedSession?.choose(.effort) }
+
+    @objc func choosePermissionMode(_ sender: Any?) { sidebar.selectedSession?.choose(.permissionMode) }
+
     @objc func forkSelectedSession(_ sender: Any?) { sidebar.selectedSession?.forkSession() }
 
     @objc func resumeConversation(_ sender: Any?) { sidebar.selectedSession?.resumeConversation() }
@@ -301,6 +403,13 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     @objc func nextSession(_ sender: Any?) { step(by: 1) }
+
+    /// ⌘1 to ⌘9, in the sidebar's order.
+    @objc func goToSession(_ sender: NSMenuItem) {
+        let sessions = sidebar.allSessions
+        guard let index = SessionShortcut.index(forNumber: sender.tag, count: sessions.count) else { return }
+        sidebar.select(sessions[index])
+    }
 
     @objc func previousSession(_ sender: Any?) { step(by: -1) }
 
@@ -316,6 +425,9 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         guard let url = sidebar.selectedSession?.localURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+
+    /// The selected session's folder, where it is on this Mac.
+    var selectedLocalURL: URL? { sidebar.selectedSession?.localURL }
 
     @objc func openWorkspaceInTerminal(_ sender: Any?) {
         guard let url = sidebar.selectedSession?.localURL,
@@ -348,8 +460,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             return session != nil && restoreFinished && !shuttingDown
         case #selector(copyConversation(_:)):
             return !(session?.model.transcript.isEmpty ?? true)
-        case #selector(newSession(_:)):
-            return restoreFinished && !shuttingDown
+        case #selector(newSession(_:)), #selector(openRecentPlace(_:)):
+            return restoreFinished && !shuttingDown && window?.attachedSheet == nil
         case #selector(newRemoteSession(_:)):
             return restoreFinished && !shuttingDown && !servers.servers.isEmpty && window?.attachedSheet == nil
         case #selector(stopSession(_:)):
@@ -358,10 +470,21 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             return (session?.canAttachFiles ?? false) && window?.attachedSheet == nil
         case #selector(disconnectSession(_:)):
             return session?.canDisconnect ?? false
+        case #selector(restartAgent(_:)):
+            menuItem.title = session?.model.phase == .disconnected ? "Start Agent" : "Restart Agent"
+            return session?.canRestartAgent ?? false
+        case #selector(chooseModel(_:)):
+            return (session?.canChoose(.model) ?? false) && window?.attachedSheet == nil
+        case #selector(chooseEffort(_:)):
+            return (session?.canChoose(.effort) ?? false) && window?.attachedSheet == nil
+        case #selector(choosePermissionMode(_:)):
+            return (session?.canChoose(.permissionMode) ?? false) && window?.attachedSheet == nil
         case #selector(forkSelectedSession(_:)):
             return (session?.canFork ?? false) && restoreFinished && !shuttingDown
         case #selector(resumeConversation(_:)):
             return (session?.canResumeConversation ?? false) && restoreFinished && !shuttingDown
+        case #selector(goToSession(_:)):
+            return SessionShortcut.index(forNumber: menuItem.tag, count: sidebar.allSessions.count) != nil
         case #selector(nextSession(_:)), #selector(previousSession(_:)):
             return sidebar.allSessions.count > 1
         case #selector(revealWorkspace(_:)):
@@ -441,6 +564,14 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
             // Except the runtimes a quit left running on servers: those are attached to now,
             // before selecting one loads its view, so nothing they did meanwhile waits for a click.
             for session in sidebar.allSessions { session.reattachAtLaunch() }
+            // The launch that starts keeping recent places takes in those already open.
+            if recents.adoptsOpenPlaces {
+                for workspace in sidebar.workspaces {
+                    let latest = workspace.latestSession
+                    recents.adopt(workspace.location, agent: latest?.selectedAgent, lastActive: latest?.model.lastActiveAt)
+                }
+                recents.finishAdopting()
+            }
             sidebar.select(sidebar.allSessions.first { $0.id == library.selectedSessionID })
             persistenceReady = true
         } catch {
@@ -650,6 +781,83 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         refreshHarness()
     }
 
+    // MARK: New Session menu
+
+    /// Every way to start a session, from the window: a folder here, one on a server, or a
+    /// recent place. A pull-down built as the Agent control is, which VoiceOver reaches.
+    private let composePopUp: NSPopUpButton = {
+        let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 44, height: 24), pullsDown: true)
+        popUp.setAccessibilityLabel("New Session")
+        popUp.toolTip = "Start a session on this Mac or on a server"
+        popUp.imagePosition = .imageOnly
+        // The face: a pull-down shows its first item as the button and never lists it.
+        let face = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        face.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Session")
+        popUp.menu?.addItem(face)
+        return popUp
+    }()
+
+    /// The control itself, for tests.
+    var composeControl: NSPopUpButton { composePopUp }
+    var composeMenu: NSMenu { composePopUp.menu ?? NSMenu() }
+
+    private lazy var composeItem: NSToolbarItem = {
+        let item = NSToolbarItem(itemIdentifier: Self.newSessionItem)
+        item.label = "New Session"
+        item.paletteLabel = "New Session"
+        item.autovalidates = false
+        item.view = composePopUp
+        composePopUp.translatesAutoresizingMaskIntoConstraints = false
+        composePopUp.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        composePopUp.menu?.delegate = self
+        // For an overflowing or text-only toolbar.
+        let form = NSMenuItem(title: "New Session", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "New Session")
+        submenu.delegate = self
+        form.submenu = submenu
+        item.menuFormRepresentation = form
+        fillComposeMenu(composePopUp.menu)
+        return item
+    }()
+
+    var composeMenuForm: NSMenuItem? { composeItem.menuFormRepresentation }
+
+    /// Refilled as the menu opens, never per streamed chunk.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === composePopUp.menu || menu === composeItem.menuFormRepresentation?.submenu else { return }
+        fillComposeMenu(menu)
+    }
+
+    /// Without this, AppKit fills the menu, disk checks and all, on every key press it matches.
+    /// It has no key equivalents to find.
+    func menuHasKeyEquivalent(_ menu: NSMenu, for event: NSEvent,
+                              target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+                              action: UnsafeMutablePointer<Selector?>) -> Bool {
+        false
+    }
+
+    /// No key equivalents: a control's menu performs them ahead of the main menu's.
+    private func fillComposeMenu(_ menu: NSMenu?) {
+        guard let menu else { return }
+        // The pull-down keeps its face, item 0; the overflow form has none.
+        let kept = menu === composePopUp.menu ? 1 : 0
+        while menu.items.count > kept { menu.removeItem(at: kept) }
+        menu.addItem(withTitle: "New Session…", action: #selector(newSession(_:)), keyEquivalent: "").target = self
+        if servers.servers.isEmpty {
+            // Through the responder chain to the application, which opens Settings on Servers.
+            menu.addItem(withTitle: "Add Server…", action: #selector(LatchApplicationDelegate.addServer(_:)),
+                         keyEquivalent: "")
+        } else {
+            menu.addItem(withTitle: "New Remote Session…", action: #selector(newRemoteSession(_:)), keyEquivalent: "")
+                .target = self
+        }
+        let places = recentPlaces(limit: StartView.maximumRecents)
+        guard !places.isEmpty else { return }
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "Recent"))
+        for place in places { menu.addItem(place.menuItem(action: #selector(openRecentPlace(_:)), target: self)) }
+    }
+
     // MARK: Toolbar
 
     private static let newSessionItem = NSToolbarItem.Identifier("newSession")
@@ -665,17 +873,11 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if identifier == Self.harnessItem { return harness }
-        guard identifier == Self.newSessionItem else { return nil }
-        let item = NSToolbarItem(itemIdentifier: identifier)
-        item.label = "New Session"
-        item.paletteLabel = "New Session"
-        item.toolTip = "Open a session in a workspace folder (⌘N)"
-        item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Session")
-        item.target = self
-        item.action = #selector(newSession(_:))
-        item.isBordered = true
-        return item
+        switch identifier {
+        case Self.harnessItem: harness
+        case Self.newSessionItem: composeItem
+        default: nil
+        }
     }
 
     // MARK: Smoke test
@@ -694,6 +896,7 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         guard sidebar.outline.numberOfRows == 0, detail.children.isEmpty, window?.title == "Latch" else {
             throw SmokeError.failed("Expected an empty sidebar and detail before any session")
         }
+        try smokeTestComposeMenu(expecting: ["New Session…", "Add Server…"])
         let environment = AgentLaunchEnvironment(environment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome.path],
                                                  home: fixtureHome, includeCommonLocations: false)
         let first = addSession(workspace: fixtureHome, launchEnvironment: environment)
@@ -780,6 +983,8 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
               session.locationTitle == "\(server.name) · \(workspace.path)" else {
             throw SmokeError.failed("The remote session was not added and selected under its server")
         }
+        try smokeTestComposeMenu(expecting: ["New Session…", "New Remote Session…", "", "Recent",
+                                             "\(server.name) · \(workspace.lastPathComponent)"])
         try await session.smokeTestRemoteConversation(workspace: workspace) {
             for client in connector.liveClients { client.dropConnectionForTesting() }
         } reconnect: {
@@ -791,6 +996,18 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
         let pid = (try? String(contentsOf: workspace.appendingPathComponent("agent.pid"), encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return RemoteSmokeReport(transport: session.model.serviceTransportDescription, runtimeID: runtimeID, agentPID: pid)
+    }
+
+    /// The toolbar's New Session menu is a pull-down VoiceOver reaches, and lists what it should.
+    private func smokeTestComposeMenu(expecting titles: [String]) throws {
+        menuNeedsUpdate(composeMenu)
+        let shown = composeMenu.items.dropFirst().map(\.title)
+        // A control's cell is what VoiceOver reaches; a pull-down's is a menu button.
+        guard composePopUp.pullsDown, let cell = composePopUp.cell, cell.isAccessibilityElement(),
+              cell.accessibilityRole() == .menuButton, cell.accessibilityLabel() == "New Session",
+              composePopUp.window === window, Array(shown.prefix(titles.count)) == titles else {
+            throw SmokeError.failed("The toolbar's New Session menu shows \(shown), expected \(titles)")
+        }
     }
 
     /// ⌘F over a real transcript: the bar takes its strip above the conversation, matches
@@ -914,6 +1131,11 @@ final class SessionWindowController: NSWindowController, NSToolbarDelegate, NSWi
 @MainActor
 final class DetailHostViewController: NSViewController {
     var onNewSession: (() -> Void)?
+    var onNewRemoteSession: (() -> Void)?
+    var onOpenPlace: ((RecentPlace) -> Void)?
+    /// What the empty window offers, read whenever it shows.
+    var recentPlaces: () -> [RecentPlace] = { [] }
+    var offersRemote: () -> Bool = { false }
     var onOpenWorkspace: ((URL) -> Void)? {
         didSet { (view as? WorkspaceDropView)?.onDrop = onOpenWorkspace }
     }
@@ -923,8 +1145,9 @@ final class DetailHostViewController: NSViewController {
         let drop = WorkspaceDropView()
         drop.onDrop = onOpenWorkspace
         view = drop
-        start.onOpenWorkspace = { [weak self] url in self?.onOpenWorkspace?(url) }
+        start.onOpenPlace = { [weak self] place in self?.onOpenPlace?(place) }
         start.onChooseFolder = { [weak self] in self?.onNewSession?() }
+        start.onNewRemoteSession = { [weak self] in self?.onNewRemoteSession?() }
         start.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(start)
         NSLayoutConstraint.activate([
@@ -933,16 +1156,19 @@ final class DetailHostViewController: NSViewController {
             start.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             start.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-        start.reload()
+        reloadStart()
         // A workspace opened from elsewhere, or deleted in the Finder, shows the next time
         // Latch comes forward.
         NotificationCenter.default.addObserver(self, selector: #selector(reloadRecents),
                                                name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 
-    @objc private func reloadRecents() {
-        guard !start.isHidden else { return }
-        start.reload()
+    @objc private func reloadRecents() { reloadStart() }
+
+    /// Only while it shows; it is read again whenever it comes back.
+    func reloadStart() {
+        guard isViewLoaded, !start.isHidden else { return }
+        start.reload(recentPlaces(), offersRemote: offersRemote())
     }
 
     func show(_ session: SessionViewController?) {
@@ -951,7 +1177,7 @@ final class DetailHostViewController: NSViewController {
             child.removeFromParent()
         }
         start.isHidden = session != nil
-        if session == nil { start.reload() }
+        reloadStart()
         guard let session, session.parent !== self else { return }
         addChild(session)
         session.view.translatesAutoresizingMaskIntoConstraints = false

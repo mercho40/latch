@@ -77,7 +77,8 @@ final class PhoneSession {
         model.sendsAttachmentsRemotely = true
         if let saved {
             model.restore(messages: saved.messages, agentSessionID: saved.agentSessionID,
-                          lastActiveAt: saved.lastActiveAt, remote: saved.remote)
+                          lastActiveAt: saved.lastActiveAt, remote: saved.remote,
+                          configChoices: saved.configChoices ?? [:])
         } else {
             // A new session was last active when it was made, so it sorts and reads as "now".
             model.restore(messages: [], agentSessionID: nil, lastActiveAt: model.now())
@@ -102,7 +103,8 @@ final class PhoneSession {
                      draft: SessionQueueView.draft(returning: model.queuedPrompts.map(\.text), before: draft), messages: model.messages,
                      agentSessionID: model.savedAgentSessionID, lastActiveAt: model.lastActiveAt,
                      serverID: serverID, remote: model.remoteBinding, agentName: agentName,
-                     adoptedAgentTitle: adoptedAgentTitle == title ? adoptedAgentTitle : nil)
+                     adoptedAgentTitle: adoptedAgentTitle == title ? adoptedAgentTitle : nil,
+                     configChoices: model.configChoices.isEmpty ? nil : model.configChoices)
     }
 
     var location: WorkspaceLocation { .remote(serverID: serverID, path: path) }

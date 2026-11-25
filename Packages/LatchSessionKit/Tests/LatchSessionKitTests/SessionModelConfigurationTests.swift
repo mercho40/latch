@@ -243,6 +243,54 @@ final class SessionModelConfigurationTests: XCTestCase {
         await finish(model)
     }
 
+    @MainActor func testNewSessionStartsOnRememberedChoices() async {
+        let model = SessionModel()
+        model.newSessionChoices = ["model": "deep", "effort": "high"]
+        await connect(model, variant: .modern)
+        XCTAssertEqual(model.configuration.model?.currentValue, "deep")
+        XCTAssertEqual(model.configuration.effort?.currentValue, "high")
+        XCTAssertEqual(model.configChoices, ["model": "deep", "effort": "high"])
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isChangingConfiguration)
+        await finish(model)
+    }
+
+    @MainActor func testSessionChoicesOutrankNewSessionChoicesAndRefusalsAreQuiet() async {
+        let model = SessionModel()
+        model.restore(messages: [], agentSessionID: nil, configChoices: ["effort": "high", "gone": "x"])
+        model.newSessionChoices = ["effort": "low", "model": "not-offered"]
+        await connect(model, variant: .rejectEffort)
+        XCTAssertEqual(model.configuration.model?.currentValue, "fast")
+        XCTAssertEqual(model.configuration.effort?.currentValue, "low")
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.phase, .ready)
+        // Refused and unoffered picks are dropped; one for an option the agent did not show is kept.
+        XCTAssertEqual(model.configChoices, ["gone": "x"])
+        await finish(model)
+    }
+
+    @MainActor func testUserPickIsRememberedAndReported() async {
+        let model = await connected(.permissionMode)
+        var made: [String] = []
+        model.onChoiceMade = { kind, key, value in made.append("\(kind.map { "\($0)" } ?? "extra") \(key)=\(value)") }
+        await run { await model.select(.effort, value: "high") }
+        await run { await model.select(.permissionMode, value: "plan") }
+        XCTAssertEqual(model.configChoices, ["effort": "high", "mode": "plan"])
+        XCTAssertEqual(made, ["effort effort=high", "permissionMode mode=plan"])
+        await finish(model)
+        XCTAssertEqual(model.configChoices, ["effort": "high", "mode": "plan"])
+        model.forgetChoices()
+        XCTAssertEqual(model.configChoices, [:])
+    }
+
+    @MainActor func testRememberedChoiceFollowsTheAgentsOwnMove() async {
+        let model = await connected(.updateAfterConfigReply)
+        await run { await model.select(.model, value: "deep") }
+        await waitUntil { model.configuration.model?.currentValue == "fast" }
+        XCTAssertEqual(model.configChoices["model"], "fast")
+        await finish(model)
+    }
+
     @MainActor private func connected(
         _ variant: ConfigurationSmokeAgent.Variant = .modern
     ) async -> SessionModel {

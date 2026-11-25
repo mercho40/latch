@@ -301,17 +301,7 @@ enum ServerCheckView {
 
     /// What went wrong in a few words, naming the setting when one would fix it. The whole
     /// sentence is for VoiceOver and Edit Server's Test Connection.
-    static func brief(_ error: any Error) -> String {
-        switch error as? LatchRemoteClientError {
-        case .destinationNotAllowed?: "Needs “Allow unencrypted network”"
-        case .unauthorized?: "Token not accepted"
-        case .protocolMismatch?: "Different Latch version"
-        case .handshakeTimedOut?, .timedOut?, .silence?: "Didn’t answer"
-        case .connectionFailed?, .connectionLost?, .closed?: "Not reachable"
-        case .invalidEndpoint?: "Port not valid"
-        default: ServerCheckText.failure(error)
-        }
-    }
+    static func brief(_ error: any Error) -> String { ServerCheckText.brief(error) }
 
     /// The address, then after a failure what happened, under it: "Can’t connect" in red and
     /// a few words on why. While a check runs, "Checking…" follows the address on its line,

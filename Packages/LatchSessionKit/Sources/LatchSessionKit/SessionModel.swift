@@ -31,6 +31,7 @@ public final class SessionModel {
             errorAdvice = nil
             errorIsConnectionFailure = false
             stoppedOnServer = false
+            agentExitStatus = nil
         }
     }
     /// What to do about `errorMessage`, in Latch's words; kept apart so the banner can set
@@ -41,6 +42,9 @@ public final class SessionModel {
     /// `errorMessage` says the agent was stopped on its server by something other than this
     /// session, which is neither a crash nor a failure to start.
     public private(set) var stoppedOnServer = false
+    /// `errorMessage` says the agent process ended by itself, with this status: a crash, not a
+    /// failure to start, so starting it again is the remedy rather than changing its setup.
+    public private(set) var agentExitStatus: Int32?
     public static let idleSavedStatus = "Saved · Not connected"
     /// The name the agent gave itself when it last started or was attached to, such as
     /// "Claude Code"; kept once it stops, for a custom command whose own name says little.
@@ -57,6 +61,16 @@ public final class SessionModel {
     public private(set) var cancellationRequested = false
     public private(set) var configuration = SessionConfiguration()
     public private(set) var isChangingConfiguration = false
+    /// The user's picks in this session, by `SessionPicker.key`, following where the agent moved
+    /// them since; saved with the session and put back whenever its agent starts again.
+    public private(set) var configChoices: [String: String] = [:]
+    /// Picks a session started from scratch begins with, such as the ones last made for its agent.
+    /// The session's own picks outrank them.
+    public var newSessionChoices: [String: String] = [:]
+    /// Called with each pick the user makes, once the agent has taken it.
+    public var onChoiceMade: ((SessionPicker.Kind?, _ key: String, _ value: String) -> Void)?
+    /// Remembered picks are being put back; the agent's own moves meanwhile are not the user's.
+    private var restoringChoices = false
     /// State changes (including permissions) are delivered immediately.
     public var onChange: (() -> Void)?
     /// History is already current; consumers may coalesce its rendering only.
@@ -66,6 +80,11 @@ public final class SessionModel {
     /// lost link changes nothing else: the runtime, the turn in flight and any permission
     /// sheet all wait for it to come back.
     public private(set) var linkState = SessionLinkState.connected
+    /// The link is down and the session is still trying it: not one that has given up, whose
+    /// link state can still say reconnecting.
+    public var isRetryingLink: Bool {
+        if case .reconnecting = linkState { phase != .disconnected } else { false }
+    }
 
     public let permissions = PermissionQueue()
     /// The agent's questions, such as Claude Code's AskUserQuestion, one shown at a time.
@@ -80,9 +99,10 @@ public final class SessionModel {
     private var loadedThroughSequence: UInt64?
 
     public func restore(messages: [ChatMessage], agentSessionID: String?, lastActiveAt: Date? = nil,
-                        remote: SavedSession.RemoteBinding? = nil) {
+                        remote: SavedSession.RemoteBinding? = nil, configChoices: [String: String] = [:]) {
         guard phase == .disconnected else { return }
         self.lastActiveAt = lastActiveAt
+        self.configChoices = configChoices
         history.restore(messages)
         savedAgentSessionID = agentSessionID
         savedBinding = remote
@@ -343,14 +363,20 @@ public final class SessionModel {
             }
             return
         }
-        resetAfterLoss(status: "Agent service disconnected",
-                       error: "Lost the connection to the Latch agent service. Select the agent again to reconnect.")
+        resetAfterLoss(status: "Agent service disconnected", error: "Lost the connection to the Latch agent service.",
+                       advice: "Starting the agent again reconnects.")
+    }
+
+    private func agentExited(status: Int32) {
+        resetAfterLoss(status: "Agent exited (\(status))", error: "The agent process ended (exit status \(status)).",
+                       advice: savedAgentSessionID == nil ? "Starting it again begins a new conversation."
+                           : "Starting it again picks the conversation up where it left off.", exitStatus: status)
     }
 
     /// `turnStopped` says a running turn was stopped rather than ended, when the server did
     /// not say so itself; `stoppedOnServer` implies it.
     private func resetAfterLoss(status: String, error: String, advice: String? = nil, connectionFailure: Bool = false,
-                                stoppedOnServer: Bool = false, turnStopped: Bool = false) {
+                                stoppedOnServer: Bool = false, turnStopped: Bool = false, exitStatus: Int32? = nil) {
         // The agent ending ends its turn; a failed link does not, since the turn runs on.
         if phase == .prompting, !connectionFailure { noteTurnEnded(stopped: stoppedOnServer || turnStopped) }
         generation = UUID()
@@ -368,6 +394,7 @@ public final class SessionModel {
         errorAdvice = advice
         errorIsConnectionFailure = connectionFailure
         self.stoppedOnServer = stoppedOnServer
+        agentExitStatus = exitStatus
         onChange?()
     }
 
@@ -455,8 +482,16 @@ public final class SessionModel {
     /// What the last remote connection asked for, or what an adopted runtime's record said it
     /// runs: the agent to save with the session, and to launch again should the runtime go.
     public var remoteAgent: LatchRemoteAgent? { remoteTarget?.agent }
+
     /// The folder on the server that `remoteAgent` works in.
     public var remoteWorkspace: String? { remoteTarget?.path }
+
+    /// Tries the server again now rather than when the backoff says: for a user who knows the
+    /// network is back, such as after turning Tailscale on.
+    public func retryLinkNow() async {
+        guard case .reconnecting = linkState else { return }
+        await (client as? RemoteAgentServiceClient)?.probe()
+    }
 
     /// Takes up a runtime on the server that this session did not start, such as one launched
     /// from another device, and follows it from the start of its journal, so all of it that the
@@ -807,8 +842,7 @@ public final class SessionModel {
         }
         guard let exit = pendingExit, appliedSequence >= exit.through else { return }
         if let server = exit.stoppedOn { return resetAfterStop(on: server, serverShutDown: exit.serverShutDown) }
-        resetAfterLoss(status: "Agent exited (\(exit.status))",
-                       error: "The agent process ended. Select the agent again to reconnect.")
+        agentExited(status: exit.status)
     }
 
     private func beginConnecting(startNewSession: Bool) -> Bool {
@@ -886,6 +920,7 @@ public final class SessionModel {
                 applyStateUpdate(update)
             }
             pendingStateUpdates.removeAll()
+            restoringChoices = true
             phase = .ready
             resumesWithHistory = false
             if case .remote = launch {
@@ -900,6 +935,8 @@ public final class SessionModel {
                 forksAgentSessions = initialization.agentCapabilities.forksSessions
                 steersPrompts = initialization.supportsSteering
             } else { status = "Connected" }
+            let wanted = resumingID == nil ? configChoices.merging(newSessionChoices) { mine, _ in mine } : configChoices
+            await putBack(wanted, generation: token)
         } catch {
             _ = try? await client.execute(.stopRuntime(id: id))
             guard generation == token else { return }
@@ -934,6 +971,37 @@ public final class SessionModel {
         }
     }
 
+    /// Sets each remembered pick the agent still offers, and keeps what it took. A pick the agent
+    /// refuses is dropped quietly: it is the agent's current value that the session shows.
+    private func putBack(_ wanted: [String: String], generation token: UUID) async {
+        defer { if generation == token { restoringChoices = false } }
+        let order = configuration.pickers.map(\.key).filter { wanted[$0] != nil }
+        for key in order {
+            guard generation == token, phase == .ready else { return }
+            // Choosing a model can take away an option the agent offered before it.
+            guard let value = wanted[key], let picker = configuration.picker(forKey: key) else { continue }
+            if picker.currentValue != value, picker.choices.contains(where: { $0.value == value }) {
+                await select(picker, value: value, quietly: true)
+            }
+            guard generation == token else { return }
+            configChoices[key] = configuration.picker(forKey: key)?.currentValue == value ? value : nil
+        }
+    }
+
+    /// The session changed agents: what was picked for the last one means nothing to the next.
+    public func forgetChoices() {
+        configChoices = [:]
+    }
+
+    /// The agent moved a picker the user had set, such as leaving plan mode: the session
+    /// remembers where it is now, not where the user last put it.
+    private func followChoices() {
+        guard !restoringChoices, phase == .ready || phase == .prompting else { return }
+        for key in configChoices.keys {
+            if let current = configuration.picker(forKey: key)?.currentValue { configChoices[key] = current }
+        }
+    }
+
     /// Only offered values may be sent, and one change must finish before another prompt or change.
     /// Keep the confirmed selection until the agent acknowledges; errors leave it unchanged.
     public func select(_ kind: SessionPicker.Kind, value: String) async {
@@ -945,13 +1013,13 @@ public final class SessionModel {
         await select(configuration.extras.first { $0.route == .config(configID) }, value: value)
     }
 
-    private func select(_ picker: SessionPicker?, value: String) async {
+    private func select(_ picker: SessionPicker?, value: String, quietly: Bool = false) async {
         guard phase == .ready, !isChangingConfiguration, let id = runtimeID,
               let picker, value != picker.currentValue,
               picker.choices.contains(where: { $0.value == value }) else { return }
         let token = generation
         isChangingConfiguration = true
-        errorMessage = nil
+        if !quietly { errorMessage = nil }
         onChange?()
         do {
             switch picker.route {
@@ -980,10 +1048,16 @@ public final class SessionModel {
                     legacyModeSequence = sequence
                 }
             }
+            if !quietly {
+                let kind = [SessionPicker.Kind.model, .effort, .permissionMode].first { configuration[$0]?.route == picker.route }
+                // A newer move of the agent's own may already have replaced the reply's value.
+                configChoices[picker.key] = configuration.picker(forKey: picker.key)?.currentValue ?? value
+                onChoiceMade?(kind, picker.key, value)
+            }
         } catch {
             guard generation == token else { return }
             if await handleAuthenticationFailure(error) { return }
-            errorMessage = error.localizedDescription
+            if !quietly { errorMessage = error.localizedDescription }
         }
         isChangingConfiguration = false
         sendNextQueued()
@@ -1492,8 +1566,7 @@ public final class SessionModel {
         case let .elicitationClosed(id, requestID) where id == runtimeID:
             closePermission(requestID: requestID)
         case let .processTerminated(id, status) where id == runtimeID:
-            resetAfterLoss(status: "Agent exited (\(status))",
-                           error: "The agent process ended. Select the agent again to reconnect.")
+            agentExited(status: status)
         default: break
         }
     }
@@ -1635,6 +1708,7 @@ public final class SessionModel {
         default:
             return
         }
+        followChoices()
         onChange?()
     }
 
@@ -1682,6 +1756,7 @@ public final class SessionModel {
         legacyModeSequence = 0
         pendingStateUpdates.removeAll()
         isChangingConfiguration = false
+        restoringChoices = false
         commands = []
         commandsSequence = 0
         plan = []
@@ -1749,6 +1824,7 @@ public final class SessionModel {
         if mode { legacyModeSequence = notification.localSequence ?? lastSequence }
         else if legacy { legacyModelSequence = notification.localSequence ?? lastSequence }
         else { configurationSequence = notification.localSequence ?? lastSequence }
+        followChoices()
         onChange?()
     }
 

@@ -29,10 +29,15 @@ public struct SavedSession: Codable, Equatable, Sendable {
     /// `title` when it is one the agent gave the conversation, so a later one from the agent may
     /// replace it; nil when the title is the user's own, or the first prompt's.
     public var adoptedAgentTitle: String? = nil
+    /// The choices the user made in this session's pickers, by `SessionPicker.key`, and where
+    /// the agent moved them since: put back when the agent starts again, since an agent need
+    /// not remember them across a load. Only values the agent offered are ever kept.
+    public var configChoices: [String: String]? = nil
 
     public init(id: UUID, workspacePath: String, title: String, agentID: String, customCommand: String, draft: String,
                 messages: [ChatMessage], agentSessionID: String? = nil, lastActiveAt: Date? = nil, serverID: UUID? = nil,
-                remote: RemoteBinding? = nil, agentName: String? = nil, adoptedAgentTitle: String? = nil) {
+                remote: RemoteBinding? = nil, agentName: String? = nil, adoptedAgentTitle: String? = nil,
+                configChoices: [String: String]? = nil) {
         self.id = id
         self.workspacePath = workspacePath
         self.title = title
@@ -46,6 +51,7 @@ public struct SavedSession: Codable, Equatable, Sendable {
         self.remote = remote
         self.agentName = agentName
         self.adoptedAgentTitle = adoptedAgentTitle
+        self.configChoices = configChoices
     }
 
     public struct RemoteBinding: Codable, Equatable, Sendable {
@@ -194,6 +200,7 @@ public actor SessionStore {
             guard sessionIDs.insert(session.id).inserted,
                   AgentPreset(rawValue: session.agentID) != nil,
                   session.messages.count <= ChatHistory.maximumMessageCount,
+                  (session.configChoices?.count ?? 0) <= 64,
                   // Only a session on a server can have left a runtime running there.
                   session.remote.map({ !$0.runtimeID.isEmpty && session.serverID != nil }) ?? true else {
                 throw StoreError.invalidLibrary

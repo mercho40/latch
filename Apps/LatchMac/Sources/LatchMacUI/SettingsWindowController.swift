@@ -52,6 +52,18 @@ final class SettingsWindowController: NSWindowController {
         serversPane.select(serverID: id)
     }
 
+    /// The Servers pane with Add Server… open. The pane must be in the window for its sheet,
+    /// so a window shown this moment gets one more turn of the run loop first.
+    func beginAddServer() {
+        select(pane: "Servers")
+        serversPane.addServer()
+        guard serversPane.serverSheet == nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.serversPane.serverSheet == nil else { return }
+            self.serversPane.addServer()
+        }
+    }
+
     var selectedPane: String? {
         tabs.tabViewItems.indices.contains(tabs.selectedTabViewItemIndex)
             ? tabs.tabViewItems[tabs.selectedTabViewItemIndex].label : nil

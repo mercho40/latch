@@ -22,6 +22,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var sessions: () -> [MenuBarSession] = { [] }
     var onSelect: ((UUID) -> Void)?
     var onNewSession: (() -> Void)?
+    var onNewRemoteSession: (() -> Void)?
+    /// Whether there is a server to start a remote session on; without one the item is left out.
+    var canStartRemoteSession: () -> Bool = { false }
 
     private let defaults: UserDefaults
     private let installsStatusItem: Bool
@@ -101,6 +104,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let new = NSMenuItem(title: "New Session…", action: #selector(newSession), keyEquivalent: "")
         new.target = self
         menu.addItem(new)
+        if canStartRemoteSession() {
+            let remote = NSMenuItem(title: "New Remote Session…", action: #selector(newRemoteSession), keyEquivalent: "")
+            remote.target = self
+            menu.addItem(remote)
+        }
         menu.addItem(.separator())
         let hide = NSMenuItem(title: "Hide Menu Bar Icon", action: #selector(hide), keyEquivalent: "")
         hide.target = self
@@ -138,6 +146,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func newSession() {
         NSApplication.shared.activate()
         onNewSession?()
+    }
+
+    @objc private func newRemoteSession() {
+        NSApplication.shared.activate()
+        onNewRemoteSession?()
     }
 
     @objc private func hide() { isVisible = false }

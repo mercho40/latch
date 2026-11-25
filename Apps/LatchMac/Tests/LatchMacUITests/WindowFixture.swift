@@ -83,6 +83,8 @@ final class WindowFixture {
     func window(attention: AttentionCenter? = nil, menuBar: MenuBarController? = nil, settings: AgentSettings? = nil,
                 servers: (any ServerStore)? = nil, remoteConnector: (any RemoteSessionConnector)? = nil,
                 serverCheck: ServerCheck? = nil) -> SessionWindowController {
+        // Never the shared settings: a pick a test makes would be remembered for every later run.
+        let settings = settings ?? AgentSettings(defaults: UserDefaults(suiteName: "LatchFixture-\(UUID().uuidString)")!)
         let window = SessionWindowController(store: SessionStore(directory: storeDirectory),
                                              attention: attention, menuBar: menuBar, settings: settings, servers: servers,
                                              remoteConnector: remoteConnector, serverCheck: serverCheck)

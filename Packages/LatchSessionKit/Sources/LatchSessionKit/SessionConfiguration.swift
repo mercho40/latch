@@ -12,6 +12,16 @@ public struct SessionPicker: Equatable, Sendable {
     /// none of the three with places of their own.
     public var name: String? = nil
 
+    /// What a choice of this picker is remembered by, across agent processes: the agent's own
+    /// option ID, or the legacy method that sets it.
+    public var key: String {
+        switch route {
+        case let .config(id): id
+        case .legacyModel: "session/set_model"
+        case .legacyMode: "session/set_mode"
+        }
+    }
+
     public struct Choice: Equatable, Sendable {
         public let value: String
         public let name: String
@@ -107,6 +117,16 @@ public struct SessionConfiguration: Equatable, Sendable {
         default:
             return false
         }
+    }
+
+    /// Every picker, in the order remembered choices are put back: the model first, since
+    /// choosing one can change what the others offer, and the permission mode last.
+    public var pickers: [SessionPicker] {
+        [model, effort].compactMap { $0 } + extras + [permissionMode].compactMap { $0 }
+    }
+
+    public func picker(forKey key: String) -> SessionPicker? {
+        pickers.first { $0.key == key }
     }
 
     public subscript(kind: SessionPicker.Kind) -> SessionPicker? {

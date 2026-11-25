@@ -27,6 +27,42 @@ final class TranscriptLayoutTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
     }
 
+    func testASentFileStillOnThisMacLinksToIt() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("latch-attachment-\(UUID().uuidString).txt")
+        try "notes".write(to: file, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let line = TranscriptMessageViewAccess.attachmentLine([
+            ChatAttachment(kind: .file, name: "notes.txt", path: file.path),
+            ChatAttachment(kind: .image, name: "gone.png", path: "/nonexistent/gone.png"),
+        ])
+        let string = line.string as NSString
+        let present = string.range(of: "notes.txt")
+        XCTAssertEqual(line.attribute(.link, at: present.location, effectiveRange: nil) as? URL, file)
+        XCTAssertNil(line.attribute(.link, at: string.range(of: "gone.png").location, effectiveRange: nil))
+    }
+
+    func testACodeBlockCopiesItsCodeAlone() throws {
+        let view = transcript([ChatMessage(role: .assistant, text: "Run this:\n\n```swift\nlet a = 1\nlet b = 2\n```\n\nThen this.")])
+        func textViews(_ view: NSView) -> [TranscriptTextView] {
+            view.subviews.compactMap { $0 as? TranscriptTextView } + view.subviews.flatMap(textViews)
+        }
+        let text = try XCTUnwrap(textViews(view).first)
+        let manager = try XCTUnwrap(text.layoutManager)
+        let string = text.string as NSString
+        func point(of needle: String) -> NSPoint {
+            let glyph = manager.glyphIndexForCharacter(at: string.range(of: needle).location)
+            let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            return NSPoint(x: text.textContainerOrigin.x + line.minX + 4, y: text.textContainerOrigin.y + line.midY)
+        }
+        XCTAssertNil(text.codeBlock(at: point(of: "Run this")), "Prose is not code")
+        let block = try XCTUnwrap(text.codeBlock(at: point(of: "let b")))
+        let board = NSPasteboard(name: NSPasteboard.Name("latch-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        text.pasteboard = board
+        XCTAssertTrue(text.copyCodeBlock(at: block.range.location))
+        XCTAssertEqual(board.string(forType: .string), "let a = 1\nlet b = 2")
+    }
+
     func testLiveResizeDefersOffscreenRowsAndSettlesThemWhenTheDragEnds() throws {
         let messages = conversation(60)
         let reference = transcript(messages)

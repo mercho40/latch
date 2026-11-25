@@ -2,9 +2,10 @@ import AppKit
 import LatchRemoteProtocol
 import LatchSessionKit
 
-/// The Servers pane: the `latch-server`s this Mac runs remote sessions on. A list, and below it
-/// what belongs to the selected server: whether its token may cross an unencrypted network,
-/// the command its Custom agent runs, and a check that it answers.
+/// The Servers pane: the `latch-server`s this Mac runs remote sessions on. A list, each server
+/// checked as the pane appears and after every change to it, and below it what belongs to the
+/// selected server: whether its token may cross an unencrypted network, the command its Custom
+/// agent runs, and what its last check found.
 @MainActor
 final class ServersSettingsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private let store: any ServerStore
@@ -23,10 +24,29 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
     let commandField = NSTextField(string: "")
     private let commandCaption = NSTextField(labelWithString: "Custom agent command")
     let testButton = NSButton(title: "Test Connection", target: nil, action: nil)
-    /// What the last Test Connection found, for the selected server only.
+    /// What the last check of the selected server found, in full.
     let testResult = WrappingLabel(wrappingLabelWithString: "")
     private let testSpinner = NSProgressIndicator()
-    private var testTask: Task<Void, Never>?
+    /// The selected server's name, over the settings that belong to it.
+    private let serverHeading = NSTextField(labelWithString: "")
+
+    enum Check: Equatable {
+        case checking
+        case reachable(summary: String, version: String)
+        case failed(reason: String, brief: String)
+    }
+    /// The last check of each server, and the profile it was run with: a check describes the
+    /// server as it was, so a changed one is checked again.
+    private(set) var checks: [UUID: Check] = [:]
+    private var checked: [UUID: ServerProfile] = [:]
+    private var checkTasks: [UUID: Task<Void, Never>] = [:]
+
+    /// The server's last check, unless the server has changed since it ran.
+    func check(of server: ServerProfile) -> Check? {
+        checked[server.id] == server ? checks[server.id] : nil
+    }
+    /// This app's version, which a server's is compared with. Nil in package tests.
+    var appVersion = ServerCheckText.appVersion
     /// Kept by ID, so a list that changes under the selection keeps the same server selected.
     private var selectedID: UUID?
     /// The Add or Edit sheet while it is open.
@@ -134,18 +154,21 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         testRow.orientation = .horizontal
         testRow.spacing = 8
 
-        let content = NSStackView(views: [group, listButtons, problemLabel, unencryptedCheckbox, unencryptedWarning,
+        serverHeading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        serverHeading.lineBreakMode = .byTruncatingTail
+        let content = NSStackView(views: [group, listButtons, problemLabel, serverHeading, unencryptedCheckbox, unencryptedWarning,
                                           commandCaption, commandField, testRow, testResult])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 8
         content.setCustomSpacing(20, after: listButtons)
+        content.setCustomSpacing(10, after: serverHeading)
         content.setCustomSpacing(2, after: unencryptedCheckbox)
         content.setCustomSpacing(20, after: unencryptedWarning)
         content.setCustomSpacing(20, after: commandField)
         content.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         content.translatesAutoresizingMaskIntoConstraints = false
-        for view in [group, problemLabel, commandField, testResult] {
+        for view in [group, problemLabel, serverHeading, commandField, testResult] {
             view.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -40).isActive = true
         }
         // Under the checkbox's title, as a checkbox's explanation sits in System Settings.
@@ -183,10 +206,21 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         store.reload()
     }
 
-    /// Opening Settings is not a request to edit the first field.
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        checkTasks.values.forEach { $0.cancel() }
+        checkTasks.removeAll()
+        // Checked afresh the next time the pane appears.
+        checked.removeAll()
+        for (id, check) in checks where check == .checking { checks[id] = nil }
+    }
+
+    /// Opening Settings is not a request to edit the first field. Checked once on screen: a pane
+    /// reached through its toolbar tab has no window yet while it is about to appear.
     override func viewDidAppear() {
         super.viewDidAppear()
         view.window?.makeFirstResponder(nil)
+        checkServers()
     }
 
     // MARK: Data
@@ -197,23 +231,52 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         guard store.servers.indices.contains(row) else { return nil }
         let identifier = NSUserInterfaceItemIdentifier("server")
         let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? ServerRowView ?? ServerRowView(identifier: identifier)
-        cell.configure(store.servers[row])
+        let server = store.servers[row]
+        cell.configure(server, check: check(of: server), appVersion: appVersion)
         return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard selectedServer?.id != selectedID else { return refresh() }
         selectedID = selectedServer?.id
-        clearTestResult()
         refresh()
     }
 
-    /// A result describes the profile it was run with; after a change it would mislead.
-    private func clearTestResult() {
-        testTask?.cancel()
-        testTask = nil
-        testSpinner.stopAnimation(nil)
-        testResult.stringValue = ""
+    /// Checks every server whose last check was of another profile, or `force` whatever it was:
+    /// all at once, each into its own row.
+    private func checkServers(force: UUID? = nil) {
+        // Only while the pane is on screen, but Test Connection always runs.
+        let due = view.window != nil ? store.servers.filter { checked[$0.id] != $0 || $0.id == force }
+            : store.servers.filter { $0.id == force }
+        for server in due {
+            checked[server.id] = server
+            checkTasks[server.id]?.cancel()
+            checks[server.id] = .checking
+            let check = check
+            let options = server.connectionOptions
+            checkTasks[server.id] = Task { [weak self] in
+                let result: Check
+                do {
+                    let info = try await check(options)
+                    result = .reachable(summary: ServerCheckText.summary(info), version: info.version)
+                } catch {
+                    result = .failed(reason: ServerCheckText.failure(error), brief: ServerCheckText.brief(error))
+                }
+                guard let self, !Task.isCancelled, self.checked[server.id] == server else { return }
+                self.checks[server.id] = result
+                self.checkTasks[server.id] = nil
+                self.reloadRow(server.id)
+                self.refresh()
+            }
+            reloadRow(server.id)
+        }
+        let gone = Set(checks.keys).subtracting(store.servers.map(\.id))
+        for id in gone { checks[id] = nil; checked[id] = nil; checkTasks.removeValue(forKey: id)?.cancel() }
+        refresh()
+    }
+
+    private func reloadRow(_ id: UUID) {
+        guard let row = store.servers.firstIndex(where: { $0.id == id }) else { return }
+        table.reloadData(forRowIndexes: [row], columnIndexes: [0])
     }
 
     @objc private func storeChanged() {
@@ -221,7 +284,7 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         table.reloadData()
         let row = selectedID.flatMap { id in store.servers.firstIndex { $0.id == id } }
         table.selectRowIndexes(row.map { [$0] } ?? [], byExtendingSelection: false)
-        refresh()
+        checkServers()
     }
 
     private func refresh() {
@@ -246,6 +309,22 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         unencryptedWarning.textColor = textColor
         commandCaption.textColor = server == nil ? .disabledControlTextColor : .labelColor
         if commandEditServerID == nil { commandField.stringValue = server?.customCommand ?? "" }
+        serverHeading.stringValue = server?.name ?? ""
+        serverHeading.isHidden = server == nil
+        refreshTestResult()
+    }
+
+    /// The selected server's last check in full, with the version note a row has no room for.
+    private func refreshTestResult() {
+        let check = selectedServer.flatMap(check(of:))
+        if check == .checking { testSpinner.startAnimation(nil) } else { testSpinner.stopAnimation(nil) }
+        testResult.stringValue = switch check {
+        case .checking?: "Connecting to \(selectedServer?.address ?? "")…"
+        case let .reachable(summary, version)?:
+            [summary, ServerCheckText.versionNote(server: version, app: appVersion)].compactMap { $0 }.joined(separator: "\n")
+        case let .failed(reason, _)?: reason
+        case nil: ""
+        }
     }
 
     private func update(_ id: UUID? = nil, _ change: (inout ServerProfile) -> Void) {
@@ -253,7 +332,6 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
         var server = original
         change(&server)
         guard server != original else { return }
-        if server.id == selectedServer?.id { clearTestResult() }
         save(server)
     }
 
@@ -315,7 +393,6 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
                 guard edited != current else { return }
                 profile = edited
             }
-            if profile.id == self.selectedServer?.id { self.clearTestResult() }
             self.save(profile)
             if let row = self.store.servers.firstIndex(where: { $0.id == profile.id }) {
                 self.table.selectRowIndexes([row], byExtendingSelection: false)
@@ -376,32 +453,22 @@ final class ServersSettingsViewController: NSViewController, NSTableViewDataSour
 
     @objc func testConnection() {
         guard let server = selectedServer else { return }
-        testTask?.cancel()
-        testResult.stringValue = "Connecting to \(server.address)…"
-        testSpinner.startAnimation(nil)
-        let check = check
-        let options = server.connectionOptions
-        let id = server.id
-        testTask = Task { [weak self] in
-            let text: String
-            do { text = ServerCheckText.summary(try await check(options)) }
-            catch { text = ServerCheckText.failure(error) }
-            guard let self, !Task.isCancelled, self.selectedServer?.id == id else { return }
-            self.testSpinner.stopAnimation(nil)
-            self.testResult.stringValue = text
-            self.testTask = nil
-        }
+        checkServers(force: server.id)
     }
 
-    /// Waits for Test Connection to finish, for tests.
-    func testFinished() async { await testTask?.value }
+    /// Waits for the checks in flight, Test Connection's included, for tests.
+    func testFinished() async {
+        for task in checkTasks.values { await task.value }
+    }
 }
 
-/// A server's name over its address.
+/// A server's name over its address and what its last check found, with a dot in the
+/// check's colour before the name.
 @MainActor
 private final class ServerRowView: NSTableCellView {
     private let name = NSTextField(labelWithString: "")
     private let address = NSTextField(labelWithString: "")
+    private let dot = ServerStatusDot()
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -414,8 +481,12 @@ private final class ServerRowView: NSTableCellView {
             addSubview(label)
         }
         textField = name
+        addSubview(dot)
         NSLayoutConstraint.activate([
-            name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            dot.centerYAnchor.constraint(equalTo: name.centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            name.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 6),
             name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             name.topAnchor.constraint(equalTo: topAnchor, constant: 2),
             address.leadingAnchor.constraint(equalTo: name.leadingAnchor),
@@ -426,10 +497,39 @@ private final class ServerRowView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("Not used") }
 
-    func configure(_ server: ServerProfile) {
+    func configure(_ server: ServerProfile, check: ServersSettingsViewController.Check?, appVersion: String?) {
         name.stringValue = server.name
-        address.stringValue = server.address
-        setAccessibilityLabel("\(server.name), \(server.address)")
+        let secondary: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                                                        .foregroundColor: NSColor.secondaryLabelColor]
+        let detail = NSMutableAttributedString(string: server.address, attributes: secondary)
+        var spoken = [server.name, server.address]
+        // Only what the check found; the dot already says the server is being checked.
+        switch check {
+        case let .reachable(_, version)?:
+            dot.status = .connected
+            let older = ServerCheckText.versionNote(server: version, app: appVersion) != nil
+            var attributes = secondary
+            if older { attributes[.foregroundColor] = NSColor.systemOrange }
+            detail.append(NSAttributedString(string: " · Latch \(version)", attributes: attributes))
+            spoken += ["Connected", "Latch \(version)" + (older ? ", not this app’s version" : "")]
+        case let .failed(_, brief)?:
+            dot.status = .failed
+            var attributes = secondary
+            attributes[.foregroundColor] = NSColor.systemRed
+            detail.append(NSAttributedString(string: " · \(brief)", attributes: attributes))
+            spoken += ["Can’t connect", brief]
+        case .checking?:
+            dot.status = .checking
+            spoken.append("Checking")
+        case nil:
+            dot.status = .checking
+        }
+        address.attributedStringValue = detail
+        toolTip = check.flatMap {
+            if case let .failed(reason, _) = $0 { return reason }
+            return nil
+        }
+        setAccessibilityLabel(spoken.joined(separator: ", "))
     }
 }
 

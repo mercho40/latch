@@ -242,7 +242,9 @@ final class SessionPersistenceTests: XCTestCase {
         }
 
         func window() -> SessionWindowController {
-            let window = SessionWindowController(store: SessionStore(directory: storeDirectory))
+            let window = SessionWindowController(
+                store: SessionStore(directory: storeDirectory),
+                settings: AgentSettings(defaults: UserDefaults(suiteName: "LatchPersistence-\(UUID().uuidString)")!))
             windows.append(window)
             return window
         }

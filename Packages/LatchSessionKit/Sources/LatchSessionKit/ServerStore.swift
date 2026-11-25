@@ -189,6 +189,37 @@ public enum ServerCheckText {
         }
         return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
+
+    /// What went wrong in a few words, naming the setting when one would fix it: for a list
+    /// row, where `failure` is too long.
+    public static func brief(_ error: any Error) -> String {
+        switch error as? LatchRemoteClientError {
+        case .destinationNotAllowed?: "Needs “Allow unencrypted network”"
+        case .unauthorized?: "Token not accepted"
+        case .protocolMismatch?: "Different Latch version"
+        case .handshakeTimedOut?, .timedOut?, .silence?: "Didn’t answer"
+        case .connectionFailed?, .connectionLost?, .closed?: "Not reachable"
+        case .invalidEndpoint?: "Port not valid"
+        default: failure(error)
+        }
+    }
+
+    /// Whether the server runs a different Latch from this app, in words; nil when they match or
+    /// either version is unknown. The protocol is negotiated, so a difference still connects,
+    /// but an older server lacks what was added since.
+    public static func versionNote(server: String, app: String?) -> String? {
+        guard let app, !app.isEmpty, !server.isEmpty, server != app else { return nil }
+        return server.compare(app, options: .numeric) == .orderedAscending
+            ? "latch-server \(server) is older than this app (\(app)): update it to use everything this app offers."
+            : "latch-server \(server) is newer than this app (\(app)): update Latch to use everything it offers."
+    }
+
+    /// This app's own version, such as "0.2.0"; nil outside an app bundle, as in package tests,
+    /// whose test runner has a version of its own.
+    public static var appVersion: String? {
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return nil }
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
 }
 
 /// Where server profiles live. Injected the way `AgentSettings` is: the app uses a private

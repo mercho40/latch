@@ -506,12 +506,19 @@ public final class RootViewController: UISplitViewController, UISplitViewControl
     @objc func serversCommand() { presentServers() }
     @objc func previousSessionCommand() { step(by: -1) }
     @objc func nextSessionCommand() { step(by: 1) }
+    /// ⌘1 to ⌘9, in the list's order; the number rides in the command's property list.
+    @objc func goToSessionCommand(_ sender: UIKeyCommand) {
+        let ordered = library.orderedSessions
+        guard let number = (sender.propertyList as? String).flatMap(Int.init),
+              let index = SessionShortcut.index(forNumber: number, count: ordered.count) else { return }
+        show(ordered[index])
+    }
 
     public override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         switch action {
         case #selector(newSessionCommand): !servers.servers.isEmpty && presentedViewController == nil
         case #selector(serversCommand): presentedViewController == nil
-        case #selector(previousSessionCommand), #selector(nextSessionCommand):
+        case #selector(previousSessionCommand), #selector(nextSessionCommand), #selector(goToSessionCommand):
             !library.orderedSessions.isEmpty && presentedViewController == nil
         default: super.canPerformAction(action, withSender: sender)
         }

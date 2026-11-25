@@ -152,9 +152,12 @@ final class RemoteSessionTests: XCTestCase {
                 board.clearContents()
                 _ = copy.target?.perform(copy.action, with: copy)
                 XCTAssertEqual(board.string(forType: .string), "/srv/app")
+                let settings = try XCTUnwrap(items.first { $0.title == "Server Settings…" })
+                XCTAssertEqual((settings.representedObject as? ServerReference)?.serverID, remoteSession.location.serverID)
             }
             let local = sidebar.contextMenuItems(for: sidebar.allSessions[1])
             XCTAssertTrue(try XCTUnwrap(local.first { $0.title.hasPrefix("Reveal") }).isEnabled)
+            XCTAssertNil(local.first { $0.title == "Server Settings…" })
             let copyLocal = try XCTUnwrap(local.first { $0.title.hasPrefix("Copy") })
             _ = copyLocal.target?.perform(copyLocal.action, with: copyLocal)
             XCTAssertEqual(board.string(forType: .string), fixture.workspace.path)
@@ -380,8 +383,9 @@ final class RemoteSessionTests: XCTestCase {
             connector.client.endRuntime()
             try await fixture.settle { session.model.phase == .disconnected }
             XCTAssertFalse(session.banner.isHidden)
-            XCTAssertEqual(session.banner.displayedTitle, "Claude Code can’t start on vps")
-            XCTAssertEqual(session.banner.displayedActions, ["Retry", "Server Settings…"])
+            // It was running, so it did not fail to start: it quit, and starting it again is the remedy.
+            XCTAssertEqual(session.banner.displayedTitle, "Claude Code quit unexpectedly on vps")
+            XCTAssertEqual(session.banner.displayedActions, ["Restart", "Server Settings…"])
         }
     }
 
@@ -461,6 +465,85 @@ final class RemoteSessionTests: XCTestCase {
         XCTAssertLessThan(width, 500)
     }
 
+    func testANewRemoteSessionStartsWhereTheLastOneOnItsServerWorked() async throws {
+        let recent: [UUID: [NewRemoteSessionController.Recent]] = [
+            vps.id: [.init(path: "/srv/app", agent: .codex), .init(path: "/srv/site", agent: .claudeCode),
+                     .init(path: "/srv/app", agent: .claudeCode)],
+        ]
+        let sheet = NewRemoteSessionController(servers: [mini, vps], check: home("/home/me"), recent: recent,
+                                               preferredServer: vps.id)
+        XCTAssertEqual(sheet.selectedServer, vps)
+        XCTAssertEqual(sheet.selectedAgent, .codex)
+        XCTAssertEqual(sheet.pathField.stringValue, "", "Filled in once the sheet is on screen")
+        XCTAssertFalse(sheet.recentPopUp.isHidden)
+        XCTAssertEqual(sheet.recentPopUp.itemArray.compactMap { $0.representedObject as? String }, ["/srv/app", "/srv/site"])
+        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        sheet.begin(over: parent)
+        await sheet.homeFetched()
+        XCTAssertEqual(sheet.pathField.stringValue, "/srv/app", "The last folder, not the home folder")
+        sheet.recentPopUp.selectItem(at: 2)
+        _ = sheet.recentPopUp.target?.perform(sheet.recentPopUp.action, with: sheet.recentPopUp)
+        XCTAssertEqual(sheet.pathField.stringValue, "/srv/site")
+        sheet.selectServer(at: 0)
+        await sheet.homeFetched()
+        XCTAssertEqual(sheet.pathField.stringValue, "/srv/site", "A folder the user chose stays")
+        XCTAssertTrue(sheet.recentPopUp.isHidden, "Nothing ran on mini yet")
+        sheet.cancel()
+    }
+
+    func testSwitchingServerTakesItsLastAgentUntilOneIsChosen() {
+        let recent: [UUID: [NewRemoteSessionController.Recent]] = [
+            vps.id: [.init(path: "/srv/app", agent: .codex)],
+            mini.id: [.init(path: "/home/mini/tool", agent: .claudeCode)],
+        ]
+        let sheet = NewRemoteSessionController(servers: [mini, vps], check: home("/home/me"), recent: recent,
+                                               preferredServer: vps.id)
+        XCTAssertEqual(sheet.selectedAgent, .codex)
+        sheet.selectServer(at: 0)
+        XCTAssertEqual(sheet.selectedAgent, .claudeCode, "Where mini's folder goes, its agent goes")
+
+        sheet.agentPopUp.selectItem(withTitle: AgentPreset.fx.title)
+        _ = sheet.agentPopUp.target?.perform(sheet.agentPopUp.action, with: sheet.agentPopUp)
+        sheet.selectServer(at: 1)
+        XCTAssertEqual(sheet.selectedAgent, .fx, "An agent picked here stays")
+    }
+
+    func testAServerFolderStaysRecentAfterItsLastSessionCloses() async throws {
+        try await WindowFixture.run { fixture in
+            let window = fixture.window(servers: InMemoryServerStore([mini, vps]), serverCheck: home("/home/vps"))
+            await window.restoreSessions(launchEnvironment: fixture.environment)
+            window.addRemoteSession(serverID: vps.id, path: "/srv/app", agent: .codex)
+            window.closeSession(nil)
+            XCTAssertTrue(try fixture.sidebar(in: window).allSessions.isEmpty)
+            XCTAssertEqual(window.recents.entries.first?.location, .remote(serverID: vps.id, path: "/srv/app"))
+
+            window.newRemoteSession(nil)
+            let sheet = try XCTUnwrap(window.remoteSessionSheet)
+            XCTAssertEqual(sheet.selectedServer, vps, "The server used last, though nothing on it is open")
+            XCTAssertEqual(sheet.selectedAgent, .codex)
+            XCTAssertEqual(sheet.recentPopUp.itemArray.compactMap { $0.representedObject as? String }, ["/srv/app"])
+            await sheet.homeFetched()
+            XCTAssertEqual(sheet.pathField.stringValue, "/srv/app")
+            sheet.cancel()
+        }
+    }
+
+    func testARecentPlaceWhoseCustomCommandIsGoneStartsOnTheFirstAgent() async throws {
+        try await WindowFixture.run { fixture in
+            let window = fixture.window(servers: InMemoryServerStore([mini, vps]), serverCheck: home("/home/me"))
+            await window.restoreSessions(launchEnvironment: fixture.environment)
+            let sidebar = try fixture.sidebar(in: window)
+            window.startSession(at: RecentPlace(location: .remote(serverID: mini.id, path: "/srv/tool"), agent: .custom,
+                                                server: mini.name))
+            XCTAssertEqual(sidebar.selectedSession?.savedSession.agentID, AgentPreset.allCases[0].rawValue,
+                           "mini has no custom command")
+            window.startSession(at: RecentPlace(location: .remote(serverID: vps.id, path: "/srv/tool"), agent: .custom,
+                                                server: vps.name))
+            XCTAssertEqual(sidebar.selectedSession?.savedSession.agentID, AgentPreset.custom.rawValue)
+            XCTAssertEqual(sidebar.selectedSession?.location, .remote(serverID: vps.id, path: "/srv/tool"))
+        }
+    }
+
     func testAnUnreachableServerLeavesTheHomeShorthand() async throws {
         try await WindowFixture.run { fixture in
             let window = fixture.window(servers: InMemoryServerStore([vps]),
@@ -471,6 +554,7 @@ final class RemoteSessionTests: XCTestCase {
             await sheet.homeFetched()
             XCTAssertEqual(sheet.pathField.stringValue, "~")
             XCTAssertTrue(sheet.canCreate)
+            XCTAssertEqual(sheet.caption.stringValue, "Can’t connect: Not reachable. A session made now tries again when it starts.")
             sheet.cancel()
             XCTAssertNil(window.remoteSessionSheet)
             XCTAssertTrue(try fixture.sidebar(in: window).allSessions.isEmpty)

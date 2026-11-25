@@ -1,5 +1,6 @@
 import Foundation
 import LatchAgentCore
+import LatchSessionKit
 
 /// Agent preferences that outlive a session: which agents the composer picker offers, and
 /// the command a custom ACP agent runs. A session still owns the harness it connected on —
@@ -11,6 +12,7 @@ final class AgentSettings {
     private let defaults: UserDefaults
     private static let disabledKey = "LatchDisabledAgents"
     private static let customCommandKey = "LatchCustomAgentCommand"
+    private static let choicesKey = "LatchAgentChoices"
 
     /// Posted when a stored preference changes, so every open session refreshes its picker
     /// without polling. A notification rather than a callback because the settings object
@@ -21,12 +23,26 @@ final class AgentSettings {
 
     private(set) var disabled: Set<AgentPreset>
     private(set) var customCommand: String
+    /// The last pick made in each of an agent's pickers, by agent and then `SessionPicker.key`:
+    /// what a new session on that agent starts on, when the agent still offers it.
+    private var choices: [String: [String: String]]
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
         let stored = defaults.array(forKey: Self.disabledKey) as? [String] ?? []
         disabled = Set(stored.compactMap(AgentPreset.init(rawValue:)))
         customCommand = defaults.string(forKey: Self.customCommandKey) ?? ""
+        choices = defaults.dictionary(forKey: Self.choicesKey) as? [String: [String: String]] ?? [:]
+    }
+
+    func choices(for preset: AgentPreset) -> [String: String] { choices[preset.rawValue] ?? [:] }
+
+    /// Not the permission mode: one picked to let a single task run unattended must not
+    /// become every later session's way of working without the user choosing it again.
+    func remember(_ kind: SessionPicker.Kind?, key: String, value: String, for preset: AgentPreset) {
+        guard kind != .permissionMode, choices[preset.rawValue]?[key] != value else { return }
+        choices[preset.rawValue, default: [:]][key] = value
+        defaults.set(choices, forKey: Self.choicesKey)
     }
 
     /// Agents the picker offers. The session's own harness is always included by the

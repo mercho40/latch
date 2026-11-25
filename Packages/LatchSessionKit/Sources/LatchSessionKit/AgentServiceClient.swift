@@ -16,8 +16,9 @@ public enum AgentLaunch: Equatable, Sendable {
 /// status: a lost link is not a failure until it is permanent, and nothing waits on it.
 public enum SessionLinkState: Equatable, Sendable {
     case connected
-    /// Lost at `since`; commands and the turn in flight wait for it to come back.
-    case reconnecting(server: String, since: Date)
+    /// Lost at `since`; commands and the turn in flight wait for it to come back. `lastAttempt`
+    /// says in a few words why the latest try to reconnect failed, once one has.
+    case reconnecting(server: String, since: Date, lastAttempt: String? = nil)
     /// For good, in plain words that name the server. The event stream finishes after it.
     /// `runtimeGone` when the server answered but no longer has the session's agent. Otherwise
     /// the link was turned away, not the agent: it is most likely still running there, so the

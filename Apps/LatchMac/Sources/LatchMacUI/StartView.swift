@@ -1,21 +1,25 @@
 import AppKit
 
-/// What the detail pane shows with no session selected: the workspaces used recently, one
-/// click from a new session each, and a way to choose another. The pane around it also
-/// takes a folder dropped from the Finder.
+/// What the detail pane shows with no session selected: the workspaces used recently, here and
+/// on servers, one click from a new session each, and a way to choose another. The pane around
+/// it also takes a folder dropped from the Finder.
 @MainActor
 final class StartView: NSView {
     nonisolated static let maximumRecents = 5
     private static let columnWidth: CGFloat = 400
 
-    var onOpenWorkspace: ((URL) -> Void)?
+    var onOpenPlace: ((RecentPlace) -> Void)?
     var onChooseFolder: (() -> Void)?
+    var onNewRemoteSession: (() -> Void)?
     private let stack = NSStackView()
     private let heading = NSTextField(labelWithString: "What should we build?")
     private let recents = NSStackView()
     private let choose = NSButton(title: "New Session…", target: nil, action: nil)
+    /// Beside New Session…, once there is a server to start one on.
+    private let chooseRemote = NSButton(title: "New Remote Session…", target: nil, action: nil)
     private let hint = NSTextField(labelWithString: "Or drop a folder here from the Finder.")
-    private(set) var shownRecents: [URL] = []
+    private(set) var shownRecents: [RecentPlace] = []
+    private var shownOffersRemote = false
     private var loaded = false
 
     override init(frame frameRect: NSRect) {
@@ -34,15 +38,24 @@ final class StartView: NSView {
         choose.target = self
         choose.action = #selector(chooseFolder)
         choose.toolTip = "Choose a workspace folder (⌘N)"
+        chooseRemote.bezelStyle = .rounded
+        chooseRemote.controlSize = .large
+        chooseRemote.target = self
+        chooseRemote.action = #selector(newRemoteSession)
+        chooseRemote.toolTip = "Choose a server and a folder on it (⌥⌘N)"
+        chooseRemote.isHidden = true
+        let buttons = NSStackView(views: [choose, chooseRemote])
+        buttons.orientation = .horizontal
+        buttons.spacing = 12
         hint.font = .systemFont(ofSize: 12)
         hint.textColor = .tertiaryLabelColor
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 0
-        for view in [heading, recents, choose, hint] as [NSView] { stack.addArrangedSubview(view) }
+        for view in [heading, recents, buttons, hint] as [NSView] { stack.addArrangedSubview(view) }
         stack.setCustomSpacing(28, after: heading)
         stack.setCustomSpacing(24, after: recents)
-        stack.setCustomSpacing(12, after: choose)
+        stack.setCustomSpacing(12, after: buttons)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -56,41 +69,37 @@ final class StartView: NSView {
 
     required init?(coder: NSCoder) { fatalError("Not used") }
 
-    /// Workspaces from Open Recent that still exist, newest first.
-    nonisolated static func recentWorkspaces(_ urls: [URL]) -> [URL] {
-        Array(urls.filter { url in
-            var isDirectory: ObjCBool = false
-            return url.isFileURL && FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
-        }.prefix(maximumRecents))
-    }
-
-    /// Nil reads Open Recent.
-    func reload(_ given: [URL]? = nil) {
-        let urls = given ?? Self.recentWorkspaces(NSDocumentController.shared.recentDocumentURLs)
-        guard !loaded || urls != shownRecents else { return }
+    /// The places come from the recent list, which leaves out folders and servers that are gone.
+    func reload(_ places: [RecentPlace], offersRemote: Bool) {
+        guard !loaded || places != shownRecents || offersRemote != shownOffersRemote else { return }
         loaded = true
-        shownRecents = urls
+        shownRecents = places
+        shownOffersRemote = offersRemote
         recents.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for url in urls {
-            let row = RecentWorkspaceRow(url: url) { [weak self] in self?.onOpenWorkspace?(url) }
+        for place in places.prefix(Self.maximumRecents) {
+            let row = RecentWorkspaceRow(place: place) { [weak self] in self?.onOpenPlace?(place) }
             recents.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: recents.widthAnchor).isActive = true
         }
-        recents.isHidden = urls.isEmpty
+        recents.isHidden = places.isEmpty
+        chooseRemote.isHidden = !offersRemote
         // With nothing recent, choosing a folder is the only way forward, so it takes Return.
-        choose.keyEquivalent = urls.isEmpty ? "\r" : ""
+        choose.keyEquivalent = places.isEmpty ? "\r" : ""
     }
 
     @objc private func chooseFolder() { onChooseFolder?() }
+
+    @objc private func newRemoteSession() { onNewRemoteSession?() }
 }
 
-/// One recent workspace: its Finder icon, its name, and where it is. Clicking starts a session there.
+/// One recent workspace: its Finder icon, or a server's, its name, and where it is. Clicking
+/// starts a session there.
 @MainActor
 private final class RecentWorkspaceRow: NSButton {
     private let open: () -> Void
     private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
 
-    init(url: URL, open: @escaping () -> Void) {
+    init(place: RecentPlace, open: @escaping () -> Void) {
         self.open = open
         super.init(frame: .zero)
         title = ""
@@ -99,15 +108,21 @@ private final class RecentWorkspaceRow: NSButton {
         setButtonType(.momentaryChange)
         target = self
         action = #selector(fire)
-        let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: url.path))
+        let icon = NSImageView(image: place.icon)
         icon.imageScaling = .scaleProportionallyUpOrDown
-        let name = NSTextField(labelWithString: url.lastPathComponent)
+        if place.location.isRemote {
+            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .regular)
+            icon.contentTintColor = .secondaryLabelColor
+            icon.imageScaling = .scaleNone
+        }
+        let name = NSTextField(labelWithString: place.title)
         name.font = .systemFont(ofSize: 13, weight: .medium)
         name.lineBreakMode = .byTruncatingTail
-        let path = NSTextField(labelWithString: (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath)
+        let path = NSTextField(labelWithString: place.detail)
         path.font = .systemFont(ofSize: 11)
         path.textColor = .secondaryLabelColor
         path.lineBreakMode = .byTruncatingMiddle
+        path.isHidden = place.detail.isEmpty
         for view in [icon, name, path] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -122,14 +137,16 @@ private final class RecentWorkspaceRow: NSButton {
             icon.heightAnchor.constraint(equalToConstant: 28),
             name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
             name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-            name.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+            // A folder at the top of a server has no parent to show, so its name sits centred.
+            place.detail.isEmpty ? name.centerYAnchor.constraint(equalTo: centerYAnchor)
+                : name.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
             path.leadingAnchor.constraint(equalTo: name.leadingAnchor),
             path.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             path.topAnchor.constraint(equalTo: centerYAnchor, constant: 2),
         ])
-        toolTip = url.path
-        setAccessibilityLabel("Start a session in \(url.lastPathComponent)")
-        setAccessibilityHelp(url.path)
+        toolTip = place.tooltip
+        setAccessibilityLabel(place.accessibilityLabel)
+        setAccessibilityHelp(place.tooltip)
     }
 
     required init?(coder: NSCoder) { fatalError("Not used") }

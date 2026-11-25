@@ -40,6 +40,21 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertNotNil(menu.items.first { $0.title == "New Session…" })
     }
 
+    func testNewRemoteSessionIsOfferedOnceThereIsAServer() throws {
+        let controller = MenuBarController(defaults: defaults, installsStatusItem: false)
+        XCTAssertNil(controller.buildMenu().items.first { $0.title == "New Remote Session…" })
+        var asked = false
+        controller.canStartRemoteSession = { true }
+        controller.onNewRemoteSession = { asked = true }
+        let menu = controller.buildMenu()
+        let new = try XCTUnwrap(menu.items.firstIndex { $0.title == "New Session…" })
+        let remote = menu.items[new + 1]
+        XCTAssertEqual(remote.title, "New Remote Session…")
+        XCTAssertEqual(remote.keyEquivalent, "")
+        _ = remote.target?.perform(remote.action, with: remote)
+        XCTAssertTrue(asked)
+    }
+
     func testHeadlineCountsRunningSessionsWhenNothingIsWaiting() {
         let controller = MenuBarController(defaults: defaults, installsStatusItem: false)
         controller.sessions = { [self.row("One", phase: .prompting, needsPermission: false),

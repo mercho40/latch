@@ -3,26 +3,61 @@ import XCTest
 @testable import LatchMacUI
 
 final class ComposerControlsViewTests: XCTestCase {
-    @MainActor func testLargeControlsWrapWithoutOverlapAtNarrowWidths() {
+    @MainActor func testPickersThatDoNotFitFoldIntoOneRow() {
         let (bar, controls) = makeBar()
         for width: CGFloat in [340, 440, 748] {
-            bar.setFrameSize(NSSize(width: width, height: 200))
-            bar.setFrameSize(NSSize(width: width, height: bar.intrinsicContentSize.height))
+            bar.setFrameSize(NSSize(width: width, height: ComposerControlsView.controlHeight))
             bar.layoutSubtreeIfNeeded()
-            for control in controls {
+            XCTAssertEqual(bar.intrinsicContentSize.height, ComposerControlsView.controlHeight)
+            let shown = controls.filter { !(($0 as? NSPopUpButton).map(bar.isFolded) ?? false) }
+            for control in shown {
+                XCTAssertEqual(control.frame.minY, 0, "A control wrapped onto a second row at \(width)")
                 XCTAssertGreaterThanOrEqual(control.frame.height, ComposerControlsView.controlHeight)
                 XCTAssertGreaterThanOrEqual(control.frame.minX, 0)
                 XCTAssertLessThanOrEqual(control.frame.maxX, width)
-                XCTAssertLessThanOrEqual(control.frame.maxY, bar.bounds.height)
             }
-            for i in controls.indices {
-                for j in controls.indices where i < j {
-                    XCTAssertFalse(controls[i].frame.intersects(controls[j].frame))
+            for i in shown.indices {
+                for j in shown.indices where i < j {
+                    XCTAssertFalse(shown[i].frame.intersects(shown[j].frame))
                 }
             }
             XCTAssertEqual(controls.last!.frame.maxX, width)
-            if width == 340 { XCTAssertGreaterThan(bar.bounds.height, ComposerControlsView.controlHeight) }
         }
+        bar.setFrameSize(NSSize(width: 340, height: ComposerControlsView.controlHeight))
+        bar.layoutSubtreeIfNeeded()
+        let pickers = controls.compactMap { $0 as? NSPopUpButton }
+        // The last pickers fold first, and the first keeps its place.
+        XCTAssertFalse(bar.isFolded(pickers[0]))
+        XCTAssertTrue(bar.isFolded(pickers[2]))
+    }
+
+    @MainActor func testTheMoreMenuChoosesForAFoldedPicker() throws {
+        let (bar, controls) = makeBar()
+        let pickers = controls.compactMap { $0 as? NSPopUpButton }
+        let target = ActionRecorder()
+        for (index, picker) in pickers.enumerated() {
+            picker.setAccessibilityLabel("Picker \(index)")
+            picker.target = target
+            picker.action = #selector(ActionRecorder.record(_:))
+            for item in picker.itemArray { item.representedObject = item.title }
+        }
+        bar.setFrameSize(NSSize(width: 340, height: ComposerControlsView.controlHeight))
+        bar.layoutSubtreeIfNeeded()
+        let more = try XCTUnwrap(bar.subviews.compactMap { $0 as? NSPopUpButton }.first { $0.pullsDown })
+        XCTAssertFalse(more.isHidden)
+        let menu = try XCTUnwrap(more.menu)
+        bar.menuNeedsUpdate(menu)
+        let headers = menu.items.filter(\.isSectionHeader).map(\.title)
+        XCTAssertEqual(headers, pickers.filter(bar.isFolded).compactMap { $0.accessibilityLabel() })
+        XCTAssertTrue(headers.contains("Picker 2"))
+        // The section's current choice is checked, and choosing another sends the picker's action.
+        let section = try XCTUnwrap(menu.items.firstIndex { $0.title == "Picker 2" })
+        XCTAssertEqual(menu.items[section + 1].state, .on)
+        let other = menu.items[section + 2]
+        XCTAssertEqual(other.title, "Other")
+        menu.performActionForItem(at: section + 2)
+        XCTAssertTrue(target.senders.last === pickers[2])
+        XCTAssertEqual(pickers[2].titleOfSelectedItem, "Other")
     }
 
     @MainActor func testUnavailablePickersLeaveOnlyTrailingAction() {
@@ -70,6 +105,11 @@ final class ComposerControlsViewTests: XCTestCase {
         }
     }
 
+    @MainActor private final class ActionRecorder: NSObject {
+        var senders: [AnyObject] = []
+        @objc func record(_ sender: AnyObject) { senders.append(sender) }
+    }
+
     @MainActor private func picker(_ titles: [String]) -> NSPopUpButton {
         let picker = NSPopUpButton(frame: .zero, pullsDown: false)
         picker.controlSize = .large
@@ -87,7 +127,9 @@ final class ComposerControlsViewTests: XCTestCase {
             return picker
         }
         let actions = [NSButton(title: "Stop", target: nil, action: nil), NSButton(title: "Send", target: nil, action: nil)]
-        return (ComposerControlsView(pickers: pickers.map { ComposerControlsView.Slot($0) }, actions: actions),
+        // As in the composer: the first picker shortens rather than folding.
+        return (ComposerControlsView(pickers: pickers.enumerated().map { ComposerControlsView.Slot($1, folds: $0 > 0) },
+                                     actions: actions),
                 pickers + actions)
     }
 }

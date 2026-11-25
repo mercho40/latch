@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import LatchRemoteClient
 import LatchRemoteProtocol
 import LatchServiceProtocol
@@ -42,6 +43,10 @@ public final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnect
     /// Each server a client was made for, as it was last seen, so its clients hear only of saves
     /// that changed it.
     private var known: [UUID: ServerProfile] = [:]
+    /// Watches this device's network once `probeOnNetworkChange()` asks it to.
+    private var pathMonitor: NWPathMonitor?
+    /// The path last seen; the first update describes the network as it already is.
+    private var lastPath: NWPath?
 
     private struct WeakClient {
         weak var client: RemoteAgentServiceClient?
@@ -87,10 +92,46 @@ public final class ChannelRemoteSessionConnector: NSObject, RemoteSessionConnect
     /// A device that slept, or an app the system suspended, has usually lost its connections
     /// without hearing so. Checking each link now reconnects at once rather than after a
     /// heartbeat or a backoff wait.
+    ///
+    /// A server takes only a few handshakes at once from one address, so its sessions are
+    /// checked a little apart rather than all in the same instant.
     @objc public func probeAll() {
+        var perServer: [UUID: Int] = [:]
         for client in liveClients {
-            Task { await client.probe() }
+            let place = perServer[client.serverID, default: 0]
+            perServer[client.serverID] = place + 1
+            Task {
+                if place > 0 { try? await Task.sleep(for: Self.probeSpacing * place) }
+                await client.probe()
+            }
         }
+    }
+
+    static let probeSpacing = Duration.milliseconds(150)
+
+    /// Checks every link whenever this device's network changes, such as joining another Wi‑Fi
+    /// network or Tailscale coming up: a connection on the old path is usually gone without
+    /// a word, and waiting for the heartbeat to notice takes most of a minute.
+    public func probeOnNetworkChange() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in self?.pathChanged(to: path) }
+        }
+        monitor.start(queue: DispatchQueue(label: "dev.latchapp.network-path"))
+        pathMonitor = monitor
+    }
+
+    private func pathChanged(to path: NWPath) {
+        defer { lastPath = path }
+        guard let last = lastPath, path.status == .satisfied else { return }
+        let interfaces = { (path: NWPath) in path.availableInterfaces.map(\.name) }
+        guard last.status != .satisfied || interfaces(last) != interfaces(path) else { return }
+        probeAll()
+    }
+
+    isolated deinit {
+        pathMonitor?.cancel()
     }
 
     /// A saved server's clients are told of its new name, address, port, token or network

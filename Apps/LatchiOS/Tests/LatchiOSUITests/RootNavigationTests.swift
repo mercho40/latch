@@ -93,13 +93,16 @@ final class RootNavigationTests: XCTestCase {
         let session = LatchAppDelegate.sessionMenu
         let keys = session.children.flatMap { ($0 as? UIMenu)?.children ?? [] }.compactMap { $0 as? UIKeyCommand }
             .map { ($0.title, $0.input ?? "", $0.modifierFlags) }
+        let numbers = (1...8).map { "Session \($0)" } + ["Last Session"]
         XCTAssertEqual(keys.map(\.0), ["Send", "Stop", "Add Photos…", "Copy Path", "Previous Session", "Next Session",
-                                        "Previous Session", "Next Session"])
-        XCTAssertEqual(keys.map(\.1), ["\r", ".", "a", "c", UIKeyCommand.inputUpArrow, UIKeyCommand.inputDownArrow, "[", "]"])
+                                        "Previous Session", "Next Session"] + numbers)
+        XCTAssertEqual(keys.map(\.1), ["\r", ".", "a", "c", UIKeyCommand.inputUpArrow, UIKeyCommand.inputDownArrow, "[", "]"]
+                       + (1...9).map(String.init))
+        XCTAssertTrue(keys.suffix(9).allSatisfy { $0.2 == .command }, "⌘1 to ⌘9, as Safari's tabs")
         XCTAssertEqual(keys[3].2, [.command, .alternate], "Finder's Copy as Pathname")
         XCTAssertEqual(keys[4].2, [.command, .alternate], "The Mac's Previous Session")
         let commands = session.children.flatMap { ($0 as? UIMenu)?.children ?? [] }.compactMap { $0 as? UICommand }
-        XCTAssertEqual(commands.filter { $0.attributes.contains(.hidden) }.count, 2, "⌘[ and ⌘] still work, unlisted")
+        XCTAssertEqual(commands.filter { $0.attributes.contains(.hidden) }.count, 11, "⌘[, ⌘] and ⌘1 to ⌘9 work, unlisted")
         // No server: nothing to start a session on.
         XCTAssertFalse(root.canPerformAction(#selector(RootViewController.newSessionCommand), withSender: nil))
         XCTAssertTrue(root.canPerformAction(#selector(RootViewController.serversCommand), withSender: nil))

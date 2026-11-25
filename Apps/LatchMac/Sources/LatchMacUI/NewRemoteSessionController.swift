@@ -3,13 +3,20 @@ import LatchAgentCore
 import LatchRemoteProtocol
 import LatchSessionKit
 
-/// Session ▸ New Remote Session…: which server, which folder on it, which agent. Latch cannot
-/// browse a server's folders, so the folder is typed, starting from the server's home, which
-/// one handshake reports.
+/// File ▸ New Remote Session…: which server, which folder on it, which agent. Latch cannot
+/// browse a server's folders, so the folder is typed, starting from where the last session on
+/// that server worked, or else from the server's home, which one handshake reports. The same
+/// handshake says whether the server answers at all, before a session is made on it.
 @MainActor
 final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate {
     struct Choice: Equatable {
         let serverID: UUID
+        let path: String
+        let agent: AgentPreset
+    }
+
+    /// Where a session on a server worked, and on which agent.
+    struct Recent: Equatable {
         let path: String
         let agent: AgentPreset
     }
@@ -19,6 +26,8 @@ final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate 
 
     private let servers: [ServerProfile]
     private let check: ServerCheck
+    /// Each server's recent sessions, the most recent first.
+    private let recent: [UUID: [Recent]]
     let serverPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     let pathField = NSTextField(string: "")
     let agentPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -27,13 +36,22 @@ final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate 
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     /// Once the folder is typed in, a home folder arriving late must not replace it.
     private var pathEdited = false
+    /// Once an agent is picked here, another server's last agent must not replace it.
+    private var agentChosen = false
     private var homeFetch: Task<Void, Never>?
     private var fetchGeneration = UUID()
     private(set) var isFetchingHome = false
+    /// The folders sessions on the selected server last worked in, to pick from.
+    let recentPopUp = NSPopUpButton(frame: .zero, pullsDown: true)
+    /// Under the folder: what it is, or that the server did not answer.
+    let caption = NSTextField(labelWithString: "")
+    private static let folderCaption = "A folder on the server. The agent works there."
 
-    init(servers: [ServerProfile], check: @escaping ServerCheck) {
+    init(servers: [ServerProfile], check: @escaping ServerCheck, recent: [UUID: [Recent]] = [:],
+         preferredServer: UUID? = nil) {
         self.servers = servers
         self.check = check
+        self.recent = recent
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 200),
                             styleMask: [.titled, .docModalWindow], backing: .buffered, defer: true)
         panel.title = "New Remote Session"
@@ -43,8 +61,9 @@ final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate 
             serverPopUp.addItem(withTitle: "\(server.name) — \(server.address)")
             serverPopUp.lastItem?.representedObject = server.id
         }
-        serverPopUp.selectItem(at: 0)
+        serverPopUp.selectItem(at: preferredServer.flatMap { id in servers.firstIndex { $0.id == id } } ?? 0)
         refreshAgents()
+        refreshRecent()
         // Sized once the pop-ups hold their items, so the sheet is measured as it will show.
         if let view = panel.contentView { panel.setContentSize(view.fittingSize) }
     }
@@ -87,14 +106,25 @@ final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate 
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
         spinner.setContentHuggingPriority(.required, for: .horizontal)
-        let pathRow = NSStackView(views: [pathField, spinner])
+        recentPopUp.isBordered = false
+        recentPopUp.setAccessibilityLabel("Recent folders")
+        recentPopUp.toolTip = "Recent folders on this server"
+        (recentPopUp.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        recentPopUp.target = self
+        recentPopUp.action = #selector(recentChosen)
+        recentPopUp.setContentHuggingPriority(.required, for: .horizontal)
+        let pathRow = NSStackView(views: [pathField, spinner, recentPopUp])
         pathRow.orientation = .horizontal
         pathRow.spacing = 6
         pathField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         pathRow.widthAnchor.constraint(equalToConstant: Self.fieldWidth).isActive = true
-        let caption = NSTextField(labelWithString: "A folder on the server. The agent works there.")
+        caption.stringValue = Self.folderCaption
         caption.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         caption.textColor = .secondaryLabelColor
+        caption.lineBreakMode = .byWordWrapping
+        caption.maximumNumberOfLines = 2
+        caption.preferredMaxLayoutWidth = Self.fieldWidth
+        caption.widthAnchor.constraint(lessThanOrEqualToConstant: Self.fieldWidth).isActive = true
         agentPopUp.target = self
         agentPopUp.action = #selector(agentChanged)
         agentPopUp.setAccessibilityLabel("Agent")
@@ -164,7 +194,11 @@ final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate 
             agentPopUp.addItem(withTitle: preset.title)
             agentPopUp.lastItem?.representedObject = preset.rawValue
         }
-        if let previous, let index = agentPopUp.itemArray.firstIndex(where: { $0.representedObject as? String == previous.rawValue }) {
+        // The agent the last session on this server ran, unless one was chosen here; on a server
+        // with none, the agent already showing.
+        let last = selectedServer.flatMap { recent[$0.id]?.first?.agent }
+        let wanted = agentChosen ? previous ?? last : last ?? previous
+        if let wanted, let index = agentPopUp.itemArray.firstIndex(where: { $0.representedObject as? String == wanted.rawValue }) {
             agentPopUp.selectItem(at: index)
         } else {
             agentPopUp.selectItem(at: 0)
@@ -174,10 +208,42 @@ final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate 
 
     @objc private func serverChanged() {
         refreshAgents()
+        refreshRecent()
         fetchHome()
     }
 
-    @objc private func agentChanged() { refreshButtons() }
+    private var recentPaths: [String] {
+        guard let server = selectedServer else { return [] }
+        var seen: Set<String> = []
+        return (recent[server.id] ?? []).map(\.path).filter { seen.insert($0).inserted }.prefix(8).map { $0 }
+    }
+
+    /// The clock beside the folder lists where sessions on this server worked; hidden when none has.
+    private func refreshRecent() {
+        recentPopUp.removeAllItems()
+        let paths = recentPaths
+        recentPopUp.isHidden = paths.isEmpty
+        guard !paths.isEmpty else { return }
+        // A pull-down shows its first item as the button.
+        recentPopUp.addItem(withTitle: "")
+        recentPopUp.lastItem?.image = NSImage(systemSymbolName: "clock", accessibilityDescription: "Recent folders")
+        for path in paths {
+            recentPopUp.addItem(withTitle: path)
+            recentPopUp.lastItem?.representedObject = path
+        }
+    }
+
+    @objc private func recentChosen() {
+        guard let path = recentPopUp.selectedItem?.representedObject as? String else { return }
+        pathField.stringValue = path
+        pathEdited = true
+        refreshButtons()
+    }
+
+    @objc private func agentChanged() {
+        agentChosen = true
+        refreshButtons()
+    }
 
     /// Test hook: picks a server the way the pop-up does.
     func selectServer(at index: Int) {
@@ -195,20 +261,41 @@ final class NewRemoteSessionController: NSWindowController, NSTextFieldDelegate 
         fetchGeneration = generation
         isFetchingHome = true
         spinner.startAnimation(nil)
-        if !pathEdited { pathField.stringValue = "" }
+        // Where the last session here worked, while the server is asked; its home only if none has.
+        let lastPath = recentPaths.first
+        if !pathEdited { pathField.stringValue = lastPath ?? "" }
         pathField.placeholderString = "Finding the home folder on \(server.name)…"
+        showCaption(nil)
         refreshButtons()
         let check = check
         let options = server.connectionOptions
         homeFetch = Task { [weak self] in
-            let home = try? await check(options).home
+            let result: Result<String, any Error>
+            do { result = .success(try await check(options).home) } catch { result = .failure(error) }
             guard let self, self.fetchGeneration == generation, !Task.isCancelled else { return }
             self.isFetchingHome = false
             self.spinner.stopAnimation(nil)
             self.pathField.placeholderString = "Path on the server"
-            if !self.pathEdited { self.pathField.stringValue = home.flatMap { $0.isEmpty ? nil : $0 } ?? "~" }
+            let home = try? result.get()
+            if !self.pathEdited, lastPath == nil { self.pathField.stringValue = home.flatMap { $0.isEmpty ? nil : $0 } ?? "~" }
+            if case let .failure(error) = result { self.showCaption(error) }
             self.refreshButtons()
         }
+    }
+
+    /// The folder's explanation, or, when the server did not answer, why: a session made anyway
+    /// keeps trying, but it is better known before than after.
+    private func showCaption(_ error: (any Error)?) {
+        guard let error else {
+            caption.stringValue = Self.folderCaption
+            caption.textColor = .secondaryLabelColor
+            caption.toolTip = nil
+            return
+        }
+        caption.stringValue = "Can’t connect: \(ServerCheckText.brief(error)). A session made now tries again when it starts."
+        caption.textColor = .systemRed
+        caption.toolTip = ServerCheckText.failure(error)
+        if let window, let view = window.contentView { window.setContentSize(view.fittingSize) }
     }
 
     func controlTextDidChange(_ obj: Notification) {

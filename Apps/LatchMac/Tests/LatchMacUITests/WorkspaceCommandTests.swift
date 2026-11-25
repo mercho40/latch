@@ -21,6 +21,23 @@ final class WorkspaceCommandTests: XCTestCase {
         }
     }
 
+    func testAWorkspaceOpensWithTheApplicationsThatOpenFolders() async throws {
+        try await WindowFixture.run { fixture in
+            let (_, sidebar) = try await fixture.restored(fixture.session(1))
+            let item = try XCTUnwrap(sidebar.contextMenuItems(for: sidebar.allSessions[0]).first { $0.title == "Open With" })
+            XCTAssertTrue(item.isEnabled)
+            let menu = try XCTUnwrap(item.submenu as? WorkspaceApplicationsMenu)
+            menu.menuNeedsUpdate(menu)
+            XCTAssertFalse(menu.items.isEmpty)
+            let names = menu.items.map(\.title)
+            XCTAssertFalse(names.contains("Finder"), "Reveal in Finder has its own item")
+            XCTAssertFalse(names.contains("Terminal"), "So does Terminal")
+            XCTAssertFalse(names.contains("Latch"))
+            let apps = WorkspaceApplications.applications(for: fixture.workspace)
+            XCTAssertEqual(menu.items.count, max(1, apps.count))
+        }
+    }
+
     func testDroppingAFileIsRefused() async throws {
         try await WindowFixture.run { fixture in
             let (_, sidebar) = try await fixture.restored(fixture.session(1))

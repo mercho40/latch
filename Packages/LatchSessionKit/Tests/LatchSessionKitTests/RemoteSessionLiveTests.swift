@@ -166,7 +166,7 @@ final class RemoteSessionLiveTests: XCTestCase {
             try await eventually("the reply") { self.texts(model).last == "onetwothree" }
             XCTAssertEqual(texts(model), ["slow", "onetwothree"], "Nothing arrives twice")
             XCTAssertEqual(server.lines(in: "prompts.log"), 1, "The prompt ran once")
-            let reconnecting = try XCTUnwrap(links.firstIndex { if case .reconnecting(server: "loopback", _) = $0 { true } else { false } },
+            let reconnecting = try XCTUnwrap(links.firstIndex { if case .reconnecting(server: "loopback", _, _) = $0 { true } else { false } },
                                              "Saw \(links)")
             XCTAssertTrue(links[(reconnecting + 1)...].contains(.connected), "Saw \(links)")
             XCTAssertEqual(model.linkState, .connected)

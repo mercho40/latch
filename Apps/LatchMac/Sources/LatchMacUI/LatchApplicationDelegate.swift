@@ -18,6 +18,8 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
     /// so it never reads or writes this Mac's real servers.
     private var servers: any ServerStore = FileServerStore.shared
     private var agentSettings: AgentSettings = .shared
+    /// Recent places, here and on servers. A smoke run keeps its own in memory.
+    private var recents = RecentWorkspaces(defaults: nil)
     /// The runtime the remote smoke leaves running when it quits, checked once the quit has run.
     private var remoteSmokeRuntime: String?
     /// The remote smoke's folder, when it made one itself. A run that passes leaves it to the
@@ -39,11 +41,20 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         settingsWindow?.select(pane: "Agents")
     }
 
+    /// Settings ▸ Servers with Add Server… begun: the one way a server is added, from wherever
+    /// a session could not start for want of one.
+    @objc func addServer(_ sender: Any?) {
+        showSettings(sender)
+        settingsWindow?.beginAddServer()
+    }
+
     /// Settings, open on the Servers pane: where a remote session's server is fixed. A sender
     /// that names the server selects it, so an edit made next is to the right one.
     @objc func showServerSettings(_ sender: Any?) {
         showSettings(sender)
-        if let server = (sender as? ServerReference)?.serverID {
+        // A banner sends the reference itself; a menu item carries it.
+        let reference = (sender as? NSMenuItem)?.representedObject ?? sender
+        if let server = (reference as? ServerReference)?.serverID {
             settingsWindow?.select(server: server)
         } else {
             settingsWindow?.select(pane: "Servers")
@@ -73,6 +84,9 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         if smokeTest {
             agentSettings = AgentSettings(defaults: UserDefaults(suiteName: "LatchSmoke-\(UUID().uuidString)")!)
             servers = InMemoryServerStore()
+        } else {
+            recents = RecentWorkspaces(defaults: .standard)
+            recents.seedIfNeeded(from: NSDocumentController.shared.recentDocumentURLs)
         }
         var remoteSmokeSetup: (server: ServerProfile, workspace: URL)?
         if let remoteSmoke {
@@ -88,15 +102,18 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         // servers it added itself. The remote smoke saves to its own folder, so the quit's save
         // can be checked, and waits long between reconnects, so the rest of a turn is journaled
         // while its link is down and has to be replayed.
+        let connector = remoteSmoke == nil
+            ? ChannelRemoteSessionConnector(servers: servers, notificationCenter: NSWorkspace.shared.notificationCenter)
+            : ChannelRemoteSessionConnector(servers: servers,
+                                            backoff: LatchRemoteBackoff(initial: .seconds(30), maximum: .seconds(30)),
+                                            notificationCenter: NSWorkspace.shared.notificationCenter)
+        // The remote smoke drops its link on purpose, and must see the backoff alone bring it back.
+        if remoteSmoke == nil, !smokeTest { connector.probeOnNetworkChange() }
         let controller = SessionWindowController(
             store: remoteSmokeLibrary.map { SessionStore(directory: $0) }
                 ?? (smokeTest ? nil : SessionStore(directory: SessionStore.defaultDirectory)),
             attention: attention, menuBar: menuBar, settings: agentSettings, servers: servers,
-            remoteConnector: remoteSmoke == nil
-                ? ChannelRemoteSessionConnector(servers: servers, notificationCenter: NSWorkspace.shared.notificationCenter)
-                : ChannelRemoteSessionConnector(servers: servers,
-                                                backoff: LatchRemoteBackoff(initial: .seconds(30), maximum: .seconds(30)),
-                                                notificationCenter: NSWorkspace.shared.notificationCenter)
+            remoteConnector: connector, recents: recents
         )
         self.controller = controller
         controller.showWindow(nil)
@@ -247,6 +264,8 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         let fileItem = NSMenuItem()
         let file = NSMenu(title: "File")
         file.addItem(withTitle: "New Session…", action: #selector(SessionWindowController.newSession(_:)), keyEquivalent: "n")
+        file.addItem(withTitle: "New Remote Session…", action: #selector(SessionWindowController.newRemoteSession(_:)), keyEquivalent: "n")
+            .keyEquivalentModifierMask = [.command, .option]
         let recentItem = file.addItem(withTitle: "Open Recent", action: nil, keyEquivalent: "")
         let recent = NSMenu(title: "Open Recent")
         recent.delegate = self
@@ -322,21 +341,30 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         menu.addItem(viewItem)
         let sessionItem = NSMenuItem()
         let session = NSMenu(title: "Session")
-        session.addItem(withTitle: "New Remote Session…", action: #selector(SessionWindowController.newRemoteSession(_:)), keyEquivalent: "n")
-            .keyEquivalentModifierMask = [.command, .option]
-        session.addItem(.separator())
         session.addItem(withTitle: "Attach Files…", action: #selector(SessionWindowController.attachFiles(_:)), keyEquivalent: "a")
+            .keyEquivalentModifierMask = [.command, .shift]
+        session.addItem(withTitle: "Choose Model…", action: #selector(SessionWindowController.chooseModel(_:)), keyEquivalent: "m")
+            .keyEquivalentModifierMask = [.command, .shift]
+        session.addItem(withTitle: "Choose Effort…", action: #selector(SessionWindowController.chooseEffort(_:)), keyEquivalent: "e")
+            .keyEquivalentModifierMask = [.command, .shift]
+        session.addItem(withTitle: "Choose Permission Mode…", action: #selector(SessionWindowController.choosePermissionMode(_:)), keyEquivalent: "p")
             .keyEquivalentModifierMask = [.command, .shift]
         session.addItem(.separator())
         session.addItem(withTitle: "Stop", action: #selector(SessionWindowController.stopSession(_:)), keyEquivalent: ".")
         session.addItem(withTitle: "Fork Session", action: #selector(SessionWindowController.forkSelectedSession(_:)), keyEquivalent: "n")
             .keyEquivalentModifierMask = [.command, .shift]
         session.addItem(withTitle: "Resume Conversation…", action: #selector(SessionWindowController.resumeConversation(_:)), keyEquivalent: "")
+        session.addItem(withTitle: "Restart Agent", action: #selector(SessionWindowController.restartAgent(_:)), keyEquivalent: "r")
+            .keyEquivalentModifierMask = [.command, .shift]
         session.addItem(withTitle: "Disconnect", action: #selector(SessionWindowController.disconnectSession(_:)), keyEquivalent: "")
         session.addItem(.separator())
         session.addItem(withTitle: "Rename…", action: #selector(SessionWindowController.renameSession(_:)), keyEquivalent: "")
         session.addItem(withTitle: "Reveal Workspace in Finder", action: #selector(SessionWindowController.revealWorkspace(_:)), keyEquivalent: "")
         session.addItem(withTitle: "Open Workspace in Terminal", action: #selector(SessionWindowController.openWorkspaceInTerminal(_:)), keyEquivalent: "")
+        session.addItem(withTitle: "Open Workspace With", action: nil, keyEquivalent: "").submenu =
+            WorkspaceApplicationsMenu(title: "Open Workspace With") {
+                (NSApp.mainWindow?.windowController as? SessionWindowController)?.selectedLocalURL
+            }
         session.addItem(.separator())
         session.addItem(withTitle: "Previous Session", action: #selector(SessionWindowController.previousSession(_:)),
                         keyEquivalent: String(UnicodeScalar(NSUpArrowFunctionKey)!))
@@ -344,6 +372,14 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
         session.addItem(withTitle: "Next Session", action: #selector(SessionWindowController.nextSession(_:)),
                         keyEquivalent: String(UnicodeScalar(NSDownArrowFunctionKey)!))
             .keyEquivalentModifierMask = [.command, .option]
+        // ⌘1 to ⌘9: kept out of sight, as Safari keeps its tab shortcuts, but working.
+        for number in 1...9 {
+            let item = session.addItem(withTitle: number == 9 ? "Last Session" : "Session \(number)",
+                                       action: #selector(SessionWindowController.goToSession(_:)), keyEquivalent: "\(number)")
+            item.tag = number
+            item.isHidden = true
+            item.allowsKeyEquivalentWhenHidden = true
+        }
         sessionItem.submenu = session
         menu.addItem(sessionItem)
         let windowItem = NSMenuItem()
@@ -367,33 +403,32 @@ public final class LatchApplicationDelegate: NSObject, NSApplicationDelegate, NS
 
     // MARK: Open Recent
 
+    /// Folders here and on servers, newest first, named as their sidebar groups are.
     public func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === recentMenu else { return }
         menu.removeAllItems()
-        let urls = NSDocumentController.shared.recentDocumentURLs
-        guard !urls.isEmpty else {
+        let places = controller?.recentPlaces(limit: RecentWorkspaces.capacity) ?? []
+        guard !places.isEmpty else {
             menu.addItem(withTitle: "No Recent Workspaces", action: nil, keyEquivalent: "").isEnabled = false
             return
         }
-        for url in urls {
-            let item = menu.addItem(withTitle: url.lastPathComponent, action: #selector(openRecentWorkspace), keyEquivalent: "")
-            item.target = self
-            item.representedObject = url
-            item.toolTip = url.path
-            let icon = NSWorkspace.shared.icon(forFile: url.path)
-            icon.size = NSSize(width: 16, height: 16)
-            item.image = icon
+        // The window validates them, so none is enabled behind its sheet.
+        for place in places {
+            menu.addItem(place.menuItem(action: #selector(SessionWindowController.openRecentPlace(_:)), target: controller))
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Clear Menu", action: #selector(clearRecentWorkspaces), keyEquivalent: "").target = self
     }
 
-    @objc private func openRecentWorkspace(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        controller?.openWorkspace(url)
+    /// The menu has no key equivalents, so AppKit need not fill it to look for one.
+    public func menuHasKeyEquivalent(_ menu: NSMenu, for event: NSEvent,
+                                     target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+                                     action: UnsafeMutablePointer<Selector?>) -> Bool {
+        false
     }
 
     @objc private func clearRecentWorkspaces() {
+        if let controller { controller.clearRecentPlaces() } else { recents.clear() }
         NSDocumentController.shared.clearRecentDocuments(nil)
     }
 

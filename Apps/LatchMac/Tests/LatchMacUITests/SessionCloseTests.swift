@@ -158,6 +158,11 @@ final class SessionCloseTests: XCTestCase {
         XCTAssertTrue(NSApp.windowsMenu === menu.items.compactMap(\.submenu).first { $0.title == "Window" })
         XCTAssertNotNil(NSApp.servicesMenu)
         let file = try XCTUnwrap(menu.items.compactMap(\.submenu).first { $0.title == "File" })
+        XCTAssertEqual(Array(file.items.prefix(3).map(\.title)), ["New Session…", "New Remote Session…", "Open Recent"])
+        let remote = file.items[1]
+        XCTAssertEqual(remote.action, #selector(SessionWindowController.newRemoteSession(_:)))
+        XCTAssertEqual(remote.keyEquivalent, "n")
+        XCTAssertEqual(remote.keyEquivalentModifierMask, [.command, .option])
         let close = try XCTUnwrap(file.items.first { $0.title == "Close Session" })
         XCTAssertEqual(close.keyEquivalent, String(UnicodeScalar(NSBackspaceCharacter)!))
         XCTAssertEqual(close.keyEquivalentModifierMask, [.command])
@@ -170,6 +175,7 @@ final class SessionCloseTests: XCTestCase {
 
         // Session commands and find are reachable by keyboard, not just by mouse.
         let session = try XCTUnwrap(menu.items.compactMap(\.submenu).first { $0.title == "Session" })
+        XCTAssertEqual(session.items.first?.title, "Attach Files…", "Starting a session is File's")
         let stop = try XCTUnwrap(session.items.first { $0.title == "Stop" })
         XCTAssertEqual(stop.keyEquivalent, ".")
         XCTAssertEqual(stop.keyEquivalentModifierMask, [.command])

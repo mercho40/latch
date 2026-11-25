@@ -299,7 +299,7 @@ final class RemoteSessionLiveWindowTests: XCTestCase {
                 try await fixture.settle { if case .reconnecting = session.model.linkState { true } else { false } }
                 XCTAssertEqual(session.banner.displayedTitle, "Reconnecting to loopback…")
                 XCTAssertEqual(session.banner.displayedSeverity, .info)
-                XCTAssertEqual(session.banner.displayedActions, [])
+                XCTAssertEqual(session.banner.displayedActions, ["Retry Now"])
                 XCTAssertFalse(session.banner.isHidden)
                 XCTAssertEqual(session.sidebarRow(now: Date()).detail, "Reconnecting to loopback…")
                 XCTAssertEqual(session.menuBarRow.status, "Reconnecting to loopback…")
